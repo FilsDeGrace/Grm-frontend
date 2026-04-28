@@ -105,7 +105,7 @@ const Bar = ({ value, color }) => (
   </div>
 );
 const Lbl = ({ children }) => (
-  <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".11em",fontWeight:700,marginBottom:5 }}>{children}</div>
+  <div style={{ fontSize:8,color:C.text,opacity:.5,textTransform:"uppercase",letterSpacing:".11em",fontWeight:700,marginBottom:5 }}>{children}</div>
 );
 const Panel = ({ label, color, bg, children }) => (
   <div style={{ background:bg,border:`1px solid ${color}22`,borderRadius:9,padding:"10px 11px" }}>
@@ -779,7 +779,7 @@ function BookNowButton({ fixture }) {
     <div style={{ marginTop:4 }}>
       {!open ? (
         <button onClick={() => setOpen(true)} disabled={!canBook} className="gb"
-          style={{ width:"100%",background:canBook?C.accentDim:"transparent",border:`1px solid ${canBook?C.accentBorder:C.faint}`,color:canBook?C.accent:C.faint,padding:"5px 0",fontSize:9,fontWeight:700,letterSpacing:".05em" }}>
+          style={{ width:"100%",background:canBook?C.accentDim:"transparent",border:`1px solid ${canBook?C.accentBorder:C.text}`,opacity:canBook?1:.3,color:canBook?C.accent:C.text,padding:"5px 0",fontSize:9,fontWeight:700,letterSpacing:".05em" }}>
           🎟️ Book Now
         </button>
       ) : (
@@ -1340,6 +1340,10 @@ const makeStatFilters = (xgT) => [
   { id:"volatile",      label:"Volatile",        desc:"Volatile league",                 fn:f=>!!f.volatileLeague },
   { id:"live",          label:"🔴 LIVE",         desc:"Currently in progress",           fn:f=>{ const s=(f.state||"").toLowerCase(); return ["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"].includes(s); } },
   { id:"scheduled",     label:"⏰ Upcoming",     desc:"Not yet started",                 fn:f=>{ const s=(f.state||"").toLowerCase(); return s===""||s==="notstarted"||s==="scheduled"||s==="prematch"; } },
+  // Draw-specific filters — mirrors server STRATEGY_DEFS.draw
+  { id:"draw_prob",     label:"Draw ≥30%",       desc:"Draw probability ≥30%",           fn:f=>f.markets.draw>=30 },
+  { id:"draw_balanced", label:"Balanced",        desc:"|homeWin−awayWin| ≤15",           fn:f=>Math.abs((f.markets.homeWin||0)-(f.markets.awayWin||0))<=15 },
+  { id:"draw_xg_range", label:"xG 1.4–2.6",     desc:"Total xG between 1.4 and 2.6",    fn:f=>{ const t=(f.markets.homeXG||0)+(f.markets.awayXG||0); return t>=1.4&&t<=2.6; } },
 ];
 
 const STRATEGIES_UI = [
@@ -1350,7 +1354,7 @@ const STRATEGIES_UI = [
   { id:"away_goalfest", label:"⚡ A Goalfest",  filters:["awaywin_str"],           family:"awayo05",  desc:"awayXG ≥2.0 · awayO05 ≥85% · awayWin ≥55%" },
   { id:"over25_quality",label:"📈 O2.5 Quality",filters:["xg_both","btts_q"],     family:"over25",   desc:"O2.5 ≥70% · total xG ≥2.6 · BTTS ≥55%" },
   { id:"low_scoring",   label:"🔒 Low Scoring", filters:["cs_home","cs_away"],     family:"under25",  desc:"homeCS AND awayCS ≥30% · total xG <2.0 · U2.5 ≥65%" },
-  { id:"draw",          label:"〰 Draw",         filters:[],                        family:"draw",     desc:"draw ≥30% · |homeWin−awayWin| ≤15 · total xG 1.4–2.6" },
+  { id:"draw",          label:"〰 Draw",         filters:["draw_prob","draw_balanced","draw_xg_range"], family:"draw", desc:"draw ≥30% · |homeWin−awayWin| ≤15 · total xG 1.4–2.6" },
 ];
 
 function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs }) {
@@ -1423,7 +1427,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             const active = activeStrategy === strat.id;
             return (
               <button key={strat.id} onClick={() => applyStrategy(strat)} className="gb" title={strat.desc}
-                style={{ padding:"4px 12px",background:active?C.amber:"transparent",color:active?C.accentText:C.muted,border:`1px solid ${active?C.amber:C.faint}`,fontSize:9,textTransform:"none",letterSpacing:".03em" }}>
+                style={{ padding:"4px 12px",background:active?C.amber:"transparent",color:active?C.accentText:C.text,opacity:active?1:.5,border:`1px solid ${active?C.amber:C.text}`,fontSize:9,textTransform:"none",letterSpacing:".03em" }}>
                 {strat.label}
               </button>
             );
@@ -1509,12 +1513,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:mCols,gap:6,padding:"8px 10px",background:isSelected?"rgba(99,102,241,0.1)":C.surface,borderRadius:8,border:`1px solid ${isSelected?C.edge:C.border}`,cursor:"pointer",transition:"all .15s",alignItems:"center" }}
               onClick={() => setSelected(f)}>
               <div onClick={e=>{e.stopPropagation();toggleSelect(f.id);}}>
-                <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isSelected?C.edge:C.faint}`,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
+                <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isSelected?C.edge:C.text}`,opacity:isSelected?1:.3,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
                   {isSelected && <span style={{ fontSize:9,color:"#fff",fontWeight:900 }}>✓</span>}
                 </div>
               </div>
               <div style={{ minWidth:0 }}>
-                <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.faint }}>vs</span> {f.teams.away}</div>
+                <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
                 <div style={{ fontSize:8,color:C.muted,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
                   <StatusBadge state={f.state} time={f.time} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
@@ -1536,7 +1540,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               onMouseEnter={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.borderHi; e.currentTarget.style.background=C.surfaceHi; }}}
               onMouseLeave={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.background=C.surface; }}}>
               <div style={{ alignSelf:"center" }} onClick={e=>{e.stopPropagation();toggleSelect(f.id);}}>
-                <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isSelected?C.edge:C.faint}`,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
+                <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isSelected?C.edge:C.text}`,opacity:isSelected?1:.3,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
                   {isSelected && <span style={{ fontSize:9,color:"#fff",fontWeight:900 }}>✓</span>}
                 </div>
               </div>
@@ -1544,7 +1548,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 <StatusBadge state={f.state} time={f.time} />
               </div>
               <div style={{ alignSelf:"center" }}>
-                <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.faint }}>vs</span> {f.teams.away}</div>
+                <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
                 <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>{f.league}{f.volatileLeague?" ⚠":""}</div>
               </div>
               <div style={{ alignSelf:"center" }}>
@@ -1562,7 +1566,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           );
         })}
         {rows.length === 0 && (
-          <div style={{ textAlign:"center",padding:"40px 0",color:C.faint,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches</div>
+          <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches</div>
         )}
       </div>
 
@@ -1849,7 +1853,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
       {/* Snapshots */}
       <div className="gc" style={{ padding:"18px",marginBottom:20 }}>
         <div style={{ fontSize:9,color:C.gold,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:14 }}>◆ Saved Snapshots</div>
-        {!snapshots.length && <div style={{ fontSize:11,color:C.faint }}>No snapshots yet</div>}
+        {!snapshots.length && <div style={{ fontSize:11,color:C.text,opacity:.3 }}>No snapshots yet</div>}
         <div style={{ display:"flex",flexWrap:"wrap",gap:8 }}>
           {snapshots.map(s => (
             <div key={s.date} style={{ display:"flex",alignItems:"center",gap:6,background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"5px 10px" }}>
@@ -2462,7 +2466,7 @@ function FixtureSearchDropdown({ fixtures, selectedFixture, onSelect, placeholde
           {filtered.map(f => (
             <button key={f.id} onClick={() => { onSelect(f); setOpen(false); setQuery(""); }} className="gb"
               style={{ width:"100%",textAlign:"left",padding:"8px 12px",background:"transparent",border:"none",borderBottom:`1px solid ${C.faint}`,color:C.text,fontSize:10,fontWeight:600,borderRadius:0,letterSpacing:0,textTransform:"none",cursor:"pointer" }}>
-              <div style={{ lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.faint }}>vs</span> {f.teams.away}</div>
+              <div style={{ lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
               <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{f.league} · {f.time}</div>
             </button>
           ))}
@@ -3360,6 +3364,135 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
   );
 }
 
+// ── DAILY BREAKDOWN TABLE ────────────────────────────────────────────────
+// Replaces the small bar chart — shows each day as an expandable row with
+// date · picks · wins · hit-rate, and (if the server returns d.picks) a
+// drill-down list of every individual pick + result for that day.
+function DailyBreakdownTable({ dailyTrend }) {
+  const [expanded, setExpanded] = useState(null);
+  const rows = [...dailyTrend].reverse(); // most recent first
+
+  return (
+    <div className="gc" style={{ padding:14, marginBottom:12 }}>
+      <div style={{ fontSize:8,color:C.text,opacity:.55,textTransform:"uppercase",letterSpacing:".1em",marginBottom:10,fontWeight:700 }}>
+        Daily Pick Report
+      </div>
+
+      {/* Mini sparkline bar — retained as a quick visual overview */}
+      <div style={{ display:"flex",alignItems:"flex-end",gap:2,height:36,marginBottom:12 }}>
+        {dailyTrend.slice(-14).map((d,i) => {
+          const barH = Math.max(4, d.rate * 0.36);
+          const bg   = d.rate >= 65 ? C.green : d.rate >= 50 ? C.gold : C.red;
+          return (
+            <div key={i} title={`${d.date}: ${d.wins}/${d.total} · ${d.rate}%`}
+              style={{ flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:1 }}>
+              <div style={{ width:"100%",borderRadius:2,background:bg,height:`${barH}px`,transition:"height .3s",opacity:.85 }}/>
+              <div style={{ fontSize:6,color:C.text,opacity:.35,writingMode:"vertical-rl",textOrientation:"mixed",
+                transform:"rotate(180deg)",height:18,overflow:"hidden",textOverflow:"clip",whiteSpace:"nowrap" }}>
+                {d.date?.slice(5)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Per-day expandable rows */}
+      <div style={{ display:"flex",flexDirection:"column",gap:2 }}>
+        {rows.map((d, i) => {
+          const rateColor = d.rate >= 65 ? C.green : d.rate >= 50 ? C.gold : C.red;
+          const isOpen    = expanded === i;
+          const hasPicks  = d.picks?.length > 0;
+          return (
+            <div key={i}>
+              <button
+                onClick={() => hasPicks && setExpanded(isOpen ? null : i)}
+                style={{
+                  width:"100%", display:"grid",
+                  gridTemplateColumns:"80px 1fr 44px 44px 34px 20px",
+                  gap:6, alignItems:"center",
+                  padding:"7px 8px", borderRadius:7,
+                  background: isOpen ? C.surface : "transparent",
+                  border:`1px solid ${isOpen ? C.border : "transparent"}`,
+                  cursor: hasPicks ? "pointer" : "default",
+                  transition:"all .15s", fontFamily:C.font,
+                }}
+              >
+                {/* Date */}
+                <span style={{ fontSize:9, fontWeight:700, color:C.text, textAlign:"left" }}>
+                  {d.date}
+                </span>
+                {/* Inline bar */}
+                <div style={{ height:4,background:C.text,opacity:.1,borderRadius:2,overflow:"hidden" }}>
+                  <div style={{ height:"100%",width:`${Math.min(d.rate,100)}%`,background:rateColor,borderRadius:2,transition:"width .4s" }}/>
+                </div>
+                {/* Hit rate */}
+                <span style={{ fontSize:10, fontWeight:800, color:rateColor, textAlign:"right" }}>
+                  {d.rate}%
+                </span>
+                {/* wins/total */}
+                <span style={{ fontSize:8, color:C.text, opacity:.5, textAlign:"right" }}>
+                  {d.wins}/{d.total}
+                </span>
+                {/* Picks count badge */}
+                <span style={{ fontSize:7, color:C.text, opacity:.4, textAlign:"right" }}>
+                  {d.total}p
+                </span>
+                {/* Chevron */}
+                {hasPicks
+                  ? <span style={{ fontSize:8, color:C.text, opacity:.35 }}>{isOpen ? "▲" : "▼"}</span>
+                  : <span/>
+                }
+              </button>
+
+              {/* Expanded pick list */}
+              {isOpen && hasPicks && (
+                <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderTop:"none",
+                  borderRadius:"0 0 7px 7px", padding:"6px 10px 8px", marginBottom:2 }}>
+                  {d.picks.map((p, j) => {
+                    const rc = p.result === "WIN" ? C.green : p.result === "LOSS" ? C.red : C.text;
+                    const mst = mktStyle(p.market || "");
+                    return (
+                      <div key={j} style={{ display:"grid", gridTemplateColumns:"1fr 60px 36px 42px",
+                        gap:5, alignItems:"center", padding:"4px 0",
+                        borderBottom: j < d.picks.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:8, color:C.text, opacity:.7, overflow:"hidden",
+                            textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.game || "—"}</div>
+                          <div style={{ fontSize:9, fontWeight:700, color:mst.color || C.text,
+                            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {p.pick}
+                            {p.market && (
+                              <span style={{ fontSize:7, color:mst.color, background:`${mst.color}18`,
+                                border:`1px solid ${mst.color}28`, borderRadius:3, padding:"0 4px",
+                                marginLeft:4, fontWeight:800, letterSpacing:".05em" }}>
+                                {p.market}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <span style={{ fontSize:8, color:C.text, opacity:.45, textAlign:"right" }}>
+                          {p.conf ? `${Math.round(p.conf)}%` : "—"}
+                        </span>
+                        <span style={{ fontSize:9, fontWeight:700, color:C.text, opacity:.6, textAlign:"right" }}>
+                          {p.odds ? `×${parseFloat(p.odds).toFixed(2)}` : "—"}
+                        </span>
+                        <span style={{ fontSize:9, fontWeight:800, color:rc, textAlign:"right" }}>
+                          {p.result === "WIN" ? "✓ W" : p.result === "LOSS" ? "✕ L" : "–"}
+                          {p.score ? ` ${p.score}` : ""}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── POOL PERFORMANCE TAB ─────────────────────────────────────────────────
 function PoolPerformanceTab({ serverUrl }) {
   const [data, setData]     = useState(null);
@@ -3414,9 +3547,9 @@ function PoolPerformanceTab({ serverUrl }) {
       )}
 
       {!data && (
-        <div style={{ padding:40,textAlign:"center",color:C.faint,fontSize:10 }}>
+        <div style={{ padding:40,textAlign:"center",color:C.text,opacity:.3,fontSize:10 }}>
           No scored pools yet.<br/>
-          <span style={{ fontSize:8,marginTop:8,display:"block",color:C.muted }}>
+          <span style={{ fontSize:8,marginTop:8,display:"block",color:C.text,opacity:.45 }}>
             Pool data is saved each time you build a ticket. After results come in the engine auto-scores each pick.
           </span>
         </div>
@@ -3479,19 +3612,9 @@ function PoolPerformanceTab({ serverUrl }) {
         </div>
       )}
 
-      {/* Daily Trend */}
+      {/* Daily Breakdown */}
       {data.dailyTrend?.length > 0 && (
-        <div className="gc" style={{ padding:14 }}>
-          <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:10 }}>Daily Hit Rate</div>
-          <div style={{ display:"flex",alignItems:"flex-end",gap:3,height:60 }}>
-            {data.dailyTrend.slice(-14).map((d,i) => (
-              <div key={i} style={{ flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2 }}>
-                <div style={{ width:"100%",borderRadius:3,background:d.rate>=65?C.green:d.rate>=50?C.gold:C.red,height:`${Math.max(4,d.rate*0.6)}px`,transition:"height .3s" }}/>
-                <div style={{ fontSize:6,color:C.faint,transform:"rotate(-45deg)",transformOrigin:"top left",marginTop:4 }}>{d.date?.slice(5)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <DailyBreakdownTable dailyTrend={data.dailyTrend} />
       )}
       </>)}
     </div>
@@ -3596,7 +3719,7 @@ function DailyBestBetsBanner({ fixtures, historicalRates, onUseTier, date }) {
 }
 
 // ── PARLAY & JARVIS PANEL ─────────────────────────────────────────────────
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("auto"); // "auto" | "manual"
   const [focusFixture, setFocus] = useState(null);
@@ -3718,7 +3841,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       <FixtureCard
         f={focusFixture}
         draftLegs={draftLegs}
-        onAddToParlay={addLegToDraft}
+        onAddToParlay={onAddLegToDraft}
         isEngineQualified={engineFixtureIds.has(focusFixture?.id)}
       />
     </div>
@@ -3871,7 +3994,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         {view === "saved" && (
           <>
             {!savedTickets.length && (
-              <div style={{ textAlign:"center",padding:"60px 0",color:C.faint,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
+              <div style={{ textAlign:"center",padding:"60px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
                 No saved tickets yet<br/>
                 <span style={{ fontSize:9,marginTop:8,display:"block" }}>Save a ticket from Builder or Jarvis</span>
               </div>
@@ -4498,7 +4621,7 @@ export default function GRMPro() {
           onClick={() => setThemePickerOpen(false)}>
           <div style={{ background:C.modalBg,borderRadius:"20px 20px 0 0",border:`1px solid ${C.border}`,padding:"16px 16px 36px",width:"100%",maxWidth:480,fontFamily:C.font }}
             onClick={e => e.stopPropagation()}>
-            <div style={{ width:36,height:4,borderRadius:2,background:C.faint,margin:"0 auto 16px" }}/>
+            <div style={{ width:36,height:4,borderRadius:2,background:C.text,opacity:.2,margin:"0 auto 16px" }}/>
             <div style={{ fontSize:11,fontWeight:800,color:C.text,letterSpacing:".1em",textTransform:"uppercase",marginBottom:14 }}>🎨 Change Theme</div>
             <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
               {THEMES.map(t => {
@@ -4556,7 +4679,7 @@ export default function GRMPro() {
                 <div style={{ fontSize:9,color:C.muted,lineHeight:1.6 }}>{desc}</div>
               </div>
             ))}
-            <div style={{ fontSize:8,color:C.faint,textAlign:"center",marginTop:8 }}>Tap anywhere outside to close</div>
+            <div style={{ fontSize:8,color:C.text,opacity:.3,textAlign:"center",marginTop:8 }}>Tap anywhere outside to close</div>
           </div>
         </div>
       )}
@@ -4576,7 +4699,7 @@ export default function GRMPro() {
                 Confirm
               </button>
               <button onClick={() => setAdminPromptOpen(false)} className="gb"
-                style={{ padding:"8px 14px",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,fontSize:10 }}>
+                style={{ padding:"8px 14px",background:"transparent",border:`1px solid ${C.text}`,opacity:.3,color:C.text,fontSize:10 }}>
                 Cancel
               </button>
             </div>
@@ -4597,6 +4720,7 @@ export default function GRMPro() {
           historicalRates={historicalRates} ensureHistoricalRates={ensureHistoricalRates}
           date={date} onClose={() => setParlayJarvisOpen(false)}
           engineFixtureIds={engineFixtureIds}
+          onAddLegToDraft={addLegToDraft}
         />
       )}
     </div>
