@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "http://localhost:3000"; // Update when tunnel changes
+export const SERVER = "grm-backend.up.railway.app"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 export const SS_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -72,7 +72,7 @@ export const EDGE_ODDS_DISCREPANCY = 0.08; // model prob must exceed implied odd
 // Post-deflation thresholds for Goal Radar tab.
 // O0.5: lowered to 85 — 92 was too restrictive post-DEFLATE_UNDER35 upward shift.
 // O1.5: separate lower threshold for wider coverage.
-export const GOAL_RADAR_MIN     = 85;  // HO0.5 / AO0.5 entry threshold (was 92)
+export const GOAL_RADAR_MIN     = 80;  // HO0.5 / AO0.5 entry threshold (was 92)
 export const GOAL_RADAR_O15_MIN = 75;  // HO1.5 / AO1.5 entry threshold (new)
 
 // ── Strategy Thresholds (tightened from v14) ──────────────────────────────
