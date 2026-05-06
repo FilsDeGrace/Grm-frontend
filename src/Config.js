@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://491422eb06b855.lhr.life"; // Update when tunnel changes
+export const SERVER = "http://localhost:3000"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 export const SS_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -41,21 +41,27 @@ export const DEFLATE_95 = 0.86;  // 95%+ band
 // Root cause: Poisson tail is too fat at high-goal lines — deflate over, inflate under.
 export const DEFLATE_OVER35  = 0.88; // additional compression on O3.5
 export const DEFLATE_OVER45  = 0.84; // additional compression on O4.5
-export const DEFLATE_UNDER35 = 1.06; // slight upward calibration on U3.5
+export const DEFLATE_UNDER35 = 1.00; // removed 1.06 upward push — U3.5 already dominant, no justification to inflate further
 export const DEFLATE_UNDER45 = 1.08; // slight upward calibration on U4.5
 
 // ── The Read Thresholds (post-deflation) ─────────────────────────────────
-export const READ_1X2_MIN       = 62;  // any 1X2 outcome
-export const READ_BTTS_MIN      = 63;  // BTTS Yes or No
-export const READ_OVER25_MIN    = 65;  // Over 2.5
-export const READ_UNDER25_MIN   = 65;  // Under 2.5
+export const READ_1X2_MIN       = 55;  // lowered from 58 — 55-58% games have real directional lean, were being missed
+export const READ_BTTS_MIN      = 63;  // BTTS Yes
+export const READ_OVER25_MIN    = 63;  // lowered from 65
+export const READ_UNDER25_MIN   = 70;  // Under 2.5 / Under 3.5 entry threshold — raised from 65, was generating too many low-confidence U3.5 picks
 export const READ_TEAMTOTAL_MIN = 80;  // TeamTotal O0.5 only — raised, worst market in backtest
-export const READ_FALLBACK_MIN  = 85;  // O1.5 / U4.5 — low signal fallback only
+// READ_FALLBACK_MIN removed — fallback (U4.5/U3.5/O1.5) eliminated entirely.
+// If nothing qualifies in the pool, getRead returns null. No pick is better than a bad pick.
 
 // ── The Read — Strong Signal (1X2 only) ──────────────────────────────────
 // ratio = (prob - threshold) / threshold
 // Backtest: STRONG 1X2 = 65.5%, LEAN 1X2 = 52.6%. 12.9% gap. Real signal.
-export const READ_STRONG_RATIO  = 0.12; // above this ratio = STRONG label
+export const READ_STRONG_RATIO   = 0.12; // 1X2/DC: (prob-threshold)/threshold > this = STRONG
+export const READ_STRONG_BTTS    = 72;   // BTTS Yes strong threshold
+export const READ_STRONG_OVER25  = 72;   // Over 2.5 strong threshold
+export const READ_STRONG_UNDER35 = 80;   // Under 3.5 strong threshold (higher bar — market hits a lot)
+export const READ_STRONG_OVER15  = 88;   // Over 1.5 strong threshold (even higher — very common market)
+export const READ_STRONG_DC      = 80;   // DC strong threshold
 
 // ── The Edge Thresholds ───────────────────────────────────────────────────
 export const EDGE_CONVERGENCE_MIN  = 2;    // min markets pointing same scenario
@@ -145,6 +151,22 @@ export const CALIB_RECENT_FACTOR = 0.20;
 export const CALIB_MAX_WEIGHT    = 0.75;
 export const CALIB_SEASON_GAMES  = 34;   // full season games (normaliser)
 export const CALIB_RECENT_GAMES  = 10;   // recent games normaliser
+
+// ── Form xG Blend ─────────────────────────────────────────────────────────
+// Controls how much cross-competition recent form xG blends into Poisson xG.
+// Priority 1 fix: cup games get pure form (1.0), normal leagues get 0.3–0.5.
+// formWeight = how much the form xG contributes vs the Poisson xG.
+export const FORM_WEIGHT_CUP          = 1.0;  // no standings at all — pure form
+export const FORM_WEIGHT_EARLY_SEASON = 0.6;  // sg < 10 — season data too thin
+export const FORM_WEIGHT_BASE         = 0.3;  // minimum blend (well-established leagues)
+export const FORM_WEIGHT_MAX          = 0.5;  // cap — Poisson foundation stays dominant
+export const FORM_WEIGHT_SCALE_GAMES  = 20;   // games to reach FORM_WEIGHT_MAX
+export const FORM_HOME_VENUE_WEIGHT   = 1.1;  // home games weighted +10% for all-comp avg
+export const FORM_AWAY_VENUE_WEIGHT   = 0.9;  // away games weighted -10%
+export const FORM_MIN_ALLCOMP_GAMES   = 6;    // min all-comp games before form xG is used
+export const FORM_EARLY_SEASON_GAMES  = 10;   // sg threshold for FORM_WEIGHT_EARLY_SEASON
+// Hard block: cup + fewer than this many combined all-comp games = no pick, "Insufficient Data"
+export const INSUFFICIENT_DATA_MIN_COMBINED = 12;
 
 // ── Jarvis ────────────────────────────────────────────────────────────────
 // Empirical Jarvis — builds parlays from backtest win rate patterns.
@@ -273,10 +295,33 @@ export const VOLATILE_LEAGUES = new Set([
   "Eredivisie", "Eerste Divisie",
 ]);
 
+// ── League Scoring Tiers ──────────────────────────────────────────────────
+// Used to select the right backtest prior in calibrateMarkets.
+// Tier based on long-run avg goals/game (multi-season):
+//   low    < 2.3
+//   normal   2.3 – 2.9
+//   high   >= 3.0
+// Any league not listed defaults to "normal".
+export const LEAGUE_TIERS = {
+  // LOW
+  "J1 League":"low","J2 League":"low","J2/J3 League":"low",
+  "Egyptian Premier League":"low",
+  "Premiership":"low",
+  "Scottish Premiership":"low",
+  "División Profesional":"low","Division de Honor":"low",
+  // HIGH
+  "Saudi Pro League":"high","Stars League":"high",
+  "Thai League 1":"high",
+  "Indonesia Super League":"high",
+};
+
 // ── Request Delays ────────────────────────────────────────────────────────
-export const SS_TEAM_EVENTS_DELAY = 800;  // was 1200 — faster with page 2 batching
+export const SS_TEAM_EVENTS_DELAY = 800;  // legacy — Stage 4 now uses TEAM_BATCH_DELAY (600ms) with 3-team batches
 export const SS_RETRY_DELAY       = 1500;
 export const SS_RETRIES           = 2;
+
+// ── PARLEY BUILDER ────────────────────────────────────────────────────────────
+export const MAX_SAME_MARKET_PER_TICKET = 2; // max legs of same market in one ticket; user-tunable in UI
 
 // ── Read Pool Rank Weights ────────────────────────────────────────────────
 // Each market family's probability is multiplied by its weight before ranking.
@@ -292,13 +337,13 @@ export const READ_RANK_WEIGHT_TEAMTOTAL  = 0.82; // near-certain O0.5 has low be
 // Ranked at 0.75 so even an 85% O1.5 (rank 63.8) loses to a 65% 1X2 (rank 65).
 // Only surfaces when nothing else qualifies AND odds gate clears.
 export const READ_RANK_WEIGHT_OVER15     = 0.75;
-export const READ_OVER15_MIN             = 78;   // min model prob to enter pool
-export const READ_OVER15_MIN_ODDS        = 1.20; // hard odds floor — kills sub-1.20 junk
+export const READ_OVER15_MIN             = 70;   // lowered from 82 — O1.5 now surfaces as genuine fallback when U3.5/BTTS blocked
+export const READ_OVER15_MIN_ODDS        = 1.17; // lowered from 1.20 — 1.17 is meaningful value floor for O1.5
 // Note: DC only enters the pool when no 1X2 clears READ_1X2_MIN.
 // To make DC compete even when 1X2 qualifies, set READ_DC_COMPETES_WITH_1X2 = true.
 export const READ_DC_COMPETES_WITH_1X2   = false;
 // DC minimum threshold (separate from COMBO_DC_MIN which is for combo display)
-export const READ_DC_MIN                 = 75;
+export const READ_DC_MIN                 = 72;  // lowered from 75 — several real games were missing by <3%
 // TeamTotal threshold for The Read (separate from display threshold)
 export const READ_TEAMTOTAL_READ_MIN     = 75;
 // TeamTotal minimum odds gate — if the book pays less than this, it's not a real pick.
@@ -307,3 +352,30 @@ export const READ_TEAMTOTAL_READ_MIN     = 75;
 export const READ_TT_MIN_ODDS            = 1.10;
 // Total xG cap — preserves home/away ratio, kills unrealistic totals
 export const XG_TOTAL_CAP               = 4.5;
+
+// ── Engine Pool — Scoring & Qualification ─────────────────────────────────
+// Minimum empirical hit rate for a pick to qualify for the pool.
+// Picks below this are excluded regardless of odds — kills draws and
+// low-hit-rate speculative picks from ever entering parlay candidates.
+// Markets with structural low hit rates (Draw ~33%, longshot 1X2) will
+// rarely clear this without an unusually strong conf band.
+export const POOL_MIN_EMPIRICAL_RATE    = 0.48; // 48% — below this = not a pool pick
+
+// Scoring formula: score = empiricalRate^POOL_SCORE_P_EXP * ln(o)/o
+// p exponent controls probability dominance. 2.0 = p² (recommended).
+// Higher = more conservative (pure hit rate). Lower = more odds-driven.
+export const POOL_SCORE_P_EXP          = 2.0;
+
+// ── Form Streak Multiplier ────────────────────────────────────────────────
+// Applied to the form xG channel only (not base Poisson).
+// Amplifies or dampens the form contribution when a team is on a run.
+// Applies to Win/Over markets only — NOT draw, NOT Under, NOT DC.
+// Rationale: a team on 4 straight losses is genuinely struggling;
+// a team on 4 straight wins is on form. Unders/DC/Draw aren't
+// directional enough to benefit from streak signal.
+export const FORM_STREAK_LOSS_4        = 0.82; // 4–5 straight losses — heavy form penalty
+export const FORM_STREAK_LOSS_3        = 0.90; // 3 losses in last 5
+export const FORM_STREAK_WIN_4         = 1.12; // 4–5 straight wins — form boost
+export const FORM_STREAK_WIN_3         = 1.06; // 3 wins in last 5
+// Markets where streak multiplier is applied (directional markets only)
+export const FORM_STREAK_MARKETS       = new Set(["1X2", "Over 1.5", "Over 2.5", "Over 3.5", "TeamTotal"]);

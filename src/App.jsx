@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { SERVER, LEAGUE_RANK } from "./config";
+import { SERVER, LEAGUE_RANK, POOL_MIN_EMPIRICAL_RATE, POOL_SCORE_P_EXP } from "./config";
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 
 const CACHE_KEY = "grm_cache_v15";
@@ -33,7 +33,7 @@ const mktStyle = m => {
     "DC":        { color:C.dc,     bg:C.dcDim     },
     "CS":        { color:C.blue,   bg:C.blueDim   },
   };
-  return map[m] || { color:C.muted, bg:C.surface };
+  return map[m] || { color:C.text, bg:C.surface };
 };
 
 // ── STYLES INJECTION ──────────────────────────────────────────────────────
@@ -75,10 +75,7 @@ function injectStyles(T) {
     @keyframes livePulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.15)}}
     .live-dot{animation:livePulse 1.2s ease infinite}
     @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(200%)}}
-    @keyframes spinRing{to{transform:rotate(360deg)}}
-    @keyframes marquee{0%{transform:translateX(100vw)}100%{transform:translateX(-100%)}}
-    .ticker-track{display:inline-block;white-space:nowrap;animation:marquee 38s linear infinite}
-    .ticker-track:hover{animation-play-state:paused}
+
     .cscroll{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
     .cscroll::-webkit-scrollbar{height:2px}
     .filter-wrap{display:flex;flex-wrap:wrap;gap:5px}
@@ -156,13 +153,27 @@ function StatusBadge({ state, time }) {
 
 // ── JARVIS MIND BOX ───────────────────────────────────────────────────────
 // Displayed at the top of the Live tab after fixtures load.
-// Calls /api/jarvis-mindbox once after fetch to get the morning brief.
+// Calls /api/jarvis-mindbox once per day — result is cached in localStorage
+// so live-state polling and fixture refreshes don't burn the rate limit.
+const MINDBOX_CACHE_KEY = (date) => `grm_mindbox_v1_${date}`;
+
 function JarvisMindBox({ fixtures, date, backtestSummary }) {
   const [mindbox, setMindbox]   = useState(null);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState(null);
   const [collapsed, setCollapsed] = useState(false);
   const calledRef = useRef(false);
+
+  // On date change: restore from cache or clear ready for a fresh call
+  useEffect(() => {
+    calledRef.current = false;
+    setError(null);
+    try {
+      const cached = JSON.parse(localStorage.getItem(MINDBOX_CACHE_KEY(date)) || "null");
+      if (cached) { setMindbox(cached); calledRef.current = true; return; }
+    } catch {}
+    setMindbox(null);
+  }, [date]);
 
   useEffect(() => {
     if (!fixtures?.length || calledRef.current) return;
@@ -175,13 +186,18 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
       body: JSON.stringify({ fixtures, backtestSummary, date }),
     })
       .then(r => r.json())
-      .then(d => { if (d.mindbox) setMindbox(d.mindbox); else setError("No mindbox data"); })
+      .then(d => {
+        if (d.mindbox) {
+          setMindbox(d.mindbox);
+          // Persist so live-state refreshes don't re-call the API
+          try { localStorage.setItem(MINDBOX_CACHE_KEY(date), JSON.stringify(d.mindbox)); } catch {}
+        } else {
+          setError("No mindbox data");
+        }
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [fixtures, date]);
-
-  // Reset when fixtures change (new fetch)
-  useEffect(() => { calledRef.current = false; setMindbox(null); setError(null); }, [fixtures]);
+  }, [fixtures?.length > 0, date]);
 
   const riskColor = mindbox?.riskLevel === "LOW" ? C.green
                   : mindbox?.riskLevel === "HIGH" ? C.red
@@ -199,7 +215,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
           )}
         </div>
         <button onClick={() => setCollapsed(c => !c)} className="gb"
-          style={{ background:"transparent",border:"none",color:C.muted,fontSize:10,padding:"0 4px" }}>
+          style={{ background:"transparent",border:"none",color:C.text,fontSize:10,padding:"0 4px" }}>
           {collapsed ? "▼" : "▲"}
         </button>
       </div>
@@ -207,7 +223,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
       {!collapsed && (
         <>
           {loading && (
-            <div style={{ fontSize:9,color:C.muted,fontStyle:"italic" }}>
+            <div style={{ fontSize:9,color:C.text,fontStyle:"italic" }}>
               <span className="pu">Jarvis is reading the board…</span>
             </div>
           )}
@@ -220,7 +236,10 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
                   ? "🤓 Jarvis couldn't connect — check your server connection."
                   : "🤓 Jarvis is busy right now. Tap Retry when ready."}
               </span>
-              <button onClick={() => { calledRef.current = false; setMindbox(null); setError(null); }} className="gb"
+              <button onClick={() => {
+                try { localStorage.removeItem(MINDBOX_CACHE_KEY(date)); } catch {}
+                calledRef.current = false; setMindbox(null); setError(null);
+              }} className="gb"
                 style={{ fontSize:8,padding:"2px 10px",background:"transparent",border:`1px solid ${C.amber}`,color:C.amber,flexShrink:0 }}>
                 Retry
               </button>
@@ -253,7 +272,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
               {((mindbox.warnings?.length > 0) || (mindbox.gems?.length > 0)) && (
                 <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
                   {mindbox.warnings?.length > 0 && (
-                    <div style={{ background:`rgba(239,68,68,0.06)`,borderRadius:8,padding:"7px 10px",border:"1px solid C.redDim" }}>
+                    <div style={{ background:`rgba(239,68,68,0.06)`,borderRadius:8,padding:"7px 10px",border:`1px solid ${C.redDim}` }}>
                       <div style={{ fontSize:7,color:C.red,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4 }}>⚠ AVOID</div>
                       {mindbox.warnings.map((w,i) => <div key={i} style={{ fontSize:8,color:C.red,lineHeight:1.5 }}>· {w}</div>)}
                     </div>
@@ -269,7 +288,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
 
               {/* Navigation */}
               {mindbox.navigation && (
-                <div style={{ fontSize:9,color:C.muted,lineHeight:1.5,borderTop:`1px solid ${C.border}`,paddingTop:7 }}>
+                <div style={{ fontSize:9,color:C.text,lineHeight:1.5,borderTop:`1px solid ${C.border}`,paddingTop:7 }}>
                   🧭 <span style={{ color:C.text }}>{mindbox.navigation}</span>
                 </div>
               )}
@@ -335,14 +354,14 @@ function AskJarvis({ fixture, backtestSummary }) {
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6 }}>
         <span style={{ fontSize:8,fontWeight:800,color:C.edge,letterSpacing:".1em",textTransform:"uppercase" }}>⚡ Ask Jarvis</span>
         <button onClick={() => { setOpen(false); setResponse(null); setQuestion(""); }} className="gb"
-          style={{ background:"transparent",border:"none",color:C.muted,fontSize:11,padding:0 }}>✕</button>
+          style={{ background:"transparent",border:"none",color:C.text,fontSize:11,padding:0 }}>✕</button>
       </div>
 
       {/* Quick prompt chips */}
       <div style={{ display:"flex",gap:4,flexWrap:"wrap",marginBottom:6 }}>
         {quickPrompts.map((p,i) => (
           <button key={i} onClick={() => { setQuestion(p); ask(p); }} className="gb"
-            style={{ fontSize:8,padding:"2px 8px",background:"transparent",border:`1px solid ${C.edge}30`,color:C.muted,borderRadius:4 }}>
+            style={{ fontSize:8,padding:"2px 8px",background:"transparent",border:`1px solid ${C.edge}30`,color:C.text,borderRadius:4 }}>
             {p}
           </button>
         ))}
@@ -363,7 +382,7 @@ function AskJarvis({ fixture, backtestSummary }) {
 
       {/* Response */}
       {loading && (
-        <div style={{ fontSize:9,color:C.muted,fontStyle:"italic",marginTop:8 }}>
+        <div style={{ fontSize:9,color:C.text,fontStyle:"italic",marginTop:8 }}>
           <span className="pu">Jarvis is thinking…</span>
         </div>
       )}
@@ -394,7 +413,7 @@ function ResultBadge({ f }) {
   return (
     <div style={{ display:"inline-flex",alignItems:"center",gap:6,background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 10px" }}>
       <span style={{ fontSize:13,fontWeight:800,color:C.text,letterSpacing:"-.01em" }}>{score}</span>
-      {ft && <span style={{ fontSize:8,color:C.muted,fontWeight:700 }}>FT</span>}
+      {ft && <span style={{ fontSize:8,color:C.text,fontWeight:700 }}>FT</span>}
     </div>
   );
 }
@@ -441,15 +460,186 @@ function evalPickResult(pickLabel, market, hGoals, aGoals, homeName, awayName) {
 }
 
 // ── FORM ROW ──────────────────────────────────────────────────────────────
+// Source: SofaScore pregame endpoint — current competition only, oldest→newest (left to right).
+// Differs from Team Totals recent results (all-competition, newest first).
 function FormRow({ home, away }) {
   const dot = r => ({ W:C.green, D:C.gold, L:C.red }[r] || C.faint);
   const dots = form => (form || []).slice(0, 5).map((r, i) =>
-    <span key={i} style={{ width:8,height:8,borderRadius:"50%",background:dot(r),display:"inline-block",margin:"0 1px" }}/>
+    <span key={i}
+      title={`${i===0?"oldest":""}${i===4?"newest":""} · ${r==="W"?"Win":r==="D"?"Draw":r==="L"?"Loss":"?"} (this competition)`}
+      style={{ width:8,height:8,borderRadius:"50%",background:dot(r),display:"inline-block",margin:"0 1px" }}/>
   );
   return (
     <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4 }}>
       <div>{dots(home)}</div>
       <div>{dots(away)}</div>
+    </div>
+  );
+}
+
+// ── SMART PICK ABBREVIATION ───────────────────────────────────────────────
+// Builds the best short label for a pick given team names.
+// Rule: assemble abbreviated form, check if ≤ 12 chars, else collapse to role.
+function abbreviatePick(pick, home, away) {
+  if (!pick) return null;
+
+  // Standard market names — shorten inline
+  const SHORT_MAP = {
+    "Over 1.5 Goals": "O1.5", "Over 2.5 Goals": "O2.5",
+    "Over 3.5 Goals": "O3.5", "Over 4.5 Goals": "O4.5",
+    "Under 1.5 Goals": "U1.5", "Under 2.5 Goals": "U2.5",
+    "Under 3.5 Goals": "U3.5", "Under 4.5 Goals": "U4.5",
+    "Over 1.5": "O1.5", "Over 2.5": "O2.5",
+    "Over 3.5": "O3.5", "Over 4.5": "O4.5",
+    "Under 1.5": "U1.5", "Under 2.5": "U2.5",
+    "Under 3.5": "U3.5", "Under 4.5": "U4.5",
+    "BTTS Yes": "BTTS ✓", "BTTS No": "BTTS ✗",
+    "Draw": "Draw",
+  };
+  if (SHORT_MAP[pick]) return SHORT_MAP[pick];
+
+  // Win picks
+  if (home && pick === `${home} Win`) {
+    const candidate = home.length <= 8 ? `${home} Win` : "Home Win";
+    return candidate;
+  }
+  if (away && pick === `${away} Win`) {
+    const candidate = away.length <= 8 ? `${away} Win` : "Away Win";
+    return candidate;
+  }
+  // Fallback for partial name match (slice-based from evalPickResult)
+  if (pick.endsWith(" Win")) {
+    const teamPart = pick.slice(0, -4);
+    if (home && home.startsWith(teamPart)) return home.length <= 8 ? `${home} Win` : "Home Win";
+    if (away && away.startsWith(teamPart)) return away.length <= 8 ? `${away} Win` : "Away Win";
+    return teamPart.length <= 8 ? pick : "Home Win";
+  }
+
+  // "to Score" / O0.5 team total
+  const toScorePattern = /^(.+?)\s+(?:to Score|O0\.5)$/i;
+  const toScoreMatch = pick.match(toScorePattern);
+  if (toScoreMatch) {
+    const teamName = toScoreMatch[1];
+    const isHome = home && (pick.startsWith(home) || teamName === home);
+    const role = isHome ? "H" : "A";
+    const candidate = teamName.length <= 6 ? `${teamName} O0.5` : `${role} O0.5`;
+    return candidate.length <= 12 ? candidate : `${role} O0.5`;
+  }
+
+  // O1.5 team total
+  const o15Pattern = /^(.+?)\s+O1\.5$/i;
+  const o15Match = pick.match(o15Pattern);
+  if (o15Match) {
+    const teamName = o15Match[1];
+    const isHome = home && (pick.startsWith(home) || teamName === home);
+    const role = isHome ? "H" : "A";
+    const candidate = teamName.length <= 6 ? `${teamName} O1.5` : `${role} O1.5`;
+    return candidate.length <= 12 ? candidate : `${role} O1.5`;
+  }
+
+  // Goal Radar picks formatted as "TeamName O0.5" or "TeamName O1.5"
+  if (home && pick.startsWith(home)) {
+    const suffix = pick.slice(home.length).trim();
+    const short = suffix.replace("to Score", "O0.5").replace("Over 0.5", "O0.5").replace("Over 1.5", "O1.5");
+    const candidate = `H ${short}`;
+    return candidate.length <= 12 ? candidate : `H ${short.slice(0, 8)}`;
+  }
+  if (away && pick.startsWith(away)) {
+    const suffix = pick.slice(away.length).trim();
+    const short = suffix.replace("to Score", "O0.5").replace("Over 0.5", "O0.5").replace("Over 1.5", "O1.5");
+    const candidate = `A ${short}`;
+    return candidate.length <= 12 ? candidate : `A ${short.slice(0, 8)}`;
+  }
+
+  // DC picks — usually short enough, just hard-cap
+  if (pick.length <= 12) return pick;
+  return pick.slice(0, 11) + "…";
+}
+
+// ── COMPACT SIGNAL STRIP ─────────────────────────────────────────────────
+function SignalCard({ label, color, bg, border, pick, prob, odds, badge, badgeColor, noSignal, onAdd, alreadyAdded, onExpand, home, away }) {
+  const [added, setAdded] = useState(false);
+  const handleAdd = (e) => {
+    e.stopPropagation();
+    if (!onAdd) return;
+    onAdd();
+    setAdded(true);
+    setTimeout(() => setAdded(false), 1400);
+  };
+  const pickLabel = abbreviatePick(pick, home, away);
+
+  if (noSignal) return (
+    <div style={{ flex:1,minWidth:0,background:C.surface,border:`1px solid ${C.border}`,borderRadius:9,padding:"8px 10px",opacity:.5 }}>
+      <div style={{ fontSize:7,color:C.muted,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4 }}>{label}</div>
+      <div style={{ fontSize:8,color:C.muted,fontStyle:"italic" }}>No signal</div>
+    </div>
+  );
+
+  return (
+    <div onClick={onExpand} style={{ flex:1,minWidth:0,background:bg,border:`1px solid ${border}`,borderRadius:9,padding:"8px 10px",cursor:"pointer" }}>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3 }}>
+        <span style={{ fontSize:7,color,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase" }}>{label}</span>
+        {badge && <span style={{ fontSize:6,color:badgeColor||color,background:`${badgeColor||color}18`,borderRadius:3,padding:"1px 4px",fontWeight:800,maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{badge}</span>}
+      </div>
+      <div title={pick} style={{ fontSize:11,fontWeight:800,color,lineHeight:1.2,marginBottom:4,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
+        {pickLabel}
+      </div>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4 }}>
+        <span style={{ fontSize:13,fontWeight:800,color }}>{prob != null ? Math.round(prob)+"%" : "—"}</span>
+        {odds && <span style={{ fontSize:9,color:C.text }}>{odds}x</span>}
+      </div>
+      <div style={{ height:3,background:C.faint,borderRadius:2,overflow:"hidden",marginBottom:6 }}>
+        <div style={{ height:"100%",width:`${Math.min(prob||0,100)}%`,background:color,borderRadius:2 }}/>
+      </div>
+      {onAdd && (
+        <button onClick={handleAdd} className="gb"
+          style={{ width:"100%",padding:"3px 0",background:added?`${C.green}20`:alreadyAdded?`${C.green}10`:`${color}18`,color:added||alreadyAdded?C.green:color,border:`1px solid ${added||alreadyAdded?C.green:color}40`,fontSize:8,transition:"all .2s" }}>
+          {added ? "✓ Added!" : alreadyAdded ? "↺ Replace" : "+ Ticket"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SignalStrip({ theRead, theEdge, goalRadar, fixture, onAddToParlay, alreadyAdded, onExpand }) {
+  const anchor = theRead?.anchor;
+  const mst    = anchor ? mktStyle(anchor.market) : null;
+  const radarEntry = goalRadar?.home || goalRadar?.away || null;
+  const home = fixture?.teams?.home;
+  const away = fixture?.teams?.away;
+
+  const readCard = anchor ? {
+    label:"THE READ", color:mst.color, bg:mst.bg, border:mst.color+"30",
+    pick:anchor.pick, prob:anchor.prob, odds:anchor.odds,
+    home, away,
+    badge: anchor.strong && !fixture.markets?._lowConfidence ? "STRONG"
+         : fixture.markets?._lowConfidence ? "⚠ LOW CONF"
+         : theRead?.isFallback ? "LOW SIG" : null,
+    badgeColor: anchor.strong ? C.gold : C.amber,
+    onAdd: onAddToParlay ? () => onAddToParlay(anchor) : null,
+  } : { label:"THE READ", noSignal:true };
+
+  const edgeCard = theEdge ? {
+    label:"THE EDGE", color:C.edge, bg:C.edgeDim, border:C.edgeBorder,
+    pick:theEdge.pick, prob:theEdge.prob, odds:theEdge.odds,
+    home, away,
+    badge: theEdge.lowValue ? "unclear" : `${theEdge.convergenceCount} sig`,
+    badgeColor: theEdge.lowValue ? C.amber : C.edge,
+    onAdd: onAddToParlay ? () => onAddToParlay(theEdge) : null,
+  } : { label:"THE EDGE", noSignal:true };
+
+  const radarCard = radarEntry ? {
+    label:"GOAL RADAR", color:C.radar, bg:C.radarDim, border:C.radarBorder,
+    pick:radarEntry.pick, prob:radarEntry.prob, odds:radarEntry.odds,
+    home, away,
+    onAdd: onAddToParlay ? () => onAddToParlay({ ...radarEntry, market:"TeamTotal" }) : null,
+  } : { label:"GOAL RADAR", noSignal:true };
+
+  return (
+    <div style={{ display:"flex",gap:6 }}>
+      <SignalCard {...readCard}  alreadyAdded={alreadyAdded} onExpand={onExpand}/>
+      <SignalCard {...edgeCard}  alreadyAdded={alreadyAdded} onExpand={onExpand}/>
+      <SignalCard {...radarCard} alreadyAdded={alreadyAdded} onExpand={onExpand}/>
     </div>
   );
 }
@@ -497,7 +687,10 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded }) {
           <span style={{ fontSize:8,color:accentColor,fontWeight:800,letterSpacing:".12em",textTransform:"uppercase" }}>
             {isFallback ? "THE READ · LOW SIGNAL" : "THE READ"}
           </span>
-          {!isFallback && anchor.strong && (
+          {!isFallback && (
+            <span style={{ fontSize:7,color:accentColor,opacity:.55,fontWeight:600,letterSpacing:".04em",textTransform:"none" }}>(best pick)</span>
+          )}
+          {!isFallback && anchor.strong && !fixture.markets?._lowConfidence && (
             <span style={{ fontSize:7,color:C.gold,background:C.goldDim,border:`1px solid ${C.goldBorder}`,borderRadius:3,padding:"1px 5px",fontWeight:800,letterSpacing:".08em" }}>STRONG</span>
           )}
           {fixture.markets?._lowConfidence && (
@@ -515,14 +708,14 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded }) {
       </div>
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
         <span style={{ fontSize:12,fontWeight:800,color:accentColor }}>{Math.round(anchor.prob)}%</span>
-        {!isFallback && <span style={{ fontSize:8,color:C.muted,fontStyle:"italic" }}>{scenario}</span>}
+        {!isFallback && <span style={{ fontSize:8,color:C.text,fontStyle:"italic" }}>{scenario}</span>}
       </div>
       <Bar value={anchor.prob} color={accentColor} />
 
       {/* Reinforcer */}
       {reinforcer && (
         <div style={{ marginTop:8,paddingTop:8,borderTop:`1px solid ${accentColor}20` }}>
-          <span style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em" }}>Reinforced by</span>
+          <span style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em" }}>Reinforced by</span>
           <div style={{ marginTop:3,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
             <span style={{ fontSize:10,fontWeight:700,color:mktStyle(reinforcer.market).color }}>
               {reinforcer.pick}
@@ -533,8 +726,8 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded }) {
                 <span style={{ fontSize:10,color:mktStyle(reinforcer.market).color,fontWeight:800 }}>
                   {Math.round(reinforcer.prob)}%
                 </span>
-                <span style={{ fontSize:8,color:C.faint }}>·</span>
-                <span style={{ fontSize:8,color:C.muted }}>O1.5</span>
+                <span style={{ fontSize:8,color:C.text }}>·</span>
+                <span style={{ fontSize:8,color:C.text }}>O1.5</span>
                 <span style={{ fontSize:10,color:mktStyle(reinforcer.market).color,fontWeight:700 }}>
                   {Math.round(reinforcer.probO15)}%
                 </span>
@@ -544,7 +737,7 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded }) {
                 <span style={{ fontSize:10,fontWeight:800,color:mktStyle(reinforcer.market).color }}>
                   {Math.round(reinforcer.prob)}%
                 </span>
-                {reinforcer.odds && <span style={{ fontSize:9,color:C.muted }}>{reinforcer.odds}x</span>}
+                {reinforcer.odds && <span style={{ fontSize:9,color:C.text }}>{reinforcer.odds}x</span>}
               </div>
             )}
           </div>
@@ -563,7 +756,7 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded }) {
 function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded }) {
   if (!theEdge) return (
     <div style={{ background:C.surface,border:`1px solid ${C.border}`,borderRadius:9,padding:"10px 12px" }}>
-      <span style={{ fontSize:8,color:C.muted,fontWeight:700,letterSpacing:".1em",textTransform:"uppercase" }}>THE EDGE — no signal</span>
+      <span style={{ fontSize:8,color:C.text,fontWeight:700,letterSpacing:".1em",textTransform:"uppercase" }}>THE EDGE — no signal</span>
     </div>
   );
 
@@ -573,6 +766,7 @@ function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded }) {
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6 }}>
         <div style={{ display:"flex",alignItems:"center",gap:6 }}>
           <span style={{ fontSize:8,color:C.edge,fontWeight:800,letterSpacing:".12em",textTransform:"uppercase" }}>THE EDGE</span>
+          <span style={{ fontSize:7,color:C.edge,opacity:.55,fontWeight:600,letterSpacing:".04em",textTransform:"none" }}>(value pick)</span>
           {isOdds && (
             <span style={{ fontSize:7,color:C.green,background:C.greenDim,border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 5px",fontWeight:800 }}>
               +{theEdge.edgeOddsPct}% vs BOOK
@@ -590,10 +784,10 @@ function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded }) {
         {theEdge.odds && <span style={{ fontSize:10,color:C.text }}>{theEdge.odds}x</span>}
       </div>
       <div style={{ fontSize:13,fontWeight:800,color:C.edge,lineHeight:1.2,marginBottom:4 }}>{theEdge.pick}</div>
-      <div style={{ fontSize:8,color:C.muted,fontStyle:"italic",marginBottom:5,lineHeight:1.4 }}>{theEdge.narrative}</div>
+      <div style={{ fontSize:8,color:C.text,fontStyle:"italic",marginBottom:5,lineHeight:1.4 }}>{theEdge.narrative}</div>
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
         <span style={{ fontSize:12,fontWeight:800,color:C.edge }}>{Math.round(theEdge.prob)}%</span>
-        <span style={{ fontSize:8,color:C.muted }}>Strength {theEdge.edgeStrength}</span>
+        <span style={{ fontSize:8,color:C.text }}>Strength {theEdge.edgeStrength}</span>
       </div>
       <Bar value={theEdge.prob} color={C.edge} />
       {onAddToParlay && (
@@ -624,7 +818,7 @@ function GoalRadarSection({ goalRadar, onAddToParlay, alreadyAdded }) {
         <div style={{ fontSize:9,color:C.text,fontWeight:700,marginBottom:2 }}>{entry.pick}</div>
         <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
           <span style={{ fontSize:13,fontWeight:800,color:C.radar }}>{Math.round(entry.prob)}%</span>
-          {entry.odds && <span style={{ fontSize:9,color:C.muted }}>{entry.odds}x</span>}
+          {entry.odds && <span style={{ fontSize:9,color:C.text }}>{entry.odds}x</span>}
         </div>
         <Bar value={entry.prob} color={C.radar} />
         {isExtra
@@ -664,7 +858,7 @@ function ComboRow({ combo }) {
       </div>
       <div style={{ display:"flex",gap:5,marginTop:4,flexWrap:"wrap" }}>
         {combo.picks.map((p, i) => (
-          <span key={i} style={{ fontSize:8,color:C.muted,background:C.surface,border:`1px solid ${C.border}`,borderRadius:3,padding:"2px 6px" }}>
+          <span key={i} style={{ fontSize:8,color:C.text,background:C.surface,border:`1px solid ${C.border}`,borderRadius:3,padding:"2px 6px" }}>
             {p.pick}{p.odds ? ` @ ${p.odds}` : ""}
           </span>
         ))}
@@ -682,13 +876,13 @@ function GoalsPanel({ f }) {
       <div style={{ marginBottom:8 }}>
         <div style={{ display:"flex",alignItems:"center",gap:6,marginBottom:3 }}>
           <span style={{ fontSize:10,fontWeight:800,color:C.orange }}>{f.goalRange}</span>
-          <span style={{ fontSize:8,color:C.muted }}>
+          <span style={{ fontSize:8,color:C.text }}>
             xG <span style={{ color:C.text,fontWeight:700 }}>{m.homeXG}</span>
             {" – "}
             <span style={{ color:C.text,fontWeight:700 }}>{m.awayXG}</span>
           </span>
         </div>
-        {f.goalInsight && <div style={{ fontSize:8,color:C.muted,fontStyle:"italic",lineHeight:1.4 }}>{f.goalInsight}</div>}
+        {f.goalInsight && <div style={{ fontSize:8,color:C.text,fontStyle:"italic",lineHeight:1.4 }}>{f.goalInsight}</div>}
       </div>
       {[
         { l:"O1.5", prob:m.over15,  odds:f.odds?.over15odds  },
@@ -698,14 +892,14 @@ function GoalsPanel({ f }) {
         { l:"U3.5", prob:m.under35, odds:f.odds?.under35odds },
       ].map(r => (
         <div key={r.l} style={{ display:"flex",alignItems:"center",marginBottom:2 }}>
-          <span style={{ fontSize:8,color:C.muted,width:28 }}>{r.l}</span>
+          <span style={{ fontSize:8,color:C.text,width:28 }}>{r.l}</span>
           <div style={{ flex:1,height:2,background:C.faint,borderRadius:2,margin:"0 6px",overflow:"hidden" }}>
             <div style={{ height:"100%",width:`${r.prob || 0}%`,background:C.orange,borderRadius:2 }}/>
           </div>
           <span style={{ fontSize:8,color:C.orange,fontWeight:700,width:28,textAlign:"right" }}>
             {r.prob ? `${Math.round(r.prob)}%` : "—"}
           </span>
-          <span style={{ fontSize:7,color:C.muted,width:30,textAlign:"right" }}>
+          <span style={{ fontSize:7,color:C.text,width:30,textAlign:"right" }}>
             {r.odds ? `${r.odds}x` : ""}
           </span>
         </div>
@@ -714,7 +908,7 @@ function GoalsPanel({ f }) {
         background:scoreBright ? C.goldDim : "transparent",
         border:scoreBright ? `1px solid ${C.goldBorder}` : "1px solid transparent",
         borderRadius:5,padding:scoreBright ? "3px 8px" : "0" }}>
-        <span style={{ fontSize:8,color:C.muted }}>Likely</span>
+        <span style={{ fontSize:8,color:C.text }}>Likely</span>
         <span style={{ fontSize:scoreBright?12:9,fontWeight:800,color:scoreBright?C.gold:C.text }}>{m.likelyScore}</span>
         <span style={{ fontSize:8,color:scoreBright?C.gold:C.faint,opacity:.8 }}>({m.likelyScoreProb}%)</span>
       </div>
@@ -759,7 +953,15 @@ function BookNowButton({ fixture }) {
       if (!res.ok || data.error) throw new Error(data.error || "Booking failed");
       setResult(data);
     } catch(e) {
-      setError(e.message);
+      // Translate raw network errors into user-friendly messages
+      const msg = e.message || "";
+      if (msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("net::ERR")) {
+        setError("Can't reach SportyBet — check your connection and try again.");
+      } else if (msg.includes("429") || msg.includes("already in progress")) {
+        setError("A booking is already in progress. Please wait a moment.");
+      } else {
+        setError(msg || "Booking failed — please try again.");
+      }
     } finally {
       setBooking(false);
     }
@@ -787,28 +989,38 @@ function BookNowButton({ fixture }) {
           <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
             <span style={{ fontSize:8,fontWeight:800,color:C.gold,letterSpacing:".1em",textTransform:"uppercase" }}>🎟️ Book Now</span>
             <button onClick={() => { setOpen(false); setResult(null); setError(null); }} className="gb"
-              style={{ background:"transparent",border:"none",color:C.muted,fontSize:11,padding:0 }}>✕</button>
+              style={{ background:"transparent",border:"none",color:C.text,fontSize:11,padding:0 }}>✕</button>
           </div>
 
           {/* Bookmaker selector (SportyBet only for now) */}
-          <div style={{ fontSize:8,color:C.muted,marginBottom:8 }}>
+          <div style={{ fontSize:8,color:C.text,marginBottom:8 }}>
             Bookmaker: <span style={{ color:C.gold,fontWeight:700 }}>SportyBet NG</span>
-            <span style={{ fontSize:7,color:C.faint,marginLeft:6 }}>(more coming)</span>
+            <span style={{ fontSize:7,color:C.text,marginLeft:6 }}>(more coming)</span>
           </div>
 
           {/* Pick preview */}
           <div style={{ background:C.surface,borderRadius:6,padding:"6px 10px",marginBottom:8,border:`1px solid ${C.border}` }}>
-            <div style={{ fontSize:7,color:C.muted,marginBottom:2 }}>PICK</div>
+            <div style={{ fontSize:7,color:C.text,marginBottom:2 }}>PICK</div>
             <div style={{ fontSize:10,color:C.text,fontWeight:700 }}>{fixture.theRead?.anchor?.pick}</div>
-            <div style={{ fontSize:8,color:C.muted }}>{fixture.teams.home} vs {fixture.teams.away} · {fixture.theRead?.anchor?.market}</div>
+            <div style={{ fontSize:8,color:C.text }}>{fixture.teams.home} vs {fixture.teams.away} · {fixture.theRead?.anchor?.market}</div>
           </div>
 
-          {/* Book button */}
+          {/* Book button / status panel */}
           {!result && !error && (
-            <button onClick={book} disabled={booking} className="gb"
-              style={{ width:"100%",background:booking?C.faint:C.accent,color:booking?C.muted:C.accentText,padding:"7px 0",fontWeight:800,fontSize:10 }}>
-              {booking ? <span className="pu">Booking…</span> : "Generate Booking Code"}
-            </button>
+            booking ? (
+              <div style={{ width:"100%",background:C.faint,borderRadius:8,padding:"10px 14px",display:"flex",alignItems:"center",gap:10,border:`1px solid ${C.border}` }}>
+                <span style={{ fontSize:14 }}>⏳</span>
+                <div>
+                  <div style={{ fontSize:10,fontWeight:800,color:C.text }}>Booking your ticket…</div>
+                  <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>Takes 10–20 seconds. Don't close.</div>
+                </div>
+              </div>
+            ) : (
+              <button onClick={book} className="gb"
+                style={{ width:"100%",background:C.accent,color:C.accentText,padding:"7px 0",fontWeight:800,fontSize:10 }}>
+                Generate Booking Code
+              </button>
+            )
           )}
 
           {/* Error */}
@@ -822,7 +1034,9 @@ function BookNowButton({ fixture }) {
           {/* Success — booking code */}
           {result && (
             <div style={{ marginTop:6 }}>
-              <div style={{ fontSize:7,color:C.green,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4 }}>✓ BOOKING CODE</div>
+              <div style={{ fontSize:7,color:C.green,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4 }}>
+                ✓ {result.resolved}/{result.total} leg{result.total!==1?"s":""} booked
+              </div>
               <div style={{ display:"flex",alignItems:"center",gap:8 }}>
                 <div style={{ flex:1,background:C.surface,border:`1px solid ${C.green}40`,borderRadius:6,padding:"8px 12px",fontFamily:C.font,fontSize:18,fontWeight:800,color:C.green,letterSpacing:".2em",textAlign:"center" }}>
                   {result.code}
@@ -833,13 +1047,30 @@ function BookNowButton({ fixture }) {
                 </button>
               </div>
               {result.shareURL && (
-                <div style={{ fontSize:7,color:C.muted,marginTop:5,wordBreak:"break-all" }}>
-                  {result.shareURL}
+                <div style={{ fontSize:7,color:C.text,marginTop:5,wordBreak:"break-all" }}>
+                  Opens SportyBet · your picks are pre-loaded
                 </div>
               )}
               {result.failed?.length > 0 && (
-                <div style={{ fontSize:7,color:C.amber,marginTop:5 }}>
-                  ⚠ {result.failed.length} leg(s) not found: {result.failed.join(", ")}
+                <div style={{ marginTop:8,background:`${C.amber}10`,border:`1px solid ${C.amber}30`,borderRadius:6,padding:"8px 10px" }}>
+                  <div style={{ fontSize:8,color:C.amber,fontWeight:800,marginBottom:6 }}>
+                    ⚠ {result.failed.length} leg{result.failed.length!==1?"s":""} couldn't be booked
+                  </div>
+                  {result.failed.map((f, i) => {
+                    const isObj = f && typeof f === "object";
+                    const label = isObj ? f.label : f;
+                    const reason = isObj
+                      ? f.failReason === "tt_unavailable"
+                        ? "Team Total market not available on SportyBet for this match. Try Over 2.5 or BTTS instead."
+                        : "Match not found on SportyBet. May not be listed yet or have a different name."
+                      : "Could not be resolved.";
+                    return (
+                      <div key={i} style={{ marginBottom: i < result.failed.length-1 ? 6 : 0 }}>
+                        <div style={{ fontSize:8,color:C.text,fontWeight:700 }}>{label}</div>
+                        <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{reason}</div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -851,8 +1082,7 @@ function BookNowButton({ fixture }) {
 }
 
 // ── FIXTURE CARD ──────────────────────────────────────────────────────────
-function FixtureCard({ f, onAddToParlay, onBack, draftLegs, isEngineQualified }) {
-  const [expanded, setExpanded]     = useState(false);
+function FixtureCard({ f, onAddToParlay, onBack, draftLegs, isEngineQualified, onFullModel }) {
   const [fetchingResult, setFetchingResult] = useState(false);
   const [localResult, setLocalResult]       = useState(null);
   const [finishedFlash, setFinishedFlash] = useState("");
@@ -909,7 +1139,7 @@ function FixtureCard({ f, onAddToParlay, onBack, draftLegs, isEngineQualified })
         <div style={{ display:"flex",justifyContent:"center",alignItems:"center",gap:8 }}>
           <ResultBadge f={displayF} />
           <button onClick={fetchCardResult} disabled={fetchingResult} className="gb"
-            style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.faint,padding:"2px 8px",fontSize:8 }}>
+            style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"2px 8px",fontSize:8 }}>
             {fetchingResult ? <span className="pu">…</span> : "↺"}
           </button>
         </div>
@@ -933,7 +1163,7 @@ function FixtureCard({ f, onAddToParlay, onBack, draftLegs, isEngineQualified })
             <span style={{ fontSize:7,color:C.amber,background:C.amberDim,border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 5px",fontWeight:700 }}>⚠ VOLATILE</span>
           )}
           {f.markets?._lowConfidence && (
-            <span style={{ fontSize:7,color:C.muted,background:C.surface,border:`1px solid ${C.border}`,borderRadius:3,padding:"1px 5px",fontWeight:700,opacity:.7 }}>LIMITED DATA</span>
+            <span style={{ fontSize:7,color:C.text,background:C.surface,border:`1px solid ${C.border}`,borderRadius:3,padding:"1px 5px",fontWeight:700,opacity:.7 }}>LIMITED DATA</span>
           )}
           {f.strategyTags?.length > 0 && f.strategyTags.map(t => (
             <span key={t} style={{ fontSize:7,color:C.gold,fontWeight:800,background:C.goldDim,border:`1px solid ${C.goldBorder}`,borderRadius:4,padding:"1px 5px",letterSpacing:".06em" }}>
@@ -980,164 +1210,264 @@ function FixtureCard({ f, onAddToParlay, onBack, draftLegs, isEngineQualified })
         </div>
       )}
 
-      {/* THE READ */}
-      <TheReadSection
+      {/* ── COMPACT SIGNAL STRIP ── */}
+      <SignalStrip
         theRead={f.theRead}
+        theEdge={f.theEdge}
+        goalRadar={f.goalRadar}
         fixture={f}
         onAddToParlay={onAddToParlay ? handleAddAnchor : null}
         alreadyAdded={isAlreadyInDraft}
+        onExpand={() => onFullModel && onFullModel(f)}
       />
 
-      {/* THE EDGE */}
-      <TheEdgeSection
-        theEdge={f.theEdge}
-        alreadyAdded={isAlreadyInDraft}
-        onAddToParlay={onAddToParlay ? (pick) => handleAddAnchor({ ...pick, market: pick.market }) : null}
-      />
-
-      {/* GOAL RADAR (only if qualifying) */}
-      {f.goalRadar && (
-        <GoalRadarSection
-          goalRadar={f.goalRadar}
-          alreadyAdded={isAlreadyInDraft}
-          onAddToParlay={onAddToParlay ? (entry) => handleAddAnchor({ ...entry, market: "TeamTotal" }) : null}
-        />
-      )}
-
-      {/* CUSTOM PICK — inline, below all signals */}
-      <FixtureBookNow fixture={f} onAddToParlay={onAddToParlay ? handleAddAnchor : null} />
-
-      {/* Expand toggle */}
-      <button onClick={() => setExpanded(e => !e)} className="gb"
-        style={{ background:"transparent",border:`1px solid ${C.border}`,color:C.muted,padding:"5px 0",fontSize:9,width:"100%" }}>
-        {expanded ? "▲ Collapse" : "▼ Full Model"}
+      {/* Full Model — opens dedicated full page */}
+      <button onClick={() => onFullModel && onFullModel(f)} className="gb"
+        style={{ background:"transparent",border:`1px solid ${C.border}`,color:C.text,padding:"5px 0",fontSize:9,width:"100%" }}>
+        ▼ Full Model
       </button>
 
-      {/* ASK JARVIS — per card */}
+      {/* ASK JARVIS */}
       <AskJarvis fixture={f} backtestSummary={null} />
+    </div>
+  );
+}
 
-      {/* EXPANDED STATE */}
-      {expanded && (
-        <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
-          {/* xG bar */}
-          <div style={{ background:C.surface,borderRadius:8,padding:"8px 12px",border:`1px solid ${C.border}` }}>
-            <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6 }}>Expected Goals ({f.xgSource})</div>
-            <div style={{ display:"flex",alignItems:"center",gap:8 }}>
-              <span style={{ fontSize:10,fontWeight:700,color:C.text,width:36,textAlign:"right" }}>{m.homeXG}</span>
-              <div style={{ flex:1,height:4,background:C.faint,borderRadius:2,overflow:"hidden",position:"relative" }}>
-                <div style={{ position:"absolute",left:0,top:0,height:"100%",width:`${(m.homeXG/(m.homeXG+m.awayXG))*100}%`,background:C.gold,borderRadius:2 }}/>
-              </div>
-              <span style={{ fontSize:10,fontWeight:700,color:C.text,width:36 }}>{m.awayXG}</span>
-            </div>
-            <div style={{ display:"flex",justifyContent:"space-between",marginTop:3 }}>
-              <span style={{ fontSize:7,color:C.muted }}>atk {m.homeAttackStrength?.toFixed(2)} def {m.homeDefenceStrength?.toFixed(2)}</span>
-              <span style={{ fontSize:7,color:C.muted }}>atk {m.awayAttackStrength?.toFixed(2)} def {m.awayDefenceStrength?.toFixed(2)}</span>
-            </div>
-            {m._calibrationWeight > 0 && (
-              <div style={{ fontSize:8,color:C.muted,marginTop:3,textAlign:"center" }}>
-                {m._calibrationWeight}% calibrated · {m._seasonGames} season games · {m._recentLeagueGames} recent
-              </div>
-            )}
+// ── FULL MODEL PAGE ────────────────────────────────────────────────────────
+// Opens as a full-screen overlay when "▼ Full Model" is tapped.
+// Same pattern as ParlayJarvisTab overlay. Saves/restores scroll position.
+function FullModelPage({ f, onBack, onAddToParlay, draftLegs }) {
+  const m = f.markets;
+  const scrollRef = useRef(null);
+  const isAlreadyInDraft = Array.isArray(draftLegs) && draftLegs.some(l => l.fixtureId === f.id);
+
+  const handleAdd = useCallback((pick) => {
+    if (!onAddToParlay) return;
+    const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
+    onAddToParlay(f, {
+      pick:   pick.pick,
+      prob:   pick.prob,
+      odds:   pick.odds || io(pick.prob) || null,
+      market: pick.market,
+    });
+  }, [f, onAddToParlay]);
+
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:300,
+      background:C.bg, overflowY:"auto",
+      display:"flex", flexDirection:"column",
+    }} ref={scrollRef}>
+
+      {/* Sticky header */}
+      <div style={{
+        position:"sticky", top:0, zIndex:10,
+        background:C.bg, borderBottom:`1px solid ${C.border}`,
+        padding:"12px 16px", display:"flex", alignItems:"center", gap:12,
+      }}>
+        <button onClick={onBack} className="gb" style={{
+          background:"transparent", border:`1px solid ${C.border}`,
+          color:C.text, padding:"6px 14px", fontSize:11, fontWeight:700,
+          display:"flex", alignItems:"center", gap:6, flexShrink:0,
+        }}>
+          ← Back
+        </button>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:13, fontWeight:800, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+            {f.teams.home} vs {f.teams.away}
           </div>
+          <div style={{ fontSize:9, color:C.text, marginTop:1 }}>{f.league}</div>
+        </div>
+        <StatusBadge state={f.state} time={f.time} />
+      </div>
 
-          {/* Stats grid */}
-          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8 }}>
-            <Panel label="Match Result" color={C.blue} bg={C.blueDim}>
-              {[
-                { l:"H", prob:m.homeWin, odds:f.odds?.o1 },
-                { l:"X", prob:m.draw,    odds:f.odds?.oX },
-                { l:"A", prob:m.awayWin, odds:f.odds?.o2 },
-              ].map(r => (
-                <div key={r.l} style={{ display:"flex",alignItems:"center",marginBottom:3,gap:4 }}>
-                  <span style={{ fontSize:9,color:C.muted,width:10 }}>{r.l}</span>
-                  <div style={{ flex:1,height:3,background:C.faint,borderRadius:2,overflow:"hidden" }}>
-                    <div style={{ height:"100%",width:`${r.prob || 0}%`,background:C.blue,borderRadius:2 }}/>
-                  </div>
-                  <span style={{ fontSize:9,color:C.blue,fontWeight:700,width:28,textAlign:"right" }}>{r.prob ? `${Math.round(r.prob)}%` : "—"}</span>
-                  {r.odds && <span style={{ fontSize:8,color:C.muted,width:32,textAlign:"right" }}>{r.odds}x</span>}
-                </div>
-              ))}
-            </Panel>
-            <GoalsPanel f={f} />
+      {/* Page body */}
+      <div style={{ padding:"16px", display:"flex", flexDirection:"column", gap:16, maxWidth:700, width:"100%", margin:"0 auto" }}>
 
-            <Panel label="BTTS" color={C.purple} bg={C.purpleDim}>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-                <div>
-                  <div style={{ fontSize:9,color:C.muted,marginBottom:2 }}>Yes</div>
-                  <div style={{ fontSize:18,fontWeight:800,color:m.bttsYes >= 60 ? C.purple : C.muted }}>{Math.round(m.bttsYes)}%</div>
-                  <div style={{ fontSize:8,color:m.bttsYes >= 60 ? C.purple : C.text,fontWeight:700 }}>
-                    {m.bttsYes >= 60 ? "QUALIFIED ✓" : "Below threshold"}
-                  </div>
-                </div>
-                <div style={{ textAlign:"right" }}>
-                  <div style={{ fontSize:9,color:C.text,marginBottom:2 }}>No</div>
-                  <div style={{ fontSize:11,fontWeight:700,color:C.text }}>{Math.round(m.bttsNo)}%</div>
-                  {f.odds?.bttsYesOdds && <div style={{ fontSize:9,color:C.text,marginTop:4 }}>Odds {f.odds.bttsYesOdds}x</div>}
-                </div>
-              </div>
-              <Bar value={m.bttsYes} color={C.purple} />
-            </Panel>
-
-            <Panel label="Team Totals" color={C.radar} bg={C.radarDim}>
-              {[
-                { name:f.teams.home, o05:m.homeOver05, o15:m.homeOver15, cs:m.homeCS, stats:f.teamStats?.home },
-                { name:f.teams.away, o05:m.awayOver05, o15:m.awayOver15, cs:m.awayCS, stats:f.teamStats?.away },
-              ].map(t => (
-                <div key={t.name} style={{ marginBottom:8 }}>
-                  <div style={{ fontSize:10,color:C.radar,fontWeight:700,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{t.name}</div>
-                  <div style={{ display:"flex",gap:10,alignItems:"center",flexWrap:"wrap" }}>
-                    <span style={{ fontSize:11,color:C.text }}>
-                      O0.5 <span style={{ color:t.o05 >= 90 ? C.radar : C.silver,fontWeight:700 }}>{Math.round(t.o05)}%</span>
-                    </span>
-                    <span style={{ fontSize:11,color:C.text }}>
-                      O1.5 <span style={{ color:t.o15 >= 65 ? C.radar : C.silver,fontWeight:700 }}>{Math.round(t.o15)}%</span>
-                    </span>
-                    <span style={{
-                      fontSize:11,
-                      color:t.cs >= 30 ? C.green : C.silver,
-                      fontWeight:t.cs >= 30 ? 800 : 600,
-                      background:t.cs >= 30 ? C.greenDim : "transparent",
-                      border:t.cs >= 30 ? `1px solid ${C.green}30` : "1px solid transparent",
-                      borderRadius:4, padding:t.cs >= 30 ? "1px 5px" : "0",
-                    }}>
-                      CS {Math.round(t.cs)}%
-                    </span>
-                  </div>
-                  {t.stats && (
-                    <div style={{ display:"flex",gap:8,marginTop:4,flexWrap:"wrap" }}>
-                      {t.stats.scoredRate != null && (
-                        <span style={{ fontSize:7,color:C.muted }}>
-                          Scored <span style={{ color:t.stats.scoredRate >= 70 ? C.green : C.silver,fontWeight:700 }}>{t.stats.scoredRate}%</span>
-                          {t.stats.played ? <span style={{ color:C.faint }}> ({t.stats.played}g)</span> : ""}
-                        </span>
-                      )}
-                      {t.stats.ftsRate != null && (
-                        <span style={{ fontSize:7,color:C.muted }}>
-                          FTS <span style={{ color:t.stats.ftsRate >= 30 ? C.red : C.silver,fontWeight:700 }}>{t.stats.ftsRate}%</span>
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </Panel>
+        {/* Score if available */}
+        {f.hGoals != null && (
+          <div style={{ display:"flex", justifyContent:"center" }}>
+            <ResultBadge f={f} />
           </div>
+        )}
 
-          {/* Combos */}
-          {f.combos?.length > 0 && (
-            <div>
-              <div style={{ fontSize:7,color:C.dc,fontWeight:800,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Combo Suggestions</div>
-              {f.combos.map((combo, i) => <ComboRow key={i} combo={combo} />)}
+        {/* Teams, form, table */}
+        <div style={{ background:C.surface, borderRadius:10, padding:"14px 16px", border:`1px solid ${C.border}` }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+            <span style={{ fontSize:16, fontWeight:800, color:C.text, flex:1, lineHeight:1.3 }}>{f.teams.home}</span>
+            <span style={{ fontSize:11, color:C.text, padding:"0 12px", flexShrink:0 }}>vs</span>
+            <span style={{ fontSize:16, fontWeight:800, color:C.text, flex:1, textAlign:"right", lineHeight:1.3 }}>{f.teams.away}</span>
+          </div>
+          {f.form && (f.form.home?.length > 0 || f.form.away?.length > 0) && (
+            <FormRow home={f.form.home} away={f.form.away} />
+          )}
+          {f.tablePosition && (f.tablePosition.homePosition || f.tablePosition.awayPosition) && (
+            <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
+              <span style={{ fontSize:9, color:C.text }}>
+                #{f.tablePosition.homePosition || "—"}{f.tablePosition.homePoints != null && ` · ${f.tablePosition.homePoints}pts`}
+              </span>
+              <span style={{ fontSize:9, color:C.text }}>
+                #{f.tablePosition.awayPosition || "—"}{f.tablePosition.awayPoints != null && ` · ${f.tablePosition.awayPoints}pts`}
+              </span>
+            </div>
+          )}
+          {/* Strategy tags */}
+          {f.strategyTags?.length > 0 && (
+            <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginTop:8 }}>
+              {f.strategyTags.map(t => (
+                <span key={t} style={{ fontSize:8, color:C.gold, fontWeight:800, background:C.goldDim, border:`1px solid ${C.goldBorder}`, borderRadius:4, padding:"2px 7px", letterSpacing:".06em" }}>
+                  {STRATEGY_LABELS[t] || t}
+                </span>
+              ))}
             </div>
           )}
         </div>
-      )}
+
+        {/* xG bar */}
+        <div style={{ background:C.surface, borderRadius:10, padding:"14px 16px", border:`1px solid ${C.border}` }}>
+          <div style={{ fontSize:9, color:C.text, textTransform:"uppercase", letterSpacing:".1em", marginBottom:10, fontWeight:700 }}>
+            Expected Goals <span style={{ fontWeight:400, textTransform:"none" }}>({f.xgSource})</span>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ textAlign:"center" }}>
+              <div style={{ fontSize:22, fontWeight:800, color:C.gold }}>{m.homeXG}</div>
+              <div style={{ fontSize:8, color:C.text, marginTop:2 }}>{f.teams.home.split(" ")[0]}</div>
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={{ height:6, background:C.faint, borderRadius:3, overflow:"hidden", position:"relative" }}>
+                <div style={{ position:"absolute", left:0, top:0, height:"100%", width:`${(m.homeXG/(m.homeXG+m.awayXG))*100}%`, background:C.gold, borderRadius:3 }}/>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
+                <span style={{ fontSize:8, color:C.text }}>atk {m.homeAttackStrength?.toFixed(2)} def {m.homeDefenceStrength?.toFixed(2)}</span>
+                <span style={{ fontSize:8, color:C.text }}>atk {m.awayAttackStrength?.toFixed(2)} def {m.awayDefenceStrength?.toFixed(2)}</span>
+              </div>
+            </div>
+            <div style={{ textAlign:"center" }}>
+              <div style={{ fontSize:22, fontWeight:800, color:C.silver }}>{m.awayXG}</div>
+              <div style={{ fontSize:8, color:C.text, marginTop:2 }}>{f.teams.away.split(" ")[0]}</div>
+            </div>
+          </div>
+          {m._calibrationWeight > 0 && (
+            <div style={{ fontSize:8, color:C.text, marginTop:8, textAlign:"center", opacity:.7 }}>
+              {m._calibrationWeight}% calibrated · {m._seasonGames} season games · {m._recentLeagueGames} recent
+            </div>
+          )}
+        </div>
+
+        {/* The Read */}
+        <TheReadSection theRead={f.theRead} fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} alreadyAdded={isAlreadyInDraft} />
+
+        {/* The Edge */}
+        <TheEdgeSection
+          theEdge={f.theEdge}
+          alreadyAdded={isAlreadyInDraft}
+          onAddToParlay={onAddToParlay ? (pick) => handleAdd({ ...pick, market: pick.market }) : null}
+        />
+
+        {/* Goal Radar */}
+        {f.goalRadar && (
+          <GoalRadarSection
+            goalRadar={f.goalRadar}
+            alreadyAdded={isAlreadyInDraft}
+            onAddToParlay={onAddToParlay ? (entry) => handleAdd({ ...entry, market:"TeamTotal" }) : null}
+          />
+        )}
+
+        {/* Match Result + Goals grid */}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <Panel label="Match Result" color={C.blue} bg={C.blueDim}>
+            {[
+              { l:"H", prob:m.homeWin, odds:f.odds?.o1 },
+              { l:"X", prob:m.draw,    odds:f.odds?.oX },
+              { l:"A", prob:m.awayWin, odds:f.odds?.o2 },
+            ].map(r => (
+              <div key={r.l} style={{ display:"flex", alignItems:"center", marginBottom:4, gap:6 }}>
+                <span style={{ fontSize:10, color:C.text, width:12 }}>{r.l}</span>
+                <div style={{ flex:1, height:4, background:C.faint, borderRadius:2, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:`${r.prob || 0}%`, background:C.blue, borderRadius:2 }}/>
+                </div>
+                <span style={{ fontSize:10, color:C.blue, fontWeight:700, width:32, textAlign:"right" }}>{r.prob ? `${Math.round(r.prob)}%` : "—"}</span>
+                {r.odds && <span style={{ fontSize:9, color:C.text, width:36, textAlign:"right" }}>{r.odds}x</span>}
+              </div>
+            ))}
+          </Panel>
+          <GoalsPanel f={f} />
+          <Panel label="BTTS" color={C.purple} bg={C.purpleDim}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+              <div>
+                <div style={{ fontSize:9, color:C.text, marginBottom:2 }}>Yes</div>
+                <div style={{ fontSize:20, fontWeight:800, color:m.bttsYes >= 60 ? C.purple : C.muted }}>{Math.round(m.bttsYes)}%</div>
+                <div style={{ fontSize:8, color:m.bttsYes >= 60 ? C.purple : C.text, fontWeight:700 }}>
+                  {m.bttsYes >= 60 ? "QUALIFIED ✓" : "Below threshold"}
+                </div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:9, color:C.text, marginBottom:2 }}>No</div>
+                <div style={{ fontSize:12, fontWeight:700, color:C.text }}>{Math.round(m.bttsNo)}%</div>
+                {f.odds?.bttsYesOdds && <div style={{ fontSize:9, color:C.text, marginTop:4 }}>Odds {f.odds.bttsYesOdds}x</div>}
+              </div>
+            </div>
+            <Bar value={m.bttsYes} color={C.purple} />
+          </Panel>
+          <Panel label="Team Totals" color={C.radar} bg={C.radarDim}>
+            {[
+              { name:f.teams.home, o05:m.homeOver05, o15:m.homeOver15, cs:m.homeCS, stats:f.teamStats?.home },
+              { name:f.teams.away, o05:m.awayOver05, o15:m.awayOver15, cs:m.awayCS, stats:f.teamStats?.away },
+            ].map(t => (
+              <div key={t.name} style={{ marginBottom:10 }}>
+                <div style={{ fontSize:11, color:C.radar, fontWeight:700, marginBottom:4 }}>{t.name}</div>
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:11, color:C.text }}>O0.5 <span style={{ color:(t.o05||0)>=90?C.radar:C.silver, fontWeight:700 }}>{Math.round(t.o05||0)}%</span></span>
+                  <span style={{ fontSize:11, color:C.text }}>O1.5 <span style={{ color:(t.o15||0)>=65?C.radar:C.silver, fontWeight:700 }}>{Math.round(t.o15||0)}%</span></span>
+                  <span style={{ fontSize:11, color:(t.cs||0)>=30?C.green:C.silver, fontWeight:(t.cs||0)>=30?800:600 }}>CS {Math.round(t.cs||0)}%</span>
+                </div>
+                {t.stats?.recentResults?.length > 0 && (
+                  <div style={{ marginTop:6 }}>
+                    <div style={{ fontSize:7, color:C.muted, marginBottom:3, letterSpacing:".06em" }}>RECENT (all comps)</div>
+                    <div style={{ display:"flex", gap:3, flexWrap:"wrap" }}>
+                      {t.stats.recentResults.map((r, i) => (
+                        <div key={i} title={`${r.role} vs ${r.opponent} · ${r.scored}-${r.conceded}`}
+                          style={{ display:"flex", alignItems:"center", gap:2, background:C.faint, borderRadius:4, padding:"2px 6px", fontSize:8, border:`1px solid ${r.outcome==="W"?C.green+"40":r.outcome==="L"?C.red+"40":C.border}` }}>
+                          <span style={{ color:r.outcome==="W"?C.green:r.outcome==="L"?C.red:C.muted, fontWeight:800 }}>{r.outcome}</span>
+                          <span style={{ color:C.muted }}>{r.scored}-{r.conceded}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </Panel>
+        </div>
+
+        {/* Combos */}
+        {f.combos?.length > 0 && (
+          <div style={{ background:C.surface, borderRadius:10, padding:"12px 14px", border:`1px solid ${C.border}` }}>
+            <div style={{ fontSize:8, color:C.dc, fontWeight:800, textTransform:"uppercase", letterSpacing:".1em", marginBottom:8 }}>Combo Suggestions</div>
+            {f.combos.map((combo, i) => <ComboRow key={i} combo={combo} />)}
+          </div>
+        )}
+
+        {/* Book Now */}
+        <FixtureBookNow fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+
+        {/* Ask Jarvis */}
+        <AskJarvis fixture={f} backtestSummary={null} />
+
+        {/* Bottom back button */}
+        <button onClick={onBack} className="gb" style={{
+          background:"transparent", border:`1px solid ${C.border}`,
+          color:C.text, padding:"10px 0", fontSize:11, fontWeight:700, width:"100%",
+        }}>
+          ← Back to fixtures
+        </button>
+      </div>
     </div>
   );
 }
 
 // ── GOAL RADAR LIST VIEW ──────────────────────────────────────────────────
-function GoalRadarTab({ fixtures, onAddToParlay, search }) {
+function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
   const [flashed, setFlashed] = useState({});
 
   const entries = useMemo(() => {
@@ -1168,7 +1498,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search }) {
   };
 
   if (!entries.length) return (
-    <div style={{ textAlign:"center",padding:"60px 0",color:C.faint,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
+    <div style={{ textAlign:"center",padding:"60px 0",color:C.text,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
       No Goal Radar picks today
     </div>
   );
@@ -1178,7 +1508,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search }) {
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14 }}>
         <div>
           <div style={{ fontSize:10,fontWeight:800,color:C.radar,letterSpacing:".1em",textTransform:"uppercase" }}>🎯 Goal Radar · {entries.length} picks</div>
-          <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>O0.5 at {entries[0] ? Math.round(entries[0].prob) : 85}%+ · O1.5 where qualifying · implied odds</div>
+          <div style={{ fontSize:8,color:C.text,marginTop:2 }}>O0.5 at {entries[0] ? Math.round(entries[0].prob) : 85}%+ · O1.5 where qualifying · implied odds</div>
         </div>
         {onAddToParlay && (
           <button onClick={buildPortfolio} className="gb"
@@ -1201,13 +1531,13 @@ function GoalRadarTab({ fixtures, onAddToParlay, search }) {
                   {e.market && <span style={{ fontSize:7,color:C.radar,background:`${C.radar}18`,border:`1px solid ${C.radar}30`,borderRadius:3,padding:"1px 5px",marginLeft:5,fontWeight:800,letterSpacing:".06em" }}>{e.market}</span>}
                   {e.isExtra && <span style={{ fontSize:7,color:C.amber,background:`${C.amber}15`,borderRadius:3,padding:"1px 5px",marginLeft:4,fontWeight:800 }}>💡 advisory</span>}
                 </div>
-                <div style={{ fontSize:8,color:C.muted }}>{f.teams.home} vs {f.teams.away} · {f.league}</div>
+                <div style={{ fontSize:8,color:C.text }}>{f.teams.home} vs {f.teams.away} · {f.league}</div>
               </div>
-              <div style={{ fontSize:8,color:C.muted,textAlign:"center" }}>
+              <div style={{ fontSize:8,color:C.text,textAlign:"center" }}>
                 <StatusBadge state={f.state} time={f.time} />
               </div>
               <span style={{ fontSize:13,fontWeight:800,color:C.radar }}>{Math.round(e.prob)}%</span>
-              <span style={{ fontSize:10,fontWeight:700,color:C.muted,textAlign:"right" }}>
+              <span style={{ fontSize:10,fontWeight:700,color:C.text,textAlign:"right" }}>
                 {e.odds ? `${parseFloat(e.odds).toFixed(2)}x` : "-"}
               </span>
               {onAddToParlay && (
@@ -1322,42 +1652,42 @@ const STRATEGY_LABELS = {
 function xgHomeDominant(f){ return f.markets.homeXG >= f.markets.awayXG*2 && (f.markets.homeXG - f.markets.awayXG) >= 1; }
 function xgAwayDominant(f){ return f.markets.awayXG >= f.markets.homeXG*2 && (f.markets.awayXG - f.markets.homeXG) >= 1; }
 
-const makeStatFilters = (xgT) => [
+const makeStatFilters = (xgT, thr) => [
   { id:"has_read",      label:"Has Read",       desc:"Has a non-fallback Read pick",    fn:f=>!!(f.theRead && !f.theRead.isFallback) },
   { id:"has_edge",      label:"Has Edge",        desc:"Edge signal found",               fn:f=>!!f.theEdge },
   { id:"has_radar",     label:"Goal Radar",      desc:"At least one team in Goal Radar", fn:f=>!!f.goalRadar },
-  { id:"btts_q",        label:"BTTS ≥63%",       desc:"BTTS Yes ≥63%",                   fn:f=>f.markets.bttsYes>=63 },
-  { id:"xg_both",       label:`Both xG ≥${xgT}`, desc:`Both xG ≥${xgT}`,                fn:f=>f.markets.homeXG>=xgT&&f.markets.awayXG>=xgT },
-  { id:"xg_home",       label:"Home xG Dom",     desc:"Home xG 2× away",                fn:f=>xgHomeDominant(f) },
-  { id:"xg_away",       label:"Away xG Dom",     desc:"Away xG 2× home",                fn:f=>xgAwayDominant(f) },
-  { id:"cs_home",       label:"Home CS ≥30%",    desc:"Home clean sheet ≥30%",           fn:f=>f.markets.homeCS>=30 },
-  { id:"cs_away",       label:"Away CS ≥30%",    desc:"Away clean sheet ≥30%",           fn:f=>f.markets.awayCS>=30 },
-  { id:"def_weak_home", label:"H Def Weak",      desc:"Home CS < 20%",                   fn:f=>f.markets.homeCS<20 },
-  { id:"def_weak_away", label:"A Def Weak",       desc:"Away CS < 20%",                   fn:f=>f.markets.awayCS<20 },
-  { id:"homewin_str",   label:"H Win ≥65%",      desc:"Home win ≥65%",                   fn:f=>f.markets.homeWin>=65 },
-  { id:"awaywin_str",   label:"A Win ≥55%",      desc:"Away win ≥55%",                   fn:f=>f.markets.awayWin>=55 },
-  { id:"low_xg",        label:"Low xG",          desc:"Total xG < 2.0",                  fn:f=>(f.markets.homeXG+f.markets.awayXG)<2.0 },
-  { id:"volatile",      label:"Volatile",        desc:"Volatile league",                 fn:f=>!!f.volatileLeague },
-  { id:"live",          label:"🔴 LIVE",         desc:"Currently in progress",           fn:f=>{ const s=(f.state||"").toLowerCase(); return ["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"].includes(s); } },
-  { id:"scheduled",     label:"⏰ Upcoming",     desc:"Not yet started",                 fn:f=>{ const s=(f.state||"").toLowerCase(); return s===""||s==="notstarted"||s==="scheduled"||s==="prematch"; } },
-  // Draw-specific filters — mirrors server STRATEGY_DEFS.draw
-  { id:"draw_prob",     label:"Draw ≥30%",       desc:"Draw probability ≥30%",           fn:f=>f.markets.draw>=30 },
-  { id:"draw_balanced", label:"Balanced",        desc:"|homeWin−awayWin| ≤15",           fn:f=>Math.abs((f.markets.homeWin||0)-(f.markets.awayWin||0))<=15 },
-  { id:"draw_xg_range", label:"xG 1.4–2.6",     desc:"Total xG between 1.4 and 2.6",    fn:f=>{ const t=(f.markets.homeXG||0)+(f.markets.awayXG||0); return t>=1.4&&t<=2.6; } },
+  { id:"btts_q",        label:`BTTS ≥${thr.btts}%`,  desc:`BTTS Yes ≥${thr.btts}%`,   fn:f=>f.markets.bttsYes>=thr.btts },
+  { id:"xg_both",       label:`Both xG ≥${xgT}`, desc:`Both xG ≥${xgT}`,              fn:f=>f.markets.homeXG>=xgT&&f.markets.awayXG>=xgT },
+  { id:"xg_home",       label:"Home xG Dom",     desc:"Home xG 2× away",               fn:f=>xgHomeDominant(f) },
+  { id:"xg_away",       label:"Away xG Dom",     desc:"Away xG 2× home",               fn:f=>xgAwayDominant(f) },
+  { id:"cs_home",       label:`Home CS ≥${thr.csHome}%`, desc:`Home clean sheet ≥${thr.csHome}%`, fn:f=>f.markets.homeCS>=thr.csHome },
+  { id:"cs_away",       label:`Away CS ≥${thr.csAway}%`, desc:`Away clean sheet ≥${thr.csAway}%`, fn:f=>f.markets.awayCS>=thr.csAway },
+  { id:"def_weak_home", label:"H Def Weak",      desc:"Home CS < 20%",                  fn:f=>f.markets.homeCS<20 },
+  { id:"def_weak_away", label:"A Def Weak",       desc:"Away CS < 20%",                  fn:f=>f.markets.awayCS<20 },
+  { id:"homewin_str",   label:`H Win ≥${thr.hWin}%`,   desc:`Home win ≥${thr.hWin}%`, fn:f=>f.markets.homeWin>=thr.hWin },
+  { id:"awaywin_str",   label:`A Win ≥${thr.aWin}%`,   desc:`Away win ≥${thr.aWin}%`, fn:f=>f.markets.awayWin>=thr.aWin },
+  { id:"odds_floor",    label:`Odds ≥${thr.oddsFloor}`, desc:`Read/Edge odds ≥${thr.oddsFloor}`, fn:f=>{ const o=f.theRead?.anchor?.odds||f.theEdge?.odds; return o!=null ? o>=thr.oddsFloor : true; } },
+  { id:"low_xg",        label:"Low xG",          desc:"Total xG < 2.0",                 fn:f=>(f.markets.homeXG+f.markets.awayXG)<2.0 },
+  { id:"volatile",      label:"Volatile",        desc:"Volatile league",                fn:f=>!!f.volatileLeague },
+  { id:"live",          label:"🔴 LIVE",         desc:"Currently in progress",          fn:f=>{ const s=(f.state||"").toLowerCase(); return ["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"].includes(s); } },
+  { id:"scheduled",     label:"⏰ Upcoming",     desc:"Not yet started",                fn:f=>{ const s=(f.state||"").toLowerCase(); return s===""||s==="notstarted"||s==="scheduled"||s==="prematch"; } },
+  { id:"draw_prob",     label:"Draw ≥30%",       desc:"Draw probability ≥30%",          fn:f=>f.markets.draw>=30 },
+  { id:"draw_balanced", label:"Balanced",        desc:"|homeWin−awayWin| ≤15",          fn:f=>Math.abs((f.markets.homeWin||0)-(f.markets.awayWin||0))<=15 },
+  { id:"draw_xg_range", label:"xG 1.4–2.6",     desc:"Total xG between 1.4 and 2.6",   fn:f=>{ const t=(f.markets.homeXG||0)+(f.markets.awayXG||0); return t>=1.4&&t<=2.6; } },
 ];
 
 const STRATEGIES_UI = [
   { id:"home_win",      label:"🏠 Home Win",    filters:["homewin_str"],           family:"homewin",  desc:"Home xG gap ≥0.9 · homeXG ≥1.4 · homeWin ≥65%" },
   { id:"away_win",      label:"✈ Away Win",     filters:["awaywin_str"],           family:"awaywin",  desc:"Away xG gap ≥0.7 · awayXG ≥1.2 · awayWin ≥55%" },
   { id:"btts_value",    label:"⚽ BTTS Value",  filters:["btts_q"],                family:"bttsyes",  desc:"BTTS ≥65% · homeO05 ≥75% · awayO05 ≥70%" },
-  { id:"home_goalfest", label:"⚡ H Goalfest",  filters:["homewin_str"],           family:"homeo05",  desc:"homeXG ≥2.2 · homeO05 ≥88% · homeWin ≥62%" },
-  { id:"away_goalfest", label:"⚡ A Goalfest",  filters:["awaywin_str"],           family:"awayo05",  desc:"awayXG ≥2.0 · awayO05 ≥85% · awayWin ≥55%" },
+  { id:"home_goalfest", label:"⚡ H Goalfest",  filters:["homewin_str"],           family:"homeo15",  desc:"homeXG ≥2.2 · homeO05 ≥88% · homeWin ≥62%" },
+  { id:"away_goalfest", label:"⚡ A Goalfest",  filters:["awaywin_str"],           family:"awayo15",  desc:"awayXG ≥2.0 · awayO05 ≥85% · awayWin ≥55%" },
   { id:"over25_quality",label:"📈 O2.5 Quality",filters:["xg_both","btts_q"],     family:"over25",   desc:"O2.5 ≥70% · total xG ≥2.6 · BTTS ≥55%" },
   { id:"low_scoring",   label:"🔒 Low Scoring", filters:["cs_home","cs_away"],     family:"under25",  desc:"homeCS AND awayCS ≥30% · total xG <2.0 · U2.5 ≥65%" },
   { id:"draw",          label:"〰 Draw",         filters:["draw_prob","draw_balanced","draw_xg_range"], family:"draw", desc:"draw ≥30% · |homeWin−awayWin| ≤15 · total xG 1.4–2.6" },
 ];
 
-function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs }) {
+function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture }) {
   const isMobile = useIsMobile();
   const [family, setFamily] = useState("theRead");
   const [statFilters, setStatFilters] = useState([]);
@@ -1366,9 +1696,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [activeStrategy, setActiveStrategy] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
 
+  // Threshold states — used by ThresholdChip filters
+  const [thr, setThr] = useState({ btts:63, hWin:65, aWin:55, csHome:30, csAway:30, oddsFloor:1.15 });
+  const setT = (key, val) => setThr(prev => ({ ...prev, [key]: val }));
+
   const toggleSelect = id => setSelectedIds(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
   const clearSelection = () => setSelectedIds(new Set());
-  const STAT_FILTERS = useMemo(() => makeStatFilters(xgThreshold), [xgThreshold]);
+  const STAT_FILTERS = useMemo(() => makeStatFilters(xgThreshold, thr), [xgThreshold, thr]);
   const toggleStat = id => setStatFilters(prev => prev.includes(id) ? prev.filter(x=>x!==id) : [...prev, id]);
 
   const applyStrategy = strat => {
@@ -1402,13 +1736,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     a.href = url; a.download = `grm_list_${family}_${payload.date}.json`; a.click(); URL.revokeObjectURL(url);
   };
 
-  if (selected) return (
+  if (selected && !onOpenFixture) return (
     <div>
       <button onClick={() => setSelected(null)} className="gb"
-        style={{ marginBottom:12,background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,padding:"5px 14px",fontSize:9,display:"flex",alignItems:"center",gap:6 }}>
+        style={{ marginBottom:12,background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"5px 14px",fontSize:9,display:"flex",alignItems:"center",gap:6 }}>
         ← Back to List
       </button>
-      <FixtureCard f={selected} onAddToParlay={onAddToParlay} draftLegs={draftLegs} />
+      <FixtureCard f={selected} onAddToParlay={onAddToParlay} draftLegs={draftLegs} onFullModel={onFullModel} />
     </div>
   );
   const hasResults = fixtures.some(f => f.hGoals != null);
@@ -1421,7 +1755,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       </div>
       {/* Strategy presets */}
       <div style={{ marginBottom:12 }}>
-        <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Strategy</div>
+        <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Strategy</div>
         <div className="filter-wrap">
           {STRATEGIES_UI.map(strat => {
             const active = activeStrategy === strat.id;
@@ -1441,7 +1775,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Market family */}
       <div style={{ marginBottom:10 }}>
-        <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Market</div>
+        <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Market</div>
         <div className="cscroll">
           {CUSTOM_FAMILIES.map(fam => (
             <button key={fam.id} onClick={() => { setFamily(fam.id); setActiveStrategy(null); }} className="gb"
@@ -1454,14 +1788,33 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Stat filters */}
       <div style={{ marginBottom:14 }}>
-        <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Filters</div>
-        <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:8,background:C.surface,borderRadius:7,padding:"7px 10px",border:`1px solid ${C.border}` }}>
-          <span style={{ fontSize:8,color:C.muted,flexShrink:0 }}>xG threshold</span>
-          <input type="range" min={1.0} max={2.5} step={0.25} value={xgThreshold} onChange={e=>setXgThreshold(parseFloat(e.target.value))} style={{ flex:1 }}/>
-          <span style={{ fontSize:10,color:C.radar,fontWeight:800,width:28,textAlign:"right" }}>{xgThreshold}</span>
+        <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Filters</div>
+        {/* ThresholdChips — all ≥/≤ sliders */}
+        <div style={{ display:"flex",flexWrap:"wrap",gap:6,marginBottom:6 }}>
+          <ThresholdChip label="xG ≥" value={xgThreshold} defaultValue={1.0}
+            min={1.0} max={2.5} step={0.25} onChange={setXgThreshold} />
+          <ThresholdChip label="BTTS ≥" value={thr.btts} defaultValue={63}
+            min={50} max={80} step={1} onChange={v => { setT("btts",v); if(!statFilters.includes("btts_q")) toggleStat("btts_q"); }}
+            color={statFilters.includes("btts_q") ? C.purple : undefined} format={v=>`${v}%`} />
+          <ThresholdChip label="H Win ≥" value={thr.hWin} defaultValue={65}
+            min={50} max={85} step={1} onChange={v => { setT("hWin",v); if(!statFilters.includes("homewin_str")) toggleStat("homewin_str"); }}
+            color={statFilters.includes("homewin_str") ? C.blue : undefined} format={v=>`${v}%`} />
+          <ThresholdChip label="A Win ≥" value={thr.aWin} defaultValue={55}
+            min={45} max={80} step={1} onChange={v => { setT("aWin",v); if(!statFilters.includes("awaywin_str")) toggleStat("awaywin_str"); }}
+            color={statFilters.includes("awaywin_str") ? C.edge : undefined} format={v=>`${v}%`} />
+          <ThresholdChip label="H CS ≥" value={thr.csHome} defaultValue={30}
+            min={20} max={60} step={5} onChange={v => { setT("csHome",v); if(!statFilters.includes("cs_home")) toggleStat("cs_home"); }}
+            color={statFilters.includes("cs_home") ? C.green : undefined} format={v=>`${v}%`} />
+          <ThresholdChip label="A CS ≥" value={thr.csAway} defaultValue={30}
+            min={20} max={60} step={5} onChange={v => { setT("csAway",v); if(!statFilters.includes("cs_away")) toggleStat("cs_away"); }}
+            color={statFilters.includes("cs_away") ? C.green : undefined} format={v=>`${v}%`} />
+          <ThresholdChip label="Odds ≥" value={thr.oddsFloor} defaultValue={1.15}
+            min={1.05} max={2.5} step={0.05} onChange={v => { setT("oddsFloor",v); if(!statFilters.includes("odds_floor")) toggleStat("odds_floor"); }}
+            color={statFilters.includes("odds_floor") ? C.gold : undefined} format={v=>v.toFixed(2)} />
         </div>
+        {/* Toggle chips — non-threshold filters */}
         <div className="filter-wrap">
-          {STAT_FILTERS.map(sf => {
+          {STAT_FILTERS.filter(sf => !["btts_q","homewin_str","awaywin_str","cs_home","cs_away","odds_floor"].includes(sf.id)).map(sf => {
             const active = statFilters.includes(sf.id);
             return (
               <button key={sf.id} onClick={() => { toggleStat(sf.id); setActiveStrategy(null); }} className="gb" title={sf.desc}
@@ -1479,7 +1832,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* List header */}
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
-        <span style={{ fontSize:9,color:C.muted }}>{rows.length} matches</span>
+        <span style={{ fontSize:9,color:C.text }}>{rows.length} matches</span>
         {rows.length > 0 && (
           <button onClick={saveListToJSON} className="gb"
             style={{ padding:"3px 10px",background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,fontSize:9 }}>💾 Save JSON</button>
@@ -1488,14 +1841,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Column headers */}
       {!isMobile && (
-        <div style={{ display:"grid",gridTemplateColumns:hasResults?"24px 50px 1fr 140px 60px 60px 72px":"24px 50px 1fr 140px 60px 60px",gap:8,padding:"6px 14px",borderBottom:`1px solid ${C.border}`,fontSize:7,color:C.faint,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
+        <div style={{ display:"grid",gridTemplateColumns:hasResults?"24px 50px 1fr 140px 60px 60px 72px":"24px 50px 1fr 140px 60px 60px",gap:8,padding:"6px 14px",borderBottom:`1px solid ${C.border}`,fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
           <span>{selectedIds.size > 0 ? <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button> : "☐"}</span>
           <span>Time</span><span>Match</span><span>Pick</span><span>Prob</span><span>Odds</span>
           {hasResults && <span>Score</span>}
         </div>
       )}
       {isMobile && (
-        <div style={{ display:"grid",gridTemplateColumns:hasResults?"20px 1fr 44px 44px":"20px 1fr 44px",gap:6,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,fontSize:7,color:C.faint,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
+        <div style={{ display:"grid",gridTemplateColumns:hasResults?"20px 1fr 44px 44px":"20px 1fr 44px",gap:6,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
           <span>{selectedIds.size > 0 ? <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button> : "☐"}</span>
           <span>Match / Pick</span><span style={{ textAlign:"right" }}>%</span>
           {hasResults && <span style={{ textAlign:"right" }}>Score</span>}
@@ -1511,7 +1864,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           const mCols = hasResults ? "20px 1fr 44px 44px" : "20px 1fr 44px";
           if (isMobile) return (
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:mCols,gap:6,padding:"8px 10px",background:isSelected?"rgba(99,102,241,0.1)":C.surface,borderRadius:8,border:`1px solid ${isSelected?C.edge:C.border}`,cursor:"pointer",transition:"all .15s",alignItems:"center" }}
-              onClick={() => setSelected(f)}>
+              onClick={() => onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}>
               <div onClick={e=>{e.stopPropagation();toggleSelect(f.id);}}>
                 <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isSelected?C.edge:C.text}`,opacity:isSelected?1:.3,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
                   {isSelected && <span style={{ fontSize:9,color:"#fff",fontWeight:900 }}>✓</span>}
@@ -1519,7 +1872,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </div>
               <div style={{ minWidth:0 }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
-                <div style={{ fontSize:8,color:C.muted,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
+                <div style={{ fontSize:8,color:C.text,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
                   <StatusBadge state={f.state} time={f.time} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
                 </div>
@@ -1529,14 +1882,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ textAlign:"right",fontSize:12,fontWeight:800,color:probColor }}>{Math.round(pick.prob)}%</div>
               {hasResults && (
                 <div style={{ textAlign:"right" }}>
-                  {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.faint }}>—</span>}
+                  {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
                 </div>
               )}
             </div>
           );
           return (
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:cols,gap:8,padding:"8px 14px",background:isSelected?"rgba(99,102,241,0.1)":C.surface,borderRadius:8,border:`1px solid ${isSelected?C.edge:C.border}`,cursor:"pointer",transition:"all .15s" }}
-              onClick={() => setSelected(f)}
+              onClick={() => onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}
               onMouseEnter={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.borderHi; e.currentTarget.style.background=C.surfaceHi; }}}
               onMouseLeave={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.background=C.surface; }}}>
               <div style={{ alignSelf:"center" }} onClick={e=>{e.stopPropagation();toggleSelect(f.id);}}>
@@ -1544,22 +1897,22 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   {isSelected && <span style={{ fontSize:9,color:"#fff",fontWeight:900 }}>✓</span>}
                 </div>
               </div>
-              <div style={{ alignSelf:"center",fontSize:9,color:C.muted }}>
+              <div style={{ alignSelf:"center",fontSize:9,color:C.text }}>
                 <StatusBadge state={f.state} time={f.time} />
               </div>
               <div style={{ alignSelf:"center" }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
-                <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>{f.league}{f.volatileLeague?" ⚠":""}</div>
+                <div style={{ fontSize:8,color:C.text,marginTop:1 }}>{f.league}{f.volatileLeague?" ⚠":""}</div>
               </div>
               <div style={{ alignSelf:"center" }}>
                 <div style={{ fontSize:10,fontWeight:700,color:pick.color||C.text,lineHeight:1.2 }}>{pick.label}</div>
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
               <span style={{ fontSize:12,fontWeight:800,color:probColor,alignSelf:"center" }}>{Math.round(pick.prob)}%</span>
-              <span style={{ fontSize:10,color:C.muted,alignSelf:"center" }}>{pick.odds || "—"}</span>
+              <span style={{ fontSize:10,color:C.text,alignSelf:"center" }}>{pick.odds || "—"}</span>
               {hasResults && (
                 <div style={{ alignSelf:"center" }}>
-                  {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.faint }}>—</span>}
+                  {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
                 </div>
               )}
             </div>
@@ -1589,7 +1942,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           }} style={{ background:"#fff",color:C.edge,border:"none",borderRadius:8,padding:"6px 16px",fontSize:11,fontWeight:900,cursor:"pointer" }}>
             Add to Ticket ({selectedIds.size} legs)
           </button>
-          <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
+          <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
         </div>
       )}
     </div>
@@ -1661,7 +2014,7 @@ function UploadBacktester() {
       {/* Mode A: Paste ticket code */}
       {mode === "code" && (
         <div>
-          <div style={{ fontSize:9,color:C.muted,marginBottom:10,lineHeight:1.6 }}>
+          <div style={{ fontSize:9,color:C.text,marginBottom:10,lineHeight:1.6 }}>
             Enter the <span style={{ color:C.gold }}>GRM ticket code</span> (e.g. <code style={{ color:C.radar }}>T1AB2C</code>) from your saved tickets to evaluate it against actual results.
           </div>
           <div style={{ display:"flex",gap:8,marginBottom:10 }}>
@@ -1679,10 +2032,10 @@ function UploadBacktester() {
             </button>
           </div>
           {savedTickets.length > 0 && (
-            <div style={{ fontSize:8,color:C.faint,marginBottom:8 }}>
+            <div style={{ fontSize:8,color:C.text,marginBottom:8 }}>
               Saved codes: {savedTickets.slice(-6).map(t => (
                 <button key={t.code} onClick={() => setTicketCode(t.code)} className="gb"
-                  style={{ fontSize:8,padding:"1px 7px",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,marginLeft:4,marginBottom:3 }}>
+                  style={{ fontSize:8,padding:"1px 7px",background:"transparent",border:`1px solid ${C.faint}`,color:C.text,marginLeft:4,marginBottom:3 }}>
                   {t.code}
                 </button>
               ))}
@@ -1694,7 +2047,7 @@ function UploadBacktester() {
       {/* Mode B: JSON upload (custom list only) */}
       {mode === "json" && (
         <div>
-          <div style={{ fontSize:9,color:C.muted,marginBottom:10,lineHeight:1.6 }}>
+          <div style={{ fontSize:9,color:C.text,marginBottom:10,lineHeight:1.6 }}>
             Upload a <span style={{ color:C.radar }}>custom list JSON</span> (from Custom List › Save JSON) to evaluate against results.
           </div>
           <div className={`drop-zone${dragging?" drag-over":""}`} onClick={() => fileRef.current?.click()}
@@ -1702,7 +2055,7 @@ function UploadBacktester() {
             style={{ marginBottom:16 }}>
             <input ref={fileRef} type="file" accept=".json" style={{ display:"none" }} onChange={e=>{const f=e.target.files?.[0];if(f)processFile(f);}}/>
             {uploading ? <span className="pu" style={{ fontSize:11,color:C.radar }}>Evaluating…</span>
-              : <span style={{ fontSize:11,color:C.muted }}>Drop JSON here or <span style={{ color:C.radar }}>click to upload</span></span>}
+              : <span style={{ fontSize:11,color:C.text }}>Drop JSON here or <span style={{ color:C.radar }}>click to upload</span></span>}
           </div>
         </div>
       )}
@@ -1714,9 +2067,9 @@ function UploadBacktester() {
             <>
               <div style={{ background:result.parlayResult==="WIN"?C.greenDim:result.parlayResult==="LOSS"?`${C.red}10`:C.surface,border:`1px solid ${resColor(result.parlayResult)}30`,borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
                 <div>
-                  <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".12em",marginBottom:4 }}>{result.date}</div>
+                  <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".12em",marginBottom:4 }}>{result.date}</div>
                   <div style={{ fontSize:22,fontWeight:800,color:resColor(result.parlayResult) }}>{result.parlayResult}</div>
-                  <div style={{ fontSize:9,color:C.muted,marginTop:4 }}>
+                  <div style={{ fontSize:9,color:C.text,marginTop:4 }}>
                     {result.summary.wins}W / {result.summary.losses}L / {result.summary.voids} void
                     {result.summary.legWinRate != null && <span style={{ color:C.radar,marginLeft:8 }}>{result.summary.legWinRate}% leg hit rate</span>}
                   </div>
@@ -1724,19 +2077,19 @@ function UploadBacktester() {
                 {result.totalOdds && <div style={{ fontSize:18,fontWeight:800,color:C.gold }}>×{result.totalOdds}</div>}
               </div>
               <div className="gc" style={{ overflow:"hidden" }}>
-                <div style={{ padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>Leg Results</div>
+                <div style={{ padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>Leg Results</div>
                 {result.legs.map((leg, i) => {
                   const legCols = isMobile ? "1fr 72px 44px" : "1fr 120px 70px 70px 60px";
                   return (
                     <div key={i} style={{ display:"grid",gridTemplateColumns:legCols,gap:8,padding:"9px 14px",borderBottom:`1px solid ${C.faint}`,alignItems:"center",fontSize:10 }}>
                       <div>
                         <div style={{ fontWeight:600,color:C.text }}>{leg.game}</div>
-                        {leg.league&&<div style={{ fontSize:7,color:C.muted }}>{leg.league}</div>}
-                        {isMobile && <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>{leg.score||""}{leg.odds ? ` · ×${leg.odds}` : ""}</div>}
+                        {leg.league&&<div style={{ fontSize:7,color:C.text }}>{leg.league}</div>}
+                        {isMobile && <div style={{ fontSize:8,color:C.text,marginTop:1 }}>{leg.score||""}{leg.odds ? ` · ×${leg.odds}` : ""}</div>}
                       </div>
                       <div style={{ color:mktStyle(leg.market).color||C.muted,fontSize:9,fontWeight:700 }}>{leg.pick}</div>
-                      {!isMobile && <div style={{ color:C.muted,fontSize:9 }}>{leg.score||"—"}</div>}
-                      {!isMobile && <div style={{ fontSize:9,color:C.muted }}>{leg.odds?`×${leg.odds}`:"—"}</div>}
+                      {!isMobile && <div style={{ color:C.text,fontSize:9 }}>{leg.score||"—"}</div>}
+                      {!isMobile && <div style={{ fontSize:9,color:C.text }}>{leg.odds?`×${leg.odds}`:"—"}</div>}
                       <div style={{ fontWeight:800,color:resColor(leg.result),textAlign:isMobile?"right":"left" }}>{leg.result}</div>
                     </div>
                   );
@@ -1748,13 +2101,13 @@ function UploadBacktester() {
             <>
               {result.stats?.overall && (
                 <div className="gc" style={{ padding:"12px 14px" }}>
-                  <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6 }}>Overall</div>
+                  <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6 }}>Overall</div>
                   <div style={{ fontSize:22,fontWeight:800,color:result.stats.overall.rate>=55?C.green:result.stats.overall.rate>=45?C.gold:C.red }}>{result.stats.overall.rate}%</div>
-                  <div style={{ fontSize:9,color:C.muted,marginTop:3 }}>{result.stats.overall.wins}W / {result.stats.overall.total} played</div>
+                  <div style={{ fontSize:9,color:C.text,marginTop:3 }}>{result.stats.overall.wins}W / {result.stats.overall.total} played</div>
                 </div>
               )}
               <div className="gc" style={{ overflow:"hidden" }}>
-                <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 70px 44px":"1fr 160px 70px 60px",gap:8,padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
+                <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 70px 44px":"1fr 160px 70px 60px",gap:8,padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
                   <span>Match</span><span>Pick</span>{!isMobile&&<span>Score</span>}<span>Result</span>
                 </div>
                 <div style={{ maxHeight:480,overflowY:"auto" }}>
@@ -1762,12 +2115,12 @@ function UploadBacktester() {
                     <div key={i} style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 70px 44px":"1fr 160px 70px 60px",gap:8,padding:"8px 14px",borderBottom:`1px solid ${C.faint}`,fontSize:10,alignItems:"center" }}>
                       <div>
                         <div style={{ fontWeight:600,color:C.text }}>{row.home} vs {row.away}</div>
-                        <div style={{ fontSize:8,color:C.muted }}>{row.league||""}</div>
-                        {isMobile && row.score && <div style={{ fontSize:8,color:C.muted }}>{row.score}</div>}
+                        <div style={{ fontSize:8,color:C.text }}>{row.league||""}</div>
+                        {isMobile && row.score && <div style={{ fontSize:8,color:C.text }}>{row.score}</div>}
                         {row.strategyTags?.length>0 && <div style={{ fontSize:7,color:C.amber,marginTop:1 }}>{row.strategyTags.map(t=>STRATEGY_LABELS[t]||t).join(" · ")}</div>}
                       </div>
                       <div style={{ fontSize:9,color:C.gold,fontWeight:700 }}>{row.pick}</div>
-                      {!isMobile && <div style={{ color:C.muted }}>{row.score||"—"}</div>}
+                      {!isMobile && <div style={{ color:C.text }}>{row.score||"—"}</div>}
                       <div style={{ fontWeight:800,color:resColor(row.result),textAlign:isMobile?"right":"left" }}>{row.result}</div>
                     </div>
                   ))}
@@ -1776,7 +2129,7 @@ function UploadBacktester() {
             </>
           )}
           <button onClick={() => { setResult(null); setError(null); setTicketCode(""); if(fileRef.current) fileRef.current.value=""; }} className="gb"
-            style={{ alignSelf:"flex-start",padding:"6px 16px",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,fontSize:10 }}>
+            style={{ alignSelf:"flex-start",padding:"6px 16px",background:"transparent",border:`1px solid ${C.faint}`,color:C.text,fontSize:10 }}>
             ↺ Evaluate Another
           </button>
         </div>
@@ -1860,7 +2213,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
               <button onClick={() => loadSnapshot(s.date)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:10,color:C.radar,fontFamily:C.font,padding:0,fontWeight:700 }}>{s.date}</button>
               {s.hasResults ? <span style={{ fontSize:8,color:C.green,fontWeight:700 }}>✓ Results</span>
                 : adminMode ? <button onClick={() => fetchResults(s.date)} disabled={fetching===s.date} className="gb" style={{ background:C.gold,color:C.accentText,padding:"2px 8px",fontSize:9 }}>{fetching===s.date?"…":"Fetch"}</button>
-                : <span style={{ fontSize:8,color:C.faint }}>No results</span>}
+                : <span style={{ fontSize:8,color:C.text }}>No results</span>}
             </div>
           ))}
         </div>
@@ -1870,8 +2223,8 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
       <div className="gc" style={{ padding:"18px",marginBottom:20 }}>
         <div style={{ fontSize:9,color:C.gold,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:14 }}>◆ Run Backtest</div>
         <div style={{ display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap" }}>
-          <div><div style={{ fontSize:9,color:C.muted,marginBottom:5 }}>From</div><input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="gi" style={{ width:150 }}/></div>
-          <div><div style={{ fontSize:9,color:C.muted,marginBottom:5 }}>To</div><input type="date" value={to} onChange={e=>setTo(e.target.value)} className="gi" style={{ width:150 }}/></div>
+          <div><div style={{ fontSize:9,color:C.text,marginBottom:5 }}>From</div><input type="date" value={from} onChange={e=>setFrom(e.target.value)} className="gi" style={{ width:150 }}/></div>
+          <div><div style={{ fontSize:9,color:C.text,marginBottom:5 }}>To</div><input type="date" value={to} onChange={e=>setTo(e.target.value)} className="gi" style={{ width:150 }}/></div>
           <button onClick={runBacktest} disabled={loading} className="gb" style={{ background:loading?C.faint:C.gold,color:loading?C.muted:C.accentText,padding:"8px 20px" }}>{loading?<span className="pu">RUNNING…</span>:"RUN"}</button>
         </div>
         {error && <div style={{ marginTop:12,color:C.red,fontSize:11,background:C.redDim,border:`1px solid ${C.red}30`,borderRadius:7,padding:"8px 12px",whiteSpace:"pre-wrap" }}>✕ {error}</div>}
@@ -1883,7 +2236,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
           <div style={{ fontSize:9,color:C.radar,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:12 }}>💾 Save Report</div>
           <div style={{ display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap" }}>
             <div style={{ flex:1 }}>
-              <div style={{ fontSize:9,color:C.muted,marginBottom:5 }}>Label (optional)</div>
+              <div style={{ fontSize:9,color:C.text,marginBottom:5 }}>Label (optional)</div>
               <input type="text" value={saveLabel} onChange={e=>setSaveLabel(e.target.value)} placeholder={`${from} → ${to} backtest`} className="gi"/>
             </div>
             <button onClick={saveReport} disabled={saving} className="gb" style={{ background:saving?C.faint:C.radar,color:saving?C.muted:C.accentText,padding:"8px 18px",flexShrink:0 }}>{saving?<span className="pu">SAVING…</span>:"SAVE"}</button>
@@ -1895,17 +2248,17 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
       {/* Saved reports list */}
       {savedReports.length > 0 && (
         <div className="gc" style={{ padding:"16px",marginBottom:20 }}>
-          <div style={{ fontSize:9,color:C.muted,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:12 }}>📂 Saved Reports</div>
+          <div style={{ fontSize:9,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:12 }}>📂 Saved Reports</div>
           <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
             {savedReports.map(r => (
               <div key={r.filename} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px" }}>
                 <div>
                   <div style={{ fontSize:10,color:C.text,fontWeight:700 }}>{r.label||`${r.from} → ${r.to}`}</div>
-                  <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>
+                  <div style={{ fontSize:8,color:C.text,marginTop:2 }}>
                     {r.from} → {r.to}
                     {r.overall && <span style={{ marginLeft:8,color:r.overall.rate>=55?C.green:r.overall.rate>=45?C.gold:C.red,fontWeight:700 }}>{r.overall.rate}% ({r.overall.wins}W/{r.overall.total})</span>}
                   </div>
-                  <div style={{ fontSize:7,color:C.faint,marginTop:1 }}>{new Date(r.savedAt).toLocaleString()}</div>
+                  <div style={{ fontSize:7,color:C.text,marginTop:1 }}>{new Date(r.savedAt).toLocaleString()}</div>
                 </div>
                 {adminMode && <button onClick={()=>deleteReport(r.filename)} className="gb" style={{ background:"transparent",border:`1px solid ${C.red}40`,color:C.red,padding:"3px 8px",fontSize:9 }}>✕</button>}
               </div>
@@ -1924,9 +2277,9 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
                 {[["The Read", btData.stats.byPickType.read || btData.stats.byPickType.safeBet],
                   ["The Edge", btData.stats.byPickType.edge || btData.stats.byPickType.valuePick]].map(([label, stat]) => stat && (
                   <div key={label} className="gc" style={{ flex:1,padding:"14px 16px" }}>
-                    <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>{label}</div>
+                    <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>{label}</div>
                     <div style={{ fontSize:24,fontWeight:800,color:stat.rate>=55?C.green:stat.rate>=45?C.gold:C.red }}>{stat.rate}%</div>
-                    <div style={{ fontSize:9,color:C.muted,marginTop:4 }}>{stat.wins}W / {stat.total} played</div>
+                    <div style={{ fontSize:9,color:C.text,marginTop:4 }}>{stat.wins}W / {stat.total} played</div>
                   </div>
                 ))}
               </div>
@@ -1936,9 +2289,9 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
           <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:12,marginBottom:20 }}>
             {[["Overall", btData.stats.overall]].filter(([,s])=>s).map(([label, stat]) => (
               <div key={label} className="gc" style={{ padding:"14px 16px" }}>
-                <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>{label}</div>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>{label}</div>
                 <div style={{ fontSize:24,fontWeight:800,color:stat.rate>=55?C.green:stat.rate>=45?C.gold:C.red }}>{stat.rate}%</div>
-                <div style={{ fontSize:9,color:C.muted,marginTop:4 }}>{stat.wins}W / {stat.total} played</div>
+                <div style={{ fontSize:9,color:C.text,marginTop:4 }}>{stat.wins}W / {stat.total} played</div>
               </div>
             ))}
           </div>
@@ -1951,7 +2304,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
                   <div key={strat} style={{ background:C.surface,border:`1px solid ${C.amber}30`,borderRadius:8,padding:"8px 12px",minWidth:130 }}>
                     <div style={{ fontSize:8,color:C.amber,marginBottom:4 }}>{STRATEGY_LABELS[strat]||strat}</div>
                     <div style={{ fontSize:16,fontWeight:800,color:stat.rate>=55?C.green:stat.rate>=45?C.gold:C.red }}>{stat.rate}%</div>
-                    <div style={{ fontSize:8,color:C.muted }}>{stat.wins}/{stat.total}</div>
+                    <div style={{ fontSize:8,color:C.text }}>{stat.wins}/{stat.total}</div>
                   </div>
                 ))}
               </div>
@@ -1964,9 +2317,9 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
               <div style={{ display:"flex",flexWrap:"wrap",gap:8,maxHeight:240,overflowY:"auto" }}>
                 {Object.entries(btData.stats.byLeague).sort((a,b)=>(b[1]?.rate||0)-(a[1]?.rate||0)).map(([lg, stat]) => stat && (
                   <div key={lg} style={{ background:C.surface,border:`1px solid ${C.radar}20`,borderRadius:8,padding:"8px 12px",minWidth:130 }}>
-                    <div style={{ fontSize:7,color:C.muted,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{lg}</div>
+                    <div style={{ fontSize:7,color:C.text,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{lg}</div>
                     <div style={{ fontSize:14,fontWeight:800,color:stat.rate>=55?C.green:stat.rate>=45?C.gold:C.red }}>{stat.rate}%</div>
-                    <div style={{ fontSize:7,color:C.muted }}>{stat.wins}/{stat.total}</div>
+                    <div style={{ fontSize:7,color:C.text }}>{stat.wins}/{stat.total}</div>
                   </div>
                 ))}
               </div>
@@ -1974,13 +2327,13 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
           )}
 
           <div className="gc" style={{ padding:"16px",marginBottom:20 }}>
-            <div style={{ fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:12 }}>By Market</div>
+            <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:12 }}>By Market</div>
             <div style={{ display:"flex",flexWrap:"wrap",gap:8 }}>
               {Object.entries(btData.stats.byMarket||{}).map(([mkt, stat]) => stat && (
                 <div key={mkt} style={{ background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",minWidth:120 }}>
-                  <div style={{ fontSize:8,color:C.muted,marginBottom:4 }}>{mkt}</div>
+                  <div style={{ fontSize:8,color:C.text,marginBottom:4 }}>{mkt}</div>
                   <div style={{ fontSize:16,fontWeight:800,color:stat.rate>=55?C.green:stat.rate>=45?C.gold:C.red }}>{stat.rate}%</div>
-                  <div style={{ fontSize:8,color:C.muted }}>{stat.wins}/{stat.total}</div>
+                  <div style={{ fontSize:8,color:C.text }}>{stat.wins}/{stat.total}</div>
                 </div>
               ))}
             </div>
@@ -1988,7 +2341,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
 
           {btData.matches && (
             <div className="gc" style={{ overflow:"hidden" }}>
-              <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 72px 40px 40px":"1fr 110px 80px 55px 55px",gap:8,padding:"10px 16px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
+              <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 72px 40px 40px":"1fr 110px 80px 55px 55px",gap:8,padding:"10px 16px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
                 <span>Match</span><span>{isMobile?"Pick":"The Read"}</span>{!isMobile&&<span>Score</span>}<span>Read</span><span>Edge</span>
               </div>
               <div style={{ maxHeight:500,overflowY:"auto" }}>
@@ -1996,14 +2349,14 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
                   <div key={i} style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 72px 40px 40px":"1fr 110px 80px 55px 55px",gap:8,padding:"8px 16px",borderBottom:`1px solid ${C.faint}`,fontSize:10,alignItems:"center" }}>
                     <div>
                       <div style={{ color:C.text,fontWeight:600 }}>{r.teams.home} vs {r.teams.away}</div>
-                      <div style={{ fontSize:8,color:C.muted }}>{r.league}</div>
-                      {isMobile && r.hGoals != null && <div style={{ fontSize:8,color:C.muted }}>{r.hGoals} – {r.aGoals}</div>}
+                      <div style={{ fontSize:8,color:C.text }}>{r.league}</div>
+                      {isMobile && r.hGoals != null && <div style={{ fontSize:8,color:C.text }}>{r.hGoals} – {r.aGoals}</div>}
                       {r.strategyTags?.length>0 && <div style={{ fontSize:7,color:C.amber,marginTop:1 }}>{r.strategyTags.map(t=>STRATEGY_LABELS[t]||t).join(" · ")}</div>}
                     </div>
                     <div style={{ color:mktStyle(r.theRead?.anchor?.market||r.safeBet?.market).color||C.muted,fontSize:9,fontWeight:700,lineHeight:1.4 }}>
                       {r.theRead?.anchor?.pick||r.safeBet?.pick||"—"}
                     </div>
-                    {!isMobile && <div style={{ color:C.muted }}>
+                    {!isMobile && <div style={{ color:C.text }}>
                       {r.hGoals != null ? `${r.hGoals} – ${r.aGoals}` : "—"}
                     </div>}
                     <div style={{ fontWeight:800,color:resColor(r.readResult||r.safeBetResult||r.result),fontSize:11 }}>
@@ -2020,7 +2373,7 @@ function BacktestTab({ loadSnapshot, adminMode, onReloadFixtures }) {
         </>
       )}
       {btData && !btData.stats && (
-        <div style={{ textAlign:"center",padding:"40px",color:C.faint,fontSize:11 }}>
+        <div style={{ textAlign:"center",padding:"40px",color:C.text,fontSize:11 }}>
           {btData.message || "No results found in range"}
         </div>
       )}
@@ -2070,7 +2423,14 @@ function TicketBookNowButton({ legs }) {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Booking failed");
       setResult({ ...data, bookieId: bookie });
-    } catch(e) { setError(e.message); }
+    } catch(e) {
+      const msg = e.message || "";
+      setError(
+        msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("Failed to fetch") || msg.includes("net::ERR")
+          ? "Can't reach SportyBet — check your connection and try again."
+          : msg || "Booking failed — please try again."
+      );
+    }
     finally { setBooking(false); }
   };
 
@@ -2097,14 +2457,14 @@ function TicketBookNowButton({ legs }) {
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
         <span style={{ fontSize:8,fontWeight:800,color:C.gold,letterSpacing:".1em",textTransform:"uppercase" }}>🎟️ Book Now</span>
         <button onClick={() => { setOpen(false); reset(); }} className="gb"
-          style={{ background:"transparent",border:"none",color:C.muted,fontSize:13,padding:0 }}>✕</button>
+          style={{ background:"transparent",border:"none",color:C.text,fontSize:13,padding:0 }}>✕</button>
       </div>
 
       {!result ? (
         <>
           {/* Bookmaker selector — visible dropdown with chevron */}
           <div style={{ marginBottom:10 }}>
-            <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:5 }}>Select Bookmaker</div>
+            <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:5 }}>Select Bookmaker</div>
             <div style={{ position:"relative" }}>
               <select value={bookie} onChange={e => { setBookie(e.target.value); reset(); }}
                 style={{ width:"100%",background:C.surface,color:bookie?C.text:C.muted,border:`1px solid ${C.goldBorder}`,borderRadius:6,padding:"8px 32px 8px 10px",fontSize:10,fontWeight:600,cursor:"pointer",WebkitAppearance:"none",MozAppearance:"none",appearance:"none" }}>
@@ -2118,14 +2478,24 @@ function TicketBookNowButton({ legs }) {
             </div>
           </div>
 
-          <div style={{ fontSize:8,color:C.muted,marginBottom:10 }}>
+          <div style={{ fontSize:8,color:C.text,marginBottom:10 }}>
             {legCount} leg{legCount !== 1 ? "s" : ""}{bookie ? ` · ${selectedBookie?.label}` : ""}
           </div>
 
-          <button onClick={book} disabled={booking || !legCount || !bookie} className="gb"
-            style={{ width:"100%",background:(booking||!legCount||!bookie)?C.faint:C.gold,color:(booking||!legCount||!bookie)?C.muted:C.accentText,padding:"8px 0",fontWeight:800,fontSize:10 }}>
-            {booking ? <span className="pu">Booking…</span> : !bookie ? "Select a bookmaker" : "Generate Code"}
-          </button>
+          {booking ? (
+            <div style={{ width:"100%",background:C.faint,borderRadius:8,padding:"10px 14px",display:"flex",alignItems:"center",gap:10,border:`1px solid ${C.border}` }}>
+              <span style={{ fontSize:14 }}>⏳</span>
+              <div>
+                <div style={{ fontSize:10,fontWeight:800,color:C.text }}>Booking your ticket…</div>
+                <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>Takes 10–20 seconds. Don't close.</div>
+              </div>
+            </div>
+          ) : (
+            <button onClick={book} disabled={!legCount || !bookie} className="gb"
+              style={{ width:"100%",background:(!legCount||!bookie)?C.faint:C.gold,color:(!legCount||!bookie)?C.muted:C.accentText,padding:"8px 0",fontWeight:800,fontSize:10 }}>
+              {!bookie ? "Select a bookmaker" : "Generate Code"}
+            </button>
+          )}
 
           {error && (
             <div style={{ fontSize:8,color:C.red,marginTop:6,display:"flex",alignItems:"center",gap:8 }}>
@@ -2137,15 +2507,18 @@ function TicketBookNowButton({ legs }) {
         </>
       ) : (
         <div>
-          <div style={{ fontSize:7,color:C.green,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:8 }}>
-            ✓ BOOKED · {BOOKMAKERS.find(b=>b.id===result.bookieId)?.label}
+          {/* Primary — deep link */}
+          <div style={{ fontSize:7,color:C.green,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:6 }}>
+            ✓ {result.resolved}/{result.total} leg{result.total!==1?"s":""} booked · {BOOKMAKERS.find(b=>b.id===result.bookieId)?.label}
           </div>
 
-          {/* Primary — deep link */}
           <button onClick={() => window.open(selectedBookie.link(result.code), "_blank")} className="gb"
-            style={{ width:"100%",background:C.gold,color:C.accentText,padding:"9px 0",fontWeight:800,fontSize:11,marginBottom:8 }}>
+            style={{ width:"100%",background:C.gold,color:C.accentText,padding:"9px 0",fontWeight:800,fontSize:11,marginBottom:4 }}>
             🎟️ Open in {selectedBookie.label}
           </button>
+          <div style={{ fontSize:7,color:C.muted,textAlign:"center",marginBottom:8 }}>
+            Opens {selectedBookie?.label} · your picks are pre-loaded
+          </div>
 
           {/* Secondary — code + copy */}
           <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
@@ -2159,12 +2532,31 @@ function TicketBookNowButton({ legs }) {
           </div>
 
           {result.failed?.length > 0 && (
-            <div style={{ fontSize:7,color:C.amber,marginBottom:6 }}>⚠ Skipped: {result.failed.join(", ")}</div>
+            <div style={{ marginBottom:8,background:`${C.amber}10`,border:`1px solid ${C.amber}30`,borderRadius:6,padding:"8px 10px" }}>
+              <div style={{ fontSize:8,color:C.amber,fontWeight:800,marginBottom:6 }}>
+                ⚠ {result.failed.length} leg{result.failed.length!==1?"s":""} couldn't be booked
+              </div>
+              {result.failed.map((f, i) => {
+                const isObj = f && typeof f === "object";
+                const label = isObj ? f.label : f;
+                const reason = isObj
+                  ? f.failReason === "tt_unavailable"
+                    ? "Team Total market not available on SportyBet for this match. Try Over 2.5 or BTTS instead."
+                    : "Match not found on SportyBet. May not be listed yet or have a different name."
+                  : "Could not be resolved.";
+                return (
+                  <div key={i} style={{ marginBottom: i < result.failed.length-1 ? 6 : 0 }}>
+                    <div style={{ fontSize:8,color:C.text,fontWeight:700 }}>{label}</div>
+                    <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{reason}</div>
+                  </div>
+                );
+              })}
+            </div>
           )}
 
           {/* Try another bookmaker */}
           <button onClick={reset} className="gb"
-            style={{ width:"100%",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,padding:"4px 0",fontSize:8 }}>
+            style={{ width:"100%",background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"4px 0",fontSize:8 }}>
             ↺ Try another bookmaker
           </button>
         </div>
@@ -2289,16 +2681,16 @@ function FixtureBookNow({ fixture, onAddToParlay }) {
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
         <span style={{ fontSize:8, fontWeight:800, color:C.gold, letterSpacing:".12em", textTransform:"uppercase" }}>🎟️ Custom Pick</span>
         <button onClick={() => setOpen(false)} className="gb"
-          style={{ background:"transparent", border:"none", color:C.muted, fontSize:11, padding:0 }}>✕</button>
+          style={{ background:"transparent", border:"none", color:C.text, fontSize:11, padding:0 }}>✕</button>
       </div>
-      <div style={{ fontSize:8, color:C.muted, marginBottom:8 }}>
+      <div style={{ fontSize:8, color:C.text, marginBottom:8 }}>
         <span style={{ color:C.text, fontWeight:700 }}>{home}</span>
-        <span style={{ color:C.faint }}> vs </span>
+        <span style={{ color:C.text }}> vs </span>
         <span style={{ color:C.text, fontWeight:700 }}>{away}</span>
       </div>
 
       {/* Market family */}
-      <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", marginBottom:4 }}>Market</div>
+      <div style={{ fontSize:7, color:C.text, textTransform:"uppercase", letterSpacing:".1em", marginBottom:4 }}>Market</div>
       <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:8 }}>
         {CUSTOM_BOOK_MARKETS.map(m => (
           <button key={m.value} onClick={() => changeMarket(m.value)} className="gb"
@@ -2311,7 +2703,7 @@ function FixtureBookNow({ fixture, onAddToParlay }) {
       {/* Pick */}
       {pickOptions.length > 0 && (
         <>
-          <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", marginBottom:4 }}>Pick</div>
+          <div style={{ fontSize:7, color:C.text, textTransform:"uppercase", letterSpacing:".1em", marginBottom:4 }}>Pick</div>
           <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:10 }}>
             {pickOptions.map(p => {
               const c = mktStyle(resolveDisplayMarket(market, p)).color || C.gold;
@@ -2352,9 +2744,9 @@ function FixtureBookNow({ fixture, onAddToParlay }) {
         if (!previewProb && !previewOdds) return null;
         return (
           <div style={{ display:"flex",justifyContent:"space-between",background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:5,padding:"5px 8px",marginBottom:8,fontSize:8 }}>
-            <span style={{ color:C.muted }}>Model prob</span>
+            <span style={{ color:C.text }}>Model prob</span>
             <span style={{ color:C.gold,fontWeight:700 }}>{previewProb ? `${Math.round(previewProb)}%` : "—"}</span>
-            <span style={{ color:C.muted }}>Odds</span>
+            <span style={{ color:C.text }}>Odds</span>
             <span style={{ color:previewOdds?C.green:C.red,fontWeight:700 }}>{previewOdds ? `${parseFloat(previewOdds).toFixed(2)}x` : "No data"}</span>
           </div>
         );
@@ -2461,13 +2853,13 @@ function FixtureSearchDropdown({ fixtures, selectedFixture, onSelect, placeholde
       {open && (
         <div style={{ position:"absolute",top:"100%",left:0,right:0,zIndex:300,background:C.modalBg,border:`1px solid ${C.border}`,borderRadius:8,marginTop:2,maxHeight:220,overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,0.7)" }}>
           {filtered.length === 0 && (
-            <div style={{ padding:"12px 14px",fontSize:9,color:C.faint,textAlign:"center" }}>No fixtures found</div>
+            <div style={{ padding:"12px 14px",fontSize:9,color:C.text,textAlign:"center" }}>No fixtures found</div>
           )}
           {filtered.map(f => (
             <button key={f.id} onClick={() => { onSelect(f); setOpen(false); setQuery(""); }} className="gb"
               style={{ width:"100%",textAlign:"left",padding:"8px 12px",background:"transparent",border:"none",borderBottom:`1px solid ${C.faint}`,color:C.text,fontSize:10,fontWeight:600,borderRadius:0,letterSpacing:0,textTransform:"none",cursor:"pointer" }}>
               <div style={{ lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
-              <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{f.league} · {f.time}</div>
+              <div style={{ fontSize:7,color:C.text,marginTop:1 }}>{f.league} · {f.time}</div>
             </button>
           ))}
         </div>
@@ -2563,7 +2955,7 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
   return (
     <div style={{ background:C.surface,border:`1px solid ${C.goldBorder}`,borderRadius:12,padding:"16px" }}>
       <div style={{ fontSize:10,fontWeight:800,color:C.gold,letterSpacing:".12em",textTransform:"uppercase",marginBottom:4 }}>🎟️ Custom Picks</div>
-      <div style={{ fontSize:8,color:C.muted,marginBottom:12 }}>
+      <div style={{ fontSize:8,color:C.text,marginBottom:12 }}>
         {hasFixtures ? "Select fixtures and picks · adds to your ticket" : "Enter your own picks · adds to your ticket"}
       </div>
 
@@ -2572,14 +2964,14 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
         return (
           <div key={i} style={{ background:C.bg,borderRadius:8,padding:"10px 12px",marginBottom:8,border:`1px solid ${C.border}` }}>
             <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-              <span style={{ fontSize:8,color:C.muted,fontWeight:700 }}>LEG {i+1}</span>
-              {legs.length>1 && <button onClick={()=>removeLeg(i)} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:11,padding:0 }}>✕</button>}
+              <span style={{ fontSize:8,color:C.text,fontWeight:700 }}>LEG {i+1}</span>
+              {legs.length>1 && <button onClick={()=>removeLeg(i)} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:11,padding:0 }}>✕</button>}
             </div>
 
             {/* Fixture selector — searchable dropdown if fixtures loaded, else free text */}
             {hasFixtures ? (
               <div style={{ marginBottom:8 }}>
-                <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Fixture</div>
+                <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Fixture</div>
                 <FixtureSearchDropdown
                   fixtures={fixtures}
                   selectedFixture={selectedFixtures[i]}
@@ -2587,7 +2979,7 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
                   placeholder="Search team or league…"
                 />
                 {selectedFixtures[i] && (
-                  <div style={{ fontSize:7,color:C.muted,marginTop:3 }}>
+                  <div style={{ fontSize:7,color:C.text,marginTop:3 }}>
                     {selectedFixtures[i].league} · {selectedFixtures[i].time}
                   </div>
                 )}
@@ -2602,7 +2994,7 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
             {/* Market selector — buttons */}
             {leg.home && leg.away && (
               <>
-                <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Market</div>
+                <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Market</div>
                 <div style={{ display:"flex",flexWrap:"wrap",gap:4,marginBottom:8 }}>
                   {CUSTOM_BOOK_MARKETS.map(m => (
                     <button key={m.value} onClick={() => updateLeg(i,"market",m.value)} className="gb"
@@ -2615,7 +3007,7 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
                 {/* Pick options — buttons, auto-populated */}
                 {pickOptions.length > 0 && (
                   <>
-                    <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Pick</div>
+                    <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Pick</div>
                     <div style={{ display:"flex",flexWrap:"wrap",gap:4 }}>
                       {pickOptions.map(p => (
                         <button key={p} onClick={() => updateLeg(i,"pick",p)} className="gb"
@@ -2633,7 +3025,7 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
       })}
 
       <button onClick={addLeg} className="gb"
-        style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,padding:"4px 12px",fontSize:9,marginBottom:10 }}>
+        style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"4px 12px",fontSize:9,marginBottom:10 }}>
         + Add Leg
       </button>
 
@@ -2666,7 +3058,7 @@ function CopyCodeButton({ code }) {
   );
 }
 
-function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixture, onSaveInternal, onInject, savedCode, injecting }) {
+function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode }) {
   const [stakeInput, setStakeInput] = useState(ticket.stake > 0 ? String(ticket.stake) : "");
   const stake      = parseFloat(stakeInput) || 0;
   const potential  = parseFloat((stake * parseFloat(ticket.totalOdds)).toFixed(2));
@@ -2680,8 +3072,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
 
   return (
     <div className="gc" style={{ padding:"14px 16px",background:accentBg,border:`1px solid ${accentBdr}` }}>
-      {/* Header */}
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${accentBdr}` }}>
+      {/* Header — row 1: label + odds + save */}
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6 }}>
         <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
           {isJarvis && <span style={{ fontSize:8,color:C.edge,fontWeight:900,letterSpacing:".12em" }}>🤓 JARVIS</span>}
           {ticket.slotLabel && <span style={{ fontSize:9,fontWeight:800,color:accentColor }}>{ticket.slotLabel}</span>}
@@ -2689,8 +3081,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
           {ticket.edgeScore > 0 && <span style={{ fontSize:8,fontWeight:800,color:C.green,background:C.greenDim,border:`1px solid ${C.green}30`,borderRadius:4,padding:"1px 6px" }}>EDGE {ticket.edgeScore.toFixed(1)}</span>}
           {exhausted && <span style={{ fontSize:8,fontWeight:800,color:C.orange,background:C.orangeDim,border:`1px solid ${C.orange}30`,borderRadius:4,padding:"1px 6px" }}>⚠ EXHAUSTED</span>}
         </div>
-        <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
-          <span style={{ fontSize:10,color:C.text,fontWeight:700 }}>×{ticket.totalOdds}</span>
+        <div style={{ display:"flex",gap:6,alignItems:"center" }}>
+          <span style={{ fontSize:11,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
           {savedCode
             ? <span style={{ fontSize:9,fontWeight:800,color:C.green,background:C.greenDim,border:`1px solid ${C.green}30`,borderRadius:4,padding:"2px 7px" }}>✓ {savedCode}</span>
             : onSaveInternal && !exhausted && (
@@ -2700,23 +3092,36 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
               </button>
             )
           }
-          {/* ⚡ Inject button */}
-          {onInject && !exhausted && (
-            <button onClick={onInject} disabled={injecting} className="gb"
-              style={{ background:injecting?"transparent":`${C.radar}18`,border:`1px solid ${C.radar}50`,color:injecting?C.muted:C.radar,padding:"2px 8px",fontSize:9 }}>
-              {injecting ? <span className="pu">…</span> : "⚡ Check Progress"}
-            </button>
-          )}
-
-          <button onClick={onRemove} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
         </div>
       </div>
+      {/* Header — row 2: action buttons (remix, check progress, inject) */}
+      {(!exhausted) && (
+        <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${accentBdr}` }}>
+          {onRemix && (
+            <button onClick={onRemix} className="gb"
+              style={{ background:`${C.radar}18`,border:`1px solid ${C.radar}40`,color:C.radar,padding:"3px 10px",fontSize:9,display:"flex",alignItems:"center",gap:4 }}>
+              🔀 Remix{ticket._remixed ? " ✓" : ""}
+            </button>
+          )}
+          <div style={{ flex:1 }}/>
+          <button onClick={onRemove} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
+        </div>
+      )}
 
       {/* Exhausted state */}
       {isJarvis && exhausted && (
-        <div style={{ padding:"10px 0",textAlign:"center" }}>
-          <div style={{ fontSize:9,color:C.orange,fontWeight:700,marginBottom:4 }}>Slot unavailable today</div>
-          <div style={{ fontSize:8,color:C.muted }}>{ticket.jarvisReason}</div>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8 }}>
+          <div style={{ padding:"10px 0",flex:1 }}>
+            <div style={{ fontSize:9,color:C.orange,fontWeight:700,marginBottom:4 }}>⚠ Pool exhausted before reaching target odds</div>
+            <div style={{ fontSize:8,color:C.text,marginBottom:6 }}>{ticket.jarvisReason}</div>
+            {ticket.saturatedMarkets?.length > 0
+              ? <div style={{ fontSize:7,color:C.amber }}>Market cap of {ticket.maxSameMarket} blocked more {ticket.saturatedMarkets.join("/")} picks. Raise Max Same Market or lower Target Odds.</div>
+              : ticket.poolSize < 4
+                ? <div style={{ fontSize:7,color:C.muted }}>Only {ticket.poolSize} game{ticket.poolSize!==1?"s":""} qualified today. Fetch a fresh snapshot or lower Target Odds.</div>
+                : <div style={{ fontSize:7,color:C.muted }}>All {ticket.poolSize} qualifying games were used. Lower Target Odds for a shorter ticket.</div>
+            }
+          </div>
+          <button onClick={onRemove} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:13,padding:0,flexShrink:0 }}>✕</button>
         </div>
       )}
 
@@ -2730,7 +3135,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
             </div>
             <span style={{ fontSize:9,color:C.edge,fontWeight:800 }}>{ticket.jarvisConf}%</span>
           </div>
-          {ticket.jarvisReason && <div style={{ fontSize:7,color:C.muted,marginTop:3,lineHeight:1.4 }}>{ticket.jarvisReason}</div>}
+          {ticket.jarvisReason && <div style={{ fontSize:7,color:C.text,marginTop:3,lineHeight:1.4 }}>{ticket.jarvisReason}</div>}
         </div>
       )}
 
@@ -2750,15 +3155,22 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
                     <div style={{ fontSize:9,color:C.text,fontWeight:600,marginBottom:2,lineHeight:1.35 }}>{leg.game}</div>
                   )}
                 </div>
-                {onRemoveLeg && (
-                  <button onClick={() => onRemoveLeg(i)} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:11,padding:"0 0 0 6px",lineHeight:1,flexShrink:0 }}>✕</button>
-                )}
+                <div style={{ display:"flex",gap:4,alignItems:"center",flexShrink:0 }}>
+                  {onSwapLeg && (
+                    <button onClick={() => onSwapLeg(i)} className="gb"
+                      title="Swap this leg for an alternative"
+                      style={{ background:"none",border:`1px solid ${C.radar}40`,color:C.radar,cursor:"pointer",fontSize:10,padding:"0 5px",lineHeight:"18px",borderRadius:4 }}>↺</button>
+                  )}
+                  {onRemoveLeg && (
+                    <button onClick={() => onRemoveLeg(i)} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:11,padding:"0 0 0 2px",lineHeight:1 }}>✕</button>
+                  )}
+                </div>
               </div>
               {/* Inject result badge */}
               {leg._result && (
                 <span style={{ fontSize:8,fontWeight:800,color:leg._result==="WIN"?C.green:leg._result==="LOSS"?C.red:C.muted,marginBottom:4,display:"block" }}>
                   {leg._result==="WIN"?"✓":leg._result==="LOSS"?"✕":"–"} {leg._result}
-                  {leg._score && <span style={{ fontWeight:400,color:C.muted,marginLeft:4 }}>{leg._score}</span>}
+                  {leg._score && <span style={{ fontWeight:400,color:C.text,marginLeft:4 }}>{leg._score}</span>}
                 </span>
               )}
               <div style={{ display:"flex",justifyContent:"space-between" }}>
@@ -2773,7 +3185,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
                 </div>
                 <div style={{ textAlign:"right" }}>
                   <span style={{ fontSize:10,fontWeight:700,color:accentColor }}>{leg.odds ? `${parseFloat(leg.odds).toFixed(2)}x` : "—"}</span>
-                  <span style={{ fontSize:8,color:C.muted,marginLeft:4 }}>({Math.round(leg.conf||0)}%)</span>
+                  <span style={{ fontSize:8,color:C.text,marginLeft:4 }}>({Math.round(leg.conf||0)}%)</span>
                   {leg.empiricalRate != null && (
                     <div style={{ fontSize:7,color:C.radar,marginTop:1 }}>{leg.empiricalRate}% hist</div>
                   )}
@@ -2792,15 +3204,15 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
       {/* Stake + return */}
       {!exhausted && (
         <div style={{ paddingTop:10,borderTop:`1px solid ${accentBdr}`,marginTop:4 }}>
-          <div style={{ fontSize:8,color:C.muted,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:10 }}>
+          <div style={{ fontSize:8,color:C.text,fontWeight:800,letterSpacing:".1em",textTransform:"uppercase",marginBottom:10 }}>
             Check Your Estimated Winning
           </div>
           <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
             <div>
-              <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Stake</div>
+              <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Stake</div>
               {isManual ? (
                 <div style={{ display:"flex",alignItems:"center",gap:6 }}>
-                  <span style={{ fontSize:11,color:C.muted }}>$</span>
+                  <span style={{ fontSize:11,color:C.text }}>$</span>
                   <input type="number" value={stakeInput} onChange={e=>setStakeInput(e.target.value)}
                     placeholder="0.00" className="gi" style={{ width:80,padding:"4px 7px",fontSize:12,fontWeight:800,color:C.text }}
                     onFocus={e=>e.target.select()}/>
@@ -2820,12 +3232,31 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, isJarvis, onOpenFixtu
           </div>
         </div>
       )}
+
+      {/* Market saturation notice */}
+      {ticket.saturatedMarkets?.length > 0 && (
+        <div style={{ background:`${C.amber}10`,border:`1px solid ${C.amber}30`,borderRadius:6,padding:"8px 10px",marginBottom:8 }}>
+          <div style={{ fontSize:8,color:C.amber,fontWeight:800,marginBottom:4 }}>
+            ⚠ Market cap of {ticket.maxSameMarket} reached — {ticket.saturatedMarkets.join(", ")}
+          </div>
+          <div style={{ fontSize:7,color:C.muted,marginBottom:6 }}>
+            More games qualify but they all share the same market.
+            Raise "Max Same Market" to include them, or lower Target Odds for a shorter ticket.
+          </div>
+          {onRemix && (
+            <button onClick={onRemix} className="gb"
+              style={{ padding:"3px 10px",fontSize:8,background:C.radar,color:C.accentText,border:"none" }}>
+              🔀 Remix
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 // ── JARVIS TICKET CARD ────────────────────────────────────────────────────
-function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInternal, onInject, savedCode, injecting }) {
+function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInternal, savedCode, onRemix, onSwapLeg }) {
   const [analysis, setAnalysis] = useState(null);
   const [analysing, setAnalysing] = useState(false);
 
@@ -2852,8 +3283,9 @@ function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInterna
       <TicketCard
         ticket={ticket} date={date} isJarvis={true}
         onRemove={onRemove} onOpenFixture={onOpenFixture}
-        onSaveInternal={onSaveInternal} onInject={onInject}
-        savedCode={savedCode} injecting={injecting}
+        onSaveInternal={onSaveInternal}
+        savedCode={savedCode}
+        onRemix={onRemix} onSwapLeg={onSwapLeg}
       />
       {!ticket.exhausted && (
         <>
@@ -2913,76 +3345,6 @@ function DraftTicketBanner({ draftLegs, onOpen, onClear }) {
 // Fixed bottom bar. Scrolls continuously right → left like a news channel.
 // Loads yesterday's snapshot on mount, scores Safe + Value tiers and the
 // full pool hit rate, then builds the ticker string. No dismiss — ambient.
-function GrmNewsTicker({ historicalRates }) {
-  const [text, setText] = useState(null);
-
-  useEffect(() => {
-    if (!historicalRates) return;
-    const yest = new Date(Date.now() - 86_400_000).toISOString().split("T")[0];
-    (async () => {
-      try {
-        const r = await fetch(`${SERVER}/api/load-snapshot?date=${yest}`);
-        if (!r.ok) return;
-        const { data: fixtures } = await r.json();
-        if (!fixtures?.length) return;
-
-        // Only work with resolved fixtures
-        const resolved = fixtures.filter(f => f.hGoals != null);
-        if (!resolved.length) return;
-
-        // ── Pool hit rate ─────────────────────────────────────────────────
-        const poolWins  = resolved.filter(f => f.readResult === "WIN").length;
-        const poolTotal = resolved.length;
-        const poolPct   = poolTotal ? ((poolWins / poolTotal) * 100).toFixed(1) : null;
-
-        // ── Build Safe + Value tiers for yesterday ────────────────────────
-        const bets   = buildDailyBestBets(fixtures, historicalRates);
-        const resMap = new Map(resolved.map(f => [f.id, f]));
-
-        const scoreTier = tier => {
-          if (!tier?.legs?.length) return null;
-          const legs = tier.legs.filter(l => resMap.has(l.fixtureId));
-          if (!legs.length) return null;
-          const wins = legs.filter(l => (resMap.get(l.fixtureId)?.readResult || resMap.get(l.fixtureId)?.safeBetResult) === "WIN").length;
-          const odds = parseFloat(tier.totalOdds).toFixed(1);
-          const tag  = wins === legs.length ? "✅ WIN" : wins > 0 ? "⚠️ PARTIAL" : "❌ LOSS";
-          return { wins, total: legs.length, odds, tag };
-        };
-
-        const safe  = scoreTier(bets?.safe);
-        const value = scoreTier(bets?.value);
-
-        // ── Build ticker string ───────────────────────────────────────────
-        const parts = [`📅 Yesterday ${yest}`];
-        if (safe)  parts.push(`🛡️ Safe Bet: ${safe.tag} ${safe.wins}/${safe.total} · ×${safe.odds}`);
-        if (value) parts.push(`⚡ Value Bet: ${value.tag} ${value.wins}/${value.total} · ×${value.odds}`);
-        if (poolPct) parts.push(`🎯 Engine Pool: ${poolWins}/${poolTotal} hits · ${poolPct}%`);
-
-        // Separator + duplicate for seamless loop feel
-        const segment = parts.join("   ·   ");
-        setText(`${segment}   ·   ${segment}`);
-      } catch { /* silent */ }
-    })();
-  }, [historicalRates]);
-
-  if (!text) return null;
-
-  return (
-    <div style={{
-      position:"fixed", bottom:0, left:0, right:0, zIndex:300,
-      background:C.surface, borderTop:`1px solid ${C.border}`,
-      height:26, overflow:"hidden", display:"flex", alignItems:"center",
-    }}>
-      <span className="ticker-track" style={{
-        fontSize:9, fontWeight:700, color:C.text,
-        fontFamily:C.font, letterSpacing:".04em", lineHeight:1,
-      }}>
-        {text}
-      </span>
-    </div>
-  );
-}
-
 // ── DAILY BEST BETS — Safe (2–10×) and Value (10–100×) ───────────────────
 // Pre-generates the engine's two opinionated tickets for the day.
 // Safe: stops when odds ≥ 2, max 10. Value: stops when odds ≥ 10, max 100.
@@ -3025,6 +3387,17 @@ function buildDailyBestBets(fixtures, historicalRates) {
 }
 
 
+async function saveEngineParlaysForDate(date, fixtures, historicalRates) {
+  if (!date || !fixtures?.length) return;
+  try {
+    const bets = buildDailyBestBets(fixtures, historicalRates);
+    if (!bets.safe && !bets.value) return;
+    await fetch(`${SERVER}/api/engine-parlays/save`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, safe: bets.safe || null, value: bets.value || null }),
+    });
+  } catch { /* non-critical */ }
+}
 async function savePoolToServer(pool, date) {
   if (!pool?.length || !date) return;
   try {
@@ -3050,15 +3423,32 @@ async function fetchPoolPerformance(days = 30) {
 // Single pool + single builder used by both Builder and Jarvis.
 // Calibrated from Apr 4–24 backtest (723 resolved games).
 
+// Market base rates: long-run football priors, used when backtest sample is thin.
+// Derived from large-sample European football data (thousands of matches).
+// These replace the flat 0.55 fallback — each market has a meaningfully different base.
+const MARKET_BASE_RATES = {
+  "Over 1.5":  0.76,   // ~76% of games have 2+ goals
+  "Over 2.5":  0.53,   // ~53% of games have 3+ goals
+  "Over 3.5":  0.28,   // ~28% of games have 4+ goals
+  "Under 2.5": 0.47,
+  "Under 3.5": 0.72,
+  "Under 4.5": 0.87,
+  "BTTS":      0.51,   // ~51% both teams score
+  "1X2":       0.46,   // home win base rate
+  "DC":        0.70,   // double chance — high base by design
+  "TeamTotal": 0.72,   // team to score O0.5
+  _default:    0.52,
+};
+
 const CALIBRATION = {
   oddsFloor: {
     "Over 1.5":1.18, "Under 3.5":1.15, "Under 4.5":1.15,
     "Over 2.5":1.15, "Under 2.5":1.15, "Over 3.5":1.15,
     "BTTS":1.15, "1X2":1.15, "DC":1.15, "TeamTotal":1.15, _default:1.15,
   },
-  blockedMarkets: new Set(["TeamTotal"]),
-  bttsMinConf: 80,
-  under35Guards: { maxOver25:37, minSeasonGames:16 },
+  blockedMarkets: new Set(["TeamTotal"]),  // TT uses Goal Radar, never a Read anchor
+  bttsMinConf: 65,        // was 80 — too strict, only 12 picks entered; strategy data shows 76.8% at full volume
+  under35Guards: { maxOver25:37, minSeasonGames:10 },  // minSeasonGames was 16, too aggressive
   volatileLeagues: {
     "J1 League, East":           { boostRequired:5 },
     "Liga de Expansion MX, Clausura":{ boostRequired:5 },
@@ -3071,20 +3461,24 @@ const CALIBRATION = {
   },
   volatileAffectedMarkets: new Set(["Under 3.5","Under 2.5","BTTS"]),
   oddsLogBase: Math.E,
-  unknownMarketFallback: 0.55,
   modifiers: { lowConfPenalty:0.80, volatilePenalty:0.85, strongBoost:1.15, stratBoost:1.10 },
 };
 
 function getOddsFloor(market) {
   return CALIBRATION.oddsFloor[market] ?? CALIBRATION.oddsFloor._default;
 }
+
+// Three-tier empirical rate lookup:
+// 1. Prob band (market + confidence band) — most specific, needs 5+ samples
+// 2. Market level — needs 5+ samples
+// 3. Market base rate — long-run football prior, never a flat number
 function getEmpiricalRate(market, conf, historicalRates) {
-  const band    = `${Math.floor(conf/5)*5}-${Math.floor(conf/5)*5+5}`;
+  const band     = `${Math.floor(conf/5)*5}-${Math.floor(conf/5)*5+5}`;
   const bandData = historicalRates?.byProbBand?.[`${market}:${band}`];
   if (bandData?.total >= 5) return bandData.rate / 100;
-  const mktData  = historicalRates?.byMarket?.[market];
+  const mktData = historicalRates?.byMarket?.[market];
   if (mktData?.total >= 5) return mktData.rate / 100;
-  return CALIBRATION.unknownMarketFallback;
+  return MARKET_BASE_RATES[market] ?? MARKET_BASE_RATES._default;
 }
 function isLeagueVolatile(league) { return league in CALIBRATION.volatileLeagues; }
 function getVolatileBoost(league) { return CALIBRATION.volatileLeagues[league]?.boostRequired ?? 0; }
@@ -3123,17 +3517,31 @@ function evaluatePick(f, historicalRates) {
   if (odds < getOddsFloor(market)) return null;
 
   const empiricalRate = getEmpiricalRate(market, conf, historicalRates);
-  const logOdds = Math.log(odds) / Math.log(CALIBRATION.oddsLogBase);
-  let score = empiricalRate * logOdds;
+
+  // Pool qualification guard — reject low hit-rate picks before they enter.
+  // Kills draws (~33%), longshot 1X2, and volatile speculative picks.
+  if (empiricalRate < POOL_MIN_EMPIRICAL_RATE) return null;
+
+  // Scoring formula: p² × ln(o)/o
+  // p² makes probability dominant — a 72% pick outranks a 45% pick regardless of odds.
+  // ln(o)/o peaks at o=e≈2.718 then decays, so odds above ~2.7 are actively penalised.
+  // Sweet spot naturally emerges around 1.40–1.70 odds with 65–80% empirical rate.
+  const lnO     = Math.log(odds);                                    // natural log
+  const pExp    = Math.pow(empiricalRate, POOL_SCORE_P_EXP);         // p²
+  let score     = pExp * (lnO / odds);                               // p² × ln(o)/o
   if (f.markets?._lowConfidence)  score *= CALIBRATION.modifiers.lowConfPenalty;
   if (f.volatileLeague)           score *= CALIBRATION.modifiers.volatilePenalty;
   if (anchor.strong)              score *= CALIBRATION.modifiers.strongBoost;
   if (f.strategyTags?.length > 0) score *= CALIBRATION.modifiers.stratBoost;
 
+  // Utility: score / (1 - empiricalRate) — penalises legs likely to kill the parlay.
+  // A 78% pick at 1.35 odds ranks above a 65% pick at 1.60 even if raw scores are close.
+  const utility = score / Math.max(0.01, 1 - empiricalRate);
+
   return {
     fixtureId:     f.id,
     game:          `${f.teams.home} vs ${f.teams.away}`,
-    pick, odds: parseFloat(odds.toFixed(2)), conf, market, league, score,
+    pick, odds: parseFloat(odds.toFixed(2)), conf, market, league, score, utility,
     empiricalRate: parseFloat((empiricalRate * 100).toFixed(1)),
     strategyLabel: anchor.strong ? "STRONG" : "Read",
     strategyTags:  f.strategyTags || [],
@@ -3148,7 +3556,9 @@ function buildUniversalPool(fixtures, historicalRates) {
     const entry = evaluatePick(f, historicalRates);
     if (entry) pool.push(entry);
   }
-  return pool.sort((a, b) => b.score - a.score);
+  // Sort by utility (score / (1-p)) — surfaces picks that are both high quality
+  // and unlikely to kill the parlay, not just raw score.
+  return pool.sort((a, b) => b.utility - a.utility);
 }
 
 // Builds a single parley — runs until pool exhausted or target hit (no leg cap).
@@ -3183,7 +3593,7 @@ function buildOneParlayFromPool(pool, usedIds, target, stake) {
 }
 
 // Auto mode — one best ticket (Jarvis).
-function buildUniversalParley(fixtures, { targetOdds, historicalRates, budget = 0, budgetPct = 100 }) {
+function buildUniversalParley(fixtures, { targetOdds, historicalRates, budget = 0, budgetPct = 100, maxSameMarket = 5 }) {
   const pool   = buildUniversalPool(fixtures, historicalRates);
   const target = parseFloat(targetOdds) || 5.0;
   const stake  = parseFloat((budget * (budgetPct / 100)).toFixed(2));
@@ -3197,15 +3607,27 @@ function buildUniversalParley(fixtures, { targetOdds, historicalRates, budget = 
       edgeScore:0, jarvisConf:0, jarvisReason:"Pool too thin.",
     };
   }
-  const usedIds = new Set();
-  return { ...buildOneParlayFromPool(pool, usedIds, target, stake), poolSize: pool.length };
+  const usedIds    = new Set();
+  const marketCount = {};
+  // Apply market diversity cap — same logic as buildManualParlays
+  const cappedPool = pool.filter(e => {
+    const cnt = marketCount[e.market] || 0;
+    if (cnt >= maxSameMarket) return false;
+    marketCount[e.market] = cnt + 1;
+    return true;
+  });
+  // Reset for the actual build pass
+  Object.keys(marketCount).forEach(k => delete marketCount[k]);
+  return { ...buildOneParlayFromPool(cappedPool.length >= 2 ? cappedPool : pool, usedIds, target, stake), poolSize: pool.length };
 }
 
 // Manual mode — N non-overlapping tickets from the same pool.
-function buildManualParlays(fixtures, { numParlays, targetOdds, historicalRates, budget = 0, budgetPct = 100 }) {
+function buildManualParlays(fixtures, { numParlays, targetOdds, historicalRates, budget = 0, budgetPct = 100, maxSameMarket = 2 }) {
   const pool   = buildUniversalPool(fixtures, historicalRates);
   const target = parseFloat(targetOdds) || 5.0;
-  const n      = Math.max(1, Math.min(numParlays || 1, 10));
+  // Math.max(1,...) keeps the builder safe, but || uses 2 (state default) not 1
+  // so mid-type empty string doesn't snap to 1 and lock the user out.
+  const n      = Math.max(1, Math.min(numParlays || 2, 10));
   const totalStake = parseFloat((budget * (budgetPct / 100)).toFixed(2));
   const stakeEach  = parseFloat((totalStake / n).toFixed(2));
 
@@ -3214,13 +3636,73 @@ function buildManualParlays(fixtures, { numParlays, targetOdds, historicalRates,
   const globalUsed = new Set();
   const tickets = [];
   for (let i = 0; i < n; i++) {
+    // Stratified shuffle within confidence bands for variety between tickets.
+    // Tier A: score > 0.8, Tier B: 0.6-0.8, Tier C: below.
+    // Shuffle within each tier so tickets don't always start with identical picks.
     const remaining = pool.filter(e => !globalUsed.has(e.fixtureId));
     if (remaining.length < 2) break;
-    const localUsed = new Set(globalUsed);
-    const ticket = buildOneParlayFromPool(remaining, localUsed, target, stakeEach);
-    if (!ticket || !ticket.legs.length) break;
-    ticket.legs.forEach(l => globalUsed.add(l.fixtureId));
-    tickets.push({ ...ticket, id: i + 1, poolSize: pool.length });
+
+    const tierA = remaining.filter(e => e.score > 0.8);
+    const tierB = remaining.filter(e => e.score > 0.6 && e.score <= 0.8);
+    const tierC = remaining.filter(e => e.score <= 0.6);
+    const shuffled = [
+      ...tierA.sort(() => Math.random() - 0.5),
+      ...tierB.sort(() => Math.random() - 0.5),
+      ...tierC.sort(() => Math.random() - 0.5),
+    ];
+
+    // Build one ticket with market diversity cap.
+    // Track which markets are saturated so we can surface a notice.
+    const localUsed   = new Set(globalUsed);
+    const marketCount = {};
+    const saturatedMarkets = new Set();
+    const legs = []; let prod = 1.0; let hitTarget = false;
+
+    for (const entry of shuffled) {
+      if (localUsed.has(entry.fixtureId)) continue;
+      const mkt = entry.market;
+      const mktCount = marketCount[mkt] || 0;
+
+      if (mktCount >= maxSameMarket) {
+        saturatedMarkets.add(mkt);
+        continue; // skip — cap reached for this market
+      }
+
+      const next = parseFloat((prod * entry.odds).toFixed(4));
+      legs.push(entry); prod = next;
+      localUsed.add(entry.fixtureId);
+      marketCount[mkt] = mktCount + 1;
+      if (prod >= target) { hitTarget = true; break; }
+    }
+
+    if (!legs.length) break;
+
+    legs.forEach(l => globalUsed.add(l.fixtureId));
+
+    const meanScore = legs.reduce((s,e) => s + e.score, 0) / legs.length;
+    const meanConf  = Math.round(legs.reduce((s,e) => s + e.conf, 0) / legs.length);
+    const meanRate  = Math.round(legs.reduce((s,e) => s + e.empiricalRate, 0) / legs.length);
+    const reason    = hitTarget
+      ? `${legs.length} legs · avg confidence ${meanConf}% · avg historical rate ${meanRate}%`
+      : `Pool exhausted at ${prod.toFixed(2)}× · ${legs.length} leg${legs.length !== 1 ? "s" : ""}`;
+
+    tickets.push({
+      legs: legs.map(e => ({
+        fixtureId: e.fixtureId, game: e.game, pick: e.pick, odds: e.odds,
+        conf: e.conf, market: e.market, league: e.league, strategyId: null,
+        strategyLabel: e.strategyLabel, strategyTags: e.strategyTags,
+        empiricalRate: e.empiricalRate, isVolatile: e.isVolatile,
+        score: parseFloat(e.score.toFixed(4)),
+      })),
+      totalOdds: prod.toFixed(2), exhausted: !hitTarget,
+      reason, poolSize: pool.length, stake: stakeEach,
+      edgeScore: parseFloat(meanScore.toFixed(3)),
+      jarvisConf: meanConf, jarvisReason: reason,
+      id: i + 1,
+      // Saturation notice payload — rendered in TicketCard if non-empty
+      saturatedMarkets: saturatedMarkets.size > 0 ? [...saturatedMarkets] : null,
+      maxSameMarket,
+    });
   }
   return tickets;
 }
@@ -3279,83 +3761,130 @@ const MKOPTS = [
   { id:"homeo05",  label:"H O0.5"       }, { id:"awayo05",  label:"A O0.5"       },
 ];
 
-// ── INJECT HELPER ─────────────────────────────────────────────────────────
-// Fetches results for a ticket's date and evaluates each leg inline.
-async function injectTicketResults(ticket, ticketDate) {
-  const date = ticketDate || todayStr();
-  try {
-    // Ensure results file exists for this date
-    await fetch(`${SERVER}/api/fetch-results?date=${date}`, { headers:{"x-admin-token":"sterling77"} });
-
-    // Normalise legs — backtest-upload needs fixtureId + market on every leg
-    const legs = (ticket.legs || []).map(leg => ({
-      fixtureId: leg.fixtureId || leg.id,
-      game:      leg.game || `${leg.home || ""} vs ${leg.away || ""}`,
-      pick:      leg.pick,
-      market:    leg.market || inferMarket(leg.pick),
-      conf:      leg.conf || leg.prob || null,
-      strategyId: leg.strategyId || null,
-    }));
-
-    if (!legs.some(l => l.fixtureId)) {
-      console.warn("injectTicketResults: no fixtureIds on legs — cannot match results");
-      return null;
-    }
-
-    const res  = await fetch(`${SERVER}/api/backtest-upload`, {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ date, legs }),
-    });
-    if (!res.ok) { console.warn("backtest-upload error:", res.status); return null; }
-    return await res.json(); // { parlayResult, legs: [{...leg, result, score}], summary }
-  } catch(e) {
-    console.error("injectTicketResults error:", e.message);
-    return null;
-  }
-}
-
 // ── LEAGUE FILTER ─────────────────────────────────────────────────────────
-function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
+// ── THRESHOLD CHIP — reusable expandable slider for ≥/≤ filters ─────────
+function ThresholdChip({ label, value, defaultValue, min, max, step, onChange, color, format }) {
   const [open, setOpen] = useState(false);
-
-  // Find if any league name appears more than once (same name, different leagueId)
-  const nameCounts = useMemo(() => {
-    const counts = {};
-    availableLeagues.forEach(lg => { counts[lg.league] = (counts[lg.league] || 0) + 1; });
-    return counts;
-  }, [availableLeagues]);
-
-  const activeLabel = useMemo(() => {
-    if (!leagueFilter) return "All Leagues";
-    const lg = availableLeagues.find(l => l.leagueId === leagueFilter);
-    if (!lg) return "All Leagues";
-    return nameCounts[lg.league] > 1 && lg.country ? `${lg.league} · ${lg.country}` : lg.league;
-  }, [leagueFilter, availableLeagues, nameCounts]);
-
+  const isActive = value !== defaultValue;
+  const fmt = format || (v => v);
   return (
     <div style={{ marginBottom:6 }}>
+      <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+        <button onClick={() => setOpen(o => !o)} className="gb"
+          style={{ padding:"4px 10px",fontSize:9,background:isActive?(color||C.radar):"transparent",color:isActive?C.accentText:C.muted,border:`1px solid ${isActive?(color||C.radar):C.faint}` }}>
+          {label} {fmt(value)}
+        </button>
+        {isActive && (
+          <button onClick={() => { onChange(defaultValue); setOpen(false); }} className="gb"
+            style={{ padding:"2px 7px",fontSize:8,background:"transparent",color:C.muted,border:`1px solid ${C.faint}` }}>
+            Reset
+          </button>
+        )}
+      </div>
+      {open && (
+        <div style={{ marginTop:6,padding:"8px 10px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,display:"flex",alignItems:"center",gap:10 }}>
+          <span style={{ fontSize:8,color:C.muted,flexShrink:0 }}>{fmt(min)}</span>
+          <input type="range" min={min} max={max} step={step} value={value}
+            onChange={e => onChange(parseFloat(e.target.value))} style={{ flex:1 }}/>
+          <span style={{ fontSize:8,color:C.muted,flexShrink:0 }}>{fmt(max)}</span>
+          <span style={{ fontSize:10,color:color||C.radar,fontWeight:800,width:32,textAlign:"right" }}>{fmt(value)}</span>
+          <button onClick={() => setOpen(false)} className="gb"
+            style={{ padding:"2px 8px",fontSize:8,background:C.accent,color:C.accentText,border:"none",flexShrink:0 }}>
+            Done
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
+  const [open, setOpen]         = useState(false);
+  const [search, setSearch]     = useState("");
+  const [expanded, setExpanded] = useState(new Set());
+
+  const grouped = useMemo(() => {
+    const map = new Map();
+    for (const lg of availableLeagues) {
+      const c = lg.country || "Other";
+      if (!map.has(c)) map.set(c, []);
+      map.get(c).push(lg);
+    }
+    return [...map.entries()]
+      .sort(([,aL],[,bL]) => Math.min(...aL.map(l=>l.leagueRank)) - Math.min(...bL.map(l=>l.leagueRank)))
+      .map(([country, leagues]) => ({ country, leagues: leagues.sort((a,b) => a.leagueRank - b.leagueRank) }));
+  }, [availableLeagues]);
+
+  const selected = leagueFilter instanceof Set ? leagueFilter : new Set(leagueFilter ? [leagueFilter] : []);
+
+  const toggleLeague = (id) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setLeagueFilter(next.size === 0 ? null : next);
+  };
+  const toggleCountry = (country, leagues) => {
+    const ids = leagues.map(l => l.leagueId);
+    const allSel = ids.every(id => selected.has(id));
+    const next = new Set(selected);
+    allSel ? ids.forEach(id => next.delete(id)) : ids.forEach(id => next.add(id));
+    setLeagueFilter(next.size === 0 ? null : next);
+  };
+
+  const searchLow = search.toLowerCase();
+  const filteredGroups = useMemo(() => {
+    if (!searchLow) return grouped;
+    return grouped.map(g => ({ ...g, leagues: g.leagues.filter(l => l.league.toLowerCase().includes(searchLow) || g.country.toLowerCase().includes(searchLow)) })).filter(g => g.leagues.length > 0);
+  }, [grouped, searchLow]);
+
+  const activeLabel = selected.size === 0 ? "All Leagues"
+    : selected.size === 1 ? (() => { const lg = availableLeagues.find(l => selected.has(l.leagueId)); return lg ? `${lg.league}${lg.country ? ` · ${lg.country}` : ""}` : "1 league"; })()
+    : `${selected.size} leagues`;
+
+  return (
+    <div style={{ marginBottom:6, position:"relative" }}>
       <button onClick={() => setOpen(o => !o)} className="gb"
-        style={{ padding:"3px 12px",fontSize:9,background:leagueFilter?C.radarDim:"transparent",color:leagueFilter?C.radar:C.muted,border:`1px solid ${leagueFilter?C.radar:C.faint}`,display:"flex",alignItems:"center",gap:5 }}>
+        style={{ padding:"3px 12px",fontSize:9,background:selected.size>0?C.radarDim:"rgba(255,255,255,0.10)",color:selected.size>0?C.radar:C.text,border:`1px solid ${selected.size>0?C.radar:C.borderHi}`,display:"flex",alignItems:"center",gap:5 }}>
         <span>🌍</span>
         <span style={{ maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{activeLabel}</span>
+        {selected.size > 0 && <span onClick={e=>{ e.stopPropagation(); setLeagueFilter(null); }} style={{ color:C.muted,fontSize:10,marginLeft:2 }}>✕</span>}
         <span style={{ fontSize:8 }}>{open ? "▲" : "▼"}</span>
       </button>
       {open && (
-        <div style={{ display:"flex",gap:4,flexWrap:"wrap",marginTop:5,padding:"8px 10px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8 }}>
-          <button onClick={() => { setLeagueFilter(null); setOpen(false); }} className="gb"
-            style={{ padding:"3px 10px",fontSize:9,background:!leagueFilter?C.radar:"transparent",color:!leagueFilter?C.accentText:C.muted,border:`1px solid ${!leagueFilter?C.radar:C.faint}` }}>
-            All
-          </button>
-          {availableLeagues.map(lg => {
-            const label = nameCounts[lg.league] > 1 && lg.country
-              ? `${lg.league} · ${lg.country}` : lg.league;
-            const active = leagueFilter === lg.leagueId;
+        <div style={{ position:"absolute",top:"100%",left:0,zIndex:200,width:280,maxHeight:400,overflowY:"auto",background:C.modalBg,border:`1px solid ${C.border}`,borderRadius:8,marginTop:3,boxShadow:"0 4px 20px rgba(0,0,0,0.4)" }}>
+          <div style={{ padding:"8px 10px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
+            <input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…"
+              style={{ width:"100%",background:C.faint,border:`1px solid ${C.border}`,borderRadius:5,padding:"4px 8px",fontSize:9,color:C.text,outline:"none",boxSizing:"border-box" }}/>
+          </div>
+          <div style={{ padding:"4px 10px",borderBottom:`1px solid ${C.faint}` }}>
+            <button onClick={() => { setLeagueFilter(null); setOpen(false); setSearch(""); }} className="gb"
+              style={{ width:"100%",textAlign:"left",padding:"4px 8px",fontSize:9,background:selected.size===0?C.radar:"rgba(255,255,255,0.07)",color:selected.size===0?"#fff":C.text,border:`1px solid ${selected.size===0?C.radar:C.borderHi}`,borderRadius:4,fontWeight:selected.size===0?700:400 }}>
+              All Leagues
+            </button>
+          </div>
+          {filteredGroups.map(({ country, leagues }) => {
+            const isExp = expanded.has(country) || !!searchLow;
+            const countrySelected = leagues.filter(l => selected.has(l.leagueId)).length;
+            const allCountrySel = countrySelected === leagues.length;
             return (
-              <button key={lg.leagueId} onClick={() => { setLeagueFilter(active ? null : lg.leagueId); setOpen(false); }} className="gb"
-                style={{ padding:"3px 10px",fontSize:9,background:active?C.radarDim:"transparent",color:active?C.radar:C.muted,border:`1px solid ${active?C.radar:C.faint}`,maxWidth:190,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={label}>
-                {label}
-              </button>
+              <div key={country} style={{ borderBottom:`1px solid ${C.faint}` }}>
+                <div style={{ display:"flex",alignItems:"center",padding:"5px 10px",gap:6,cursor:"pointer" }}
+                  onClick={() => setExpanded(prev => { const n=new Set(prev); isExp&&!searchLow?n.delete(country):n.add(country); return n; })}>
+                  <button className="gb" onClick={e=>{ e.stopPropagation(); toggleCountry(country,leagues); }}
+                    style={{ width:14,height:14,borderRadius:3,border:`1px solid ${allCountrySel?C.radar:C.border}`,background:allCountrySel?C.radar:countrySelected>0?C.radarDim:"transparent",flexShrink:0,padding:0 }}/>
+                  <span style={{ fontSize:9,fontWeight:700,color:countrySelected>0?C.radar:C.text,flex:1 }}>{country}</span>
+                  <span style={{ fontSize:8,color:C.muted }}>{leagues.length}</span>
+                  <span style={{ fontSize:8,color:C.muted }}>{isExp&&!searchLow?"▲":"▼"}</span>
+                </div>
+                {isExp && leagues.map(lg => {
+                  const active = selected.has(lg.leagueId);
+                  return (
+                    <button key={lg.leagueId} onClick={() => toggleLeague(lg.leagueId)} className="gb"
+                      style={{ display:"block",width:"100%",textAlign:"left",padding:"4px 10px 4px 28px",fontSize:8,background:active?C.radarDim:"transparent",color:active?C.radar:C.muted,border:"none",borderBottom:`1px solid ${C.faint}` }}>
+                      {lg.leagueRank < 999 ? `[${lg.leagueRank}] ` : ""}{lg.league}
+                    </button>
+                  );
+                })}
+              </div>
             );
           })}
         </div>
@@ -3364,7 +3893,118 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
   );
 }
 
-// ── DAILY BREAKDOWN TABLE ────────────────────────────────────────────────
+// ── SORT FILTER ───────────────────────────────────────────────────────────────
+// Each option has a type:
+//   "sort_primary"  — mutually exclusive with other primaries (conf, strong_first)
+//   "sort_time"     — time-ordering; combinable with any primary sort as a grouping layer
+//   "filter"        — additive, independent of sorts
+const SORT_OPTIONS = [
+  { id: "upcoming",     label: "⏰ Upcoming First", desc: "Not started → Live → FT · combinable with sorts below", type: "sort_time"    },
+  { id: "conf",         label: "🎯 By Conf %",       desc: "Highest confidence Read picks first",                   type: "sort_primary" },
+  { id: "strong_first", label: "⚡ Strong First",    desc: "STRONG picks bubble to top",                            type: "sort_primary" },
+  { id: "strong_only",  label: "⚡ Strong Only",     desc: "Hide non-STRONG picks",                                 type: "filter"       },
+  { id: "hq_data",      label: "📊 High Quality",    desc: "Calibration ≥50% — good data, reliable model output",   type: "filter"       },
+  { id: "ltd_data",     label: "⚠ Limited Data",    desc: "Calibration <25% — thin data, treat with caution",      type: "filter"       },
+];
+
+function getStateGroup(f) {
+  const s = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+  if (["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties"].includes(s)) return 2;
+  if (["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"].includes(s)) return 1;
+  return 0; // upcoming / not started
+}
+
+function SortFilter({ active, setActive }) {
+  const [open, setOpen] = useState(false);
+  const hasActive = active.size > 0;
+  const activeLabels = SORT_OPTIONS.filter(o => active.has(o.id)).map(o => o.label).join(" · ");
+
+  const toggle = (id) => {
+    const opt = SORT_OPTIONS.find(o => o.id === id);
+    setActive(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        // Primary sorts are mutually exclusive with each other (not with upcoming)
+        if (opt.type === "sort_primary") {
+          SORT_OPTIONS.filter(o => o.type === "sort_primary").forEach(o => next.delete(o.id));
+        }
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ marginBottom:6 }}>
+      <button onClick={() => setOpen(o => !o)} className="gb"
+        style={{ padding:"3px 12px",fontSize:9,background:hasActive?C.goldDim:"transparent",color:hasActive?"#fbbf24":C.muted,border:`1px solid ${hasActive?"#fbbf24":C.faint}`,display:"flex",alignItems:"center",gap:5 }}>
+        <span>↕</span>
+        <span style={{ maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+          {hasActive ? activeLabels : "Sort / Filter"}
+        </span>
+        <span style={{ fontSize:8 }}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div style={{ marginTop:5,padding:"10px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,minWidth:230 }}>
+
+          {/* Time ordering — combinable */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Time Order</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:10 }}>
+            {SORT_OPTIONS.filter(o => o.type === "sort_time").map(opt => {
+              const isActive = active.has(opt.id);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.goldDim:"transparent",color:isActive?"#fbbf24":C.muted,border:`1px solid ${isActive?"#fbbf24":C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400 }}>{opt.label}</span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Primary sorts — mutually exclusive with each other */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Sort Order</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:10 }}>
+            {SORT_OPTIONS.filter(o => o.type === "sort_primary").map(opt => {
+              const isActive = active.has(opt.id);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.goldDim:"transparent",color:isActive?"#fbbf24":C.muted,border:`1px solid ${isActive?"#fbbf24":C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400 }}>{opt.label}</span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Filters */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Filters</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
+            {SORT_OPTIONS.filter(o => o.type === "filter").map(opt => {
+              const isActive = active.has(opt.id);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.goldDim:"transparent",color:isActive?"#fbbf24":C.muted,border:`1px solid ${isActive?"#fbbf24":C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400 }}>{opt.label}</span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {hasActive && (
+            <button onClick={() => { setActive(new Set()); setOpen(false); }} className="gb"
+              style={{ marginTop:8,width:"100%",padding:"4px",fontSize:8,color:C.text,border:`1px solid ${C.faint}`,background:"transparent",textAlign:"center" }}>
+              ✕ Clear all
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 // Replaces the small bar chart — shows each day as an expandable row with
 // date · picks · wins · hit-rate, and (if the server returns d.picks) a
 // drill-down list of every individual pick + result for that day.
@@ -3495,23 +4135,36 @@ function DailyBreakdownTable({ dailyTrend }) {
 
 // ── POOL PERFORMANCE TAB ─────────────────────────────────────────────────
 function PoolPerformanceTab({ serverUrl }) {
-  const [data, setData]     = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [days, setDays]     = useState(30);
+  const [data, setData]         = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [days, setDays]         = useState(30);
+  const [parlays, setParlays]   = useState([]);
+  const [parlayDate, setParlayDate] = useState(null);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`${serverUrl}/api/pool/performance?days=${days}`)
-      .then(r => r.json())
-      .then(d => { setData(d.empty ? null : d); setLoading(false); })
-      .catch(() => { setData(null); setLoading(false); });
+    Promise.all([
+      fetch(`${serverUrl}/api/pool/performance?days=${days}`).then(r => r.json()).catch(() => null),
+      fetch(`${serverUrl}/api/pool/performance/enhanced`).then(r => r.json()).catch(() => null),
+      fetch(`${serverUrl}/api/engine-parlays?days=${days}`).then(r => r.json()).catch(() => null),
+    ]).then(([base, enhanced, parlayData]) => {
+      if (!base || base.empty) { setData(null); setLoading(false); }
+      else {
+        const picksMap = new Map((enhanced?.dailyTrend || []).map(d => [d.date, d.picks || []]));
+        const mergedTrend = (base.dailyTrend || []).map(d => ({ ...d, picks: picksMap.get(d.date) || [] }));
+        const finalTrend = mergedTrend.length > 0 ? mergedTrend : (enhanced?.dailyTrend || []);
+        setData({ ...base, dailyTrend: finalTrend });
+        setLoading(false);
+      }
+      setParlays(parlayData?.parlays || []);
+    });
   }, [days]);
 
   const [bestBetHistory, setBestBetHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem("grm_bestbet_history_v1") || "[]"); } catch { return []; }
   });
 
-  if (loading) return <div style={{ padding:40,textAlign:"center",color:C.muted,fontSize:10 }}>Loading performance data…</div>;
+  if (loading) return <div style={{ padding:40,textAlign:"center",color:C.text,fontSize:10 }}>Loading performance data…</div>;
 
   return (
     <div style={{ paddingBottom:40 }}>
@@ -3529,7 +4182,7 @@ function PoolPerformanceTab({ serverUrl }) {
                 <div key={i} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:7 }}>
                   <div>
                     <div style={{ fontSize:9,fontWeight:800,color:C.text }}>{entry.date}</div>
-                    <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>
+                    <div style={{ fontSize:8,color:C.text,marginTop:1 }}>
                       {entry.tier === "safe" ? "🛡️ Safe" : "⚡ Value"} · {entry.legs} legs · ×{entry.odds}
                     </div>
                   </div>
@@ -3569,22 +4222,47 @@ function PoolPerformanceTab({ serverUrl }) {
       {/* Overall */}
       {data.overall && (
         <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>Overall · {data.period}</div>
-          <div style={{ display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8 }}>
+          {/* Engine Pool — picks that passed all quality thresholds */}
+          <div style={{ fontSize:7,color:C.edge,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:2 }}>⚡ Engine Pool · {data.period}</div>
+          <div style={{ fontSize:7,color:C.muted,marginBottom:8 }}>Picks that cleared all confidence + data thresholds</div>
+          <div style={{ display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14 }}>
             {[["Picks",data.overall.total],["Wins",data.overall.wins],["Hit Rate",`${data.overall.rate}%`],["Avg Odds",data.overall.avgOdds?.toFixed(2)+"×"]].map(([l,v])=>(
               <div key={l} style={{ textAlign:"center" }}>
                 <div style={{ fontSize:16,fontWeight:800,color:parseFloat(v)>60?C.green:parseFloat(v)<45?C.red:C.gold }}>{v}</div>
-                <div style={{ fontSize:7,color:C.muted,marginTop:2 }}>{l}</div>
+                <div style={{ fontSize:7,color:C.text,marginTop:2 }}>{l}</div>
               </div>
             ))}
           </div>
+          {/* All-Read Overall — summed from daily pick report */}
+          {(() => {
+            const trend = data.dailyTrend || [];
+            const allReadTotal = trend.reduce((s, d) => s + (d.readTotal || d.total || 0), 0);
+            const allReadWins  = trend.reduce((s, d) => s + (d.readWins  || d.wins  || 0), 0);
+            const allReadRate  = allReadTotal ? Math.round(allReadWins / allReadTotal * 100) : 0;
+            if (!allReadTotal) return null;
+            return (
+              <div style={{ borderTop:`1px solid ${C.border}`,paddingTop:10 }}>
+                <div style={{ fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:2 }}>📖 All Read Picks · same period</div>
+                <div style={{ fontSize:7,color:C.muted,marginBottom:8 }}>Every fixture with any model pick (includes low-confidence)</div>
+                <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8 }}>
+                  {[["Picks",allReadTotal],["Wins",allReadWins],["Hit Rate",`${allReadRate}%`]].map(([l,v])=>(
+                    <div key={l} style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:14,fontWeight:800,color:parseFloat(v)>60?C.green:parseFloat(v)<45?C.red:C.gold }}>{v}</div>
+                      <div style={{ fontSize:7,color:C.text,marginTop:2 }}>{l}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
       {/* By Market */}
       {data.byMarket && Object.keys(data.byMarket).length > 0 && (
         <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:10 }}>By Market</div>
+          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".1em",marginBottom:2,fontWeight:800 }}>⚡ Engine Pool · By Market</div>
+          <div style={{ fontSize:7,color:C.muted,marginBottom:10 }}>Picks that cleared all confidence + data thresholds</div>
           {Object.entries(data.byMarket).sort((a,b)=>b[1].total-a[1].total).map(([mkt,d]) => (
             <div key={mkt} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7 }}>
               <div style={{ fontSize:9,color:C.text,minWidth:100 }}>{mkt}</div>
@@ -3592,7 +4270,7 @@ function PoolPerformanceTab({ serverUrl }) {
                 <div style={{ height:"100%",width:`${d.rate}%`,background:d.rate>=65?C.green:d.rate>=50?C.gold:C.red,borderRadius:4,transition:"width .4s" }}/>
               </div>
               <div style={{ fontSize:9,fontWeight:700,color:d.rate>=65?C.green:d.rate>=50?C.gold:C.red,minWidth:36,textAlign:"right" }}>{d.rate}%</div>
-              <div style={{ fontSize:8,color:C.muted,minWidth:30,textAlign:"right",marginLeft:6 }}>{d.total}</div>
+              <div style={{ fontSize:8,color:C.text,minWidth:30,textAlign:"right",marginLeft:6 }}>{d.total}</div>
             </div>
           ))}
         </div>
@@ -3601,12 +4279,13 @@ function PoolPerformanceTab({ serverUrl }) {
       {/* By Tag */}
       {data.byTag && Object.keys(data.byTag).length > 0 && (
         <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          <div style={{ fontSize:8,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:10 }}>By Strategy Tag</div>
+          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".1em",marginBottom:2,fontWeight:800 }}>⚡ Engine Pool · By Strategy</div>
+          <div style={{ fontSize:7,color:C.muted,marginBottom:10 }}>Strategy tag hit rates — engine pool games only</div>
           {Object.entries(data.byTag).sort((a,b)=>b[1].total-a[1].total).map(([tag,d]) => (
             <div key={tag} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6 }}>
               <div style={{ fontSize:9,color:C.text,minWidth:120 }}>{tag.replace(/_/g," ")}</div>
               <div style={{ fontSize:9,fontWeight:700,color:d.rate>=65?C.green:d.rate>=50?C.gold:C.red }}>{d.rate}%</div>
-              <div style={{ fontSize:8,color:C.muted,marginLeft:8 }}>{d.wins}/{d.total}</div>
+              <div style={{ fontSize:8,color:C.text,marginLeft:8 }}>{d.wins}/{d.total}</div>
             </div>
           ))}
         </div>
@@ -3616,7 +4295,164 @@ function PoolPerformanceTab({ serverUrl }) {
       {data.dailyTrend?.length > 0 && (
         <DailyBreakdownTable dailyTrend={data.dailyTrend} />
       )}
+
+      {/* Daily Engine Pool chart — pool picks per day with hit rate bar */}
+      {data.dailyTrend?.some(d => (d.engineTotal || d.total) > 0) && (
+        <div className="gc" style={{ padding:14,marginBottom:12 }}>
+          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:2 }}>⚡ Daily Engine Pool</div>
+          <div style={{ fontSize:7,color:C.muted,marginBottom:10 }}>Engine pool pick hit rate per day</div>
+          <div style={{ display:"flex",gap:3,alignItems:"flex-end",height:56 }}>
+            {[...data.dailyTrend].slice(-14).map((d, i) => {
+              const total = d.engineTotal || d.total || 0;
+              const wins  = d.engineWins  || d.wins  || 0;
+              const rate  = total ? Math.round(wins / total * 100) : 0;
+              const isPending = !total;
+              const barH = isPending ? 8 : Math.max(6, Math.round(rate * 0.56));
+              const barColor = isPending ? C.faint : rate >= 65 ? C.green : rate >= 50 ? C.gold : C.red;
+              const dayLabel = (d.date||"").slice(5); // MM-DD
+              return (
+                <div key={i} style={{ flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2 }} title={`${d.date} · ${wins}/${total} · ${rate}%`}>
+                  <div style={{ fontSize:6,color:barColor,fontWeight:700 }}>{isPending?"–":`${rate}%`}</div>
+                  <div style={{ width:"100%",height:barH,background:barColor,borderRadius:2,minHeight:4 }}/>
+                  <div style={{ fontSize:5,color:C.muted,whiteSpace:"nowrap" }}>{dayLabel}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       </>)}
+
+      {/* ── Engine Parlays Evaluator ────────────────────────────────── */}
+      {parlays.length > 0 && (
+        <div className="gc" style={{ padding:14, marginBottom:12, marginTop: data ? 0 : 0 }}>
+          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:12 }}>
+            ⚡ Engine Parlay Evaluator
+          </div>
+          <div style={{ fontSize:8,color:C.text,marginBottom:10,lineHeight:1.5 }}>
+            Safe + Value parlays the engine generated at fetch time, scored against real results.
+          </div>
+          {parlays.map((entry, i) => {
+            const isOpen = parlayDate === entry.date;
+            const hasData = entry.safe || entry.value;
+            const tiers = [entry.safe, entry.value].filter(Boolean);
+            // Overall badge logic:
+            // WIN   = all tiers won
+            // PARTIAL = any tier was partial (some legs won, parlay didn't fully win)
+            // PENDING = any leg is still pending/unresolved (no loss yet)
+            // LOSS  = confirmed loss with no pending legs
+            const allWin     = tiers.every(t => t.parlayResult === "WIN");
+            const anyPartial = tiers.some(t => t.parlayResult === "PARTIAL");
+            const anyLoss    = tiers.some(t => t.parlayResult === "LOSS");
+            const anyPending = tiers.some(t =>
+              t.parlayResult === "PENDING" ||
+              (t.legs||[]).some(l => !l.result || l.result === "–" || l.result === "PENDING")
+            );
+            const badge  = !hasData ? null
+              : allWin     ? "WIN"
+              : anyPartial ? "PARTIAL"
+              : anyPending && !anyLoss ? "PENDING"
+              : anyLoss    ? "LOSS"
+              : null;
+            const bColor = badge === "WIN" ? C.green : badge === "LOSS" ? C.red : badge === "PARTIAL" ? C.amber : C.muted;
+
+            return (
+              <div key={entry.date} style={{ marginBottom:4 }}>
+                <button
+                  onClick={() => hasData && setParlayDate(isOpen ? null : entry.date)}
+                  style={{
+                    width:"100%", display:"grid",
+                    gridTemplateColumns:"90px 1fr 60px 20px",
+                    gap:6, alignItems:"center", padding:"8px 8px",
+                    borderRadius:7, background: isOpen ? C.surface : "transparent",
+                    border:`1px solid ${isOpen ? C.border : "transparent"}`,
+                    cursor: hasData ? "pointer" : "default",
+                    fontFamily:C.font,
+                  }}
+                >
+                  <span style={{ fontSize:9,fontWeight:700,color:C.text,textAlign:"left" }}>{entry.date}</span>
+                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                    {tiers.map(t => (
+                      <span key={t.tier} style={{ fontSize:8,color:t.tier==="safe"?C.green:C.edge }}>
+                        {t.tier==="safe"?"🛡️":"⚡"} ×{parseFloat(t.totalOdds||1).toFixed(1)}
+                      </span>
+                    ))}
+                    {!hasData && <span style={{ fontSize:8,color:C.text }}>No picks saved</span>}
+                  </div>
+                  {badge && (
+                    <span style={{ fontSize:9,fontWeight:800,color:bColor,textAlign:"right" }}>{badge}</span>
+                  )}
+                  {hasData
+                    ? <span style={{ fontSize:8,color:C.text }}>{isOpen?"▲":"▼"}</span>
+                    : <span/>
+                  }
+                </button>
+
+                {isOpen && hasData && (
+                  <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderTop:"none",
+                    borderRadius:"0 0 7px 7px", padding:"8px 10px 10px" }}>
+                    {tiers.map(tier => {
+                      const tColor = tier.tier === "safe" ? C.green : C.edge;
+                      const tBg    = tier.tier === "safe" ? C.greenDim : C.edgeDim;
+                      const prColor = tier.parlayResult === "WIN" ? C.green : tier.parlayResult === "LOSS" ? C.red : tier.parlayResult === "PARTIAL" ? C.amber : C.muted;
+                      return (
+                        <div key={tier.tier} style={{ marginBottom:10, background:tBg,
+                          border:`1px solid ${tColor}28`, borderRadius:6, padding:"8px 10px" }}>
+                          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                            <span style={{ fontSize:9,fontWeight:800,color:tColor }}>
+                              {tier.tier==="safe"?"🛡️ Safe Parlay":"⚡ Value Parlay"}
+                            </span>
+                            <div style={{ textAlign:"right" }}>
+                              <span style={{ fontSize:10,fontWeight:800,color:prColor,marginRight:8 }}>{tier.parlayResult}</span>
+                              <span style={{ fontSize:9,color:C.text }}>×{parseFloat(tier.totalOdds||1).toFixed(2)}</span>
+                            </div>
+                          </div>
+                          {tier.wins != null && (
+                            <div style={{ fontSize:8,color:C.text,marginBottom:6 }}>
+                              {tier.wins}/{tier.legs?.length} legs won
+                            </div>
+                          )}
+                          {(tier.legs||[]).map((leg, j) => {
+                            const lc = leg.result==="WIN"?C.green:leg.result==="LOSS"?C.red:C.muted;
+                            return (
+                              <div key={j} style={{ display:"grid", gridTemplateColumns:"1fr 44px 40px 42px",
+                                gap:4, padding:"3px 0",
+                                borderBottom: j < tier.legs.length-1 ? `1px solid ${C.border}` : "none",
+                                alignItems:"center" }}>
+                                <div style={{ minWidth:0 }}>
+                                  <div style={{ fontSize:7,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+                                    {leg.game || "—"}
+                                  </div>
+                                  <div style={{ fontSize:8,fontWeight:700,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+                                    {leg.pick}
+                                    {leg.market && (
+                                      <span style={{ fontSize:7,color:C.text,marginLeft:4 }}>{leg.market}</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <span style={{ fontSize:8,color:C.text,textAlign:"right" }}>
+                                  {leg.conf?`${Math.round(leg.conf)}%`:"—"}
+                                </span>
+                                <span style={{ fontSize:8,fontWeight:700,color:C.text,textAlign:"right" }}>
+                                  {leg.odds?`×${parseFloat(leg.odds).toFixed(2)}`:"—"}
+                                </span>
+                                <span style={{ fontSize:9,fontWeight:800,color:lc,textAlign:"right" }}>
+                                  {leg.result==="WIN"?"✓ W":leg.result==="LOSS"?"✕ L":"–"}
+                                  {leg.score?` ${leg.score}`:""}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -3654,13 +4490,13 @@ function DailyBestBetsBanner({ fixtures, historicalRates, onUseTier, date }) {
         <span style={{ fontSize:9,color:C.text,fontWeight:700 }}>
           ⚡ {valueOdds}
         </span>
-        <span style={{ fontSize:9,color:C.muted }}>{open ? "▲" : "▼"}</span>
+        <span style={{ fontSize:9,color:C.text }}>{open ? "▲" : "▼"}</span>
       </button>
 
       {/* Expanded — two tier cards */}
       {open && (
         <div style={{ padding:"12px 14px", background:C.surface, display:"flex", flexDirection:"column", gap:12 }}>
-          <div style={{ fontSize:8,color:C.muted,letterSpacing:".1em",textTransform:"uppercase" }}>
+          <div style={{ fontSize:8,color:C.text,letterSpacing:".1em",textTransform:"uppercase" }}>
             Engine's best bets for {date} · tap "Use" to load as your ticket
           </div>
           {[bets.safe, bets.value].filter(Boolean).map(tier => {
@@ -3677,11 +4513,11 @@ function DailyBestBetsBanner({ fixtures, historicalRates, onUseTier, date }) {
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
                   <div>
                     <span style={{ fontSize:11,fontWeight:800,color, fontFamily:C.font }}>{tier.label}</span>
-                    <span style={{ fontSize:8,color:C.muted,marginLeft:8,letterSpacing:".06em" }}>{tier.oddsRange}</span>
+                    <span style={{ fontSize:8,color:C.text,marginLeft:8,letterSpacing:".06em" }}>{tier.oddsRange}</span>
                   </div>
                   <div style={{ textAlign:"right" }}>
                     <div style={{ fontSize:14,fontWeight:800,color, fontFamily:C.font }}>×{odds.toFixed(2)}</div>
-                    <div style={{ fontSize:8,color:C.muted }}>{tier.legs?.length} leg{tier.legs?.length !== 1 ? "s" : ""}</div>
+                    <div style={{ fontSize:8,color:C.text }}>{tier.legs?.length} leg{tier.legs?.length !== 1 ? "s" : ""}</div>
                   </div>
                 </div>
 
@@ -3690,7 +4526,7 @@ function DailyBestBetsBanner({ fixtures, historicalRates, onUseTier, date }) {
                   {(tier.legs || []).map((leg, i) => (
                     <div key={i} style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
                       <div style={{ flex:1,minWidth:0 }}>
-                        <div style={{ fontSize:8,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{leg.game}</div>
+                        <div style={{ fontSize:8,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{leg.game}</div>
                         <div style={{ fontSize:9,fontWeight:700,color:mktStyle(leg.market).color }}>{leg.pick}</div>
                       </div>
                       <div style={{ fontSize:9,fontWeight:800,color:C.text,marginLeft:8,flexShrink:0 }}>×{leg.odds}</div>
@@ -3700,7 +4536,7 @@ function DailyBestBetsBanner({ fixtures, historicalRates, onUseTier, date }) {
 
                 {/* Stake + est return row */}
                 <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${bdrClr}`,paddingTop:8 }}>
-                  <div style={{ fontSize:8,color:C.muted }}>
+                  <div style={{ fontSize:8,color:C.text }}>
                     Rec. stake <span style={{ color:C.text,fontWeight:700 }}>${stake.toFixed(2)}</span>
                     {estReturn && <span style={{ color:color,fontWeight:700,marginLeft:6 }}>→ est. {estReturn}</span>}
                   </div>
@@ -3732,7 +4568,106 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [savedCodes, setSavedCodes] = useState(() => {
     try { return JSON.parse(localStorage.getItem("grm_saved_codes_v15") || "{}"); } catch { return {}; }
   });
-  const [injectingId, setInjectingId] = useState(null);
+  const [maxSameMarket, setMaxSameMarket] = useState(2);
+  // When a user opens a fixture from a loaded ticket leg, we track which ticket
+  // they came from so "Replace in Ticket" patches that ticket instead of the draft.
+  const [activeTicketId, setActiveTicketId] = useState(null);
+
+  // Patch a specific leg in a loaded ticket by fixtureId
+  const patchTicketLeg = useCallback((ticketId, fixtureId, newLeg) => {
+    setTickets(prev => prev.map(t => {
+      if (t.id !== ticketId) return t;
+      const newLegs = t.legs.map(l => l.fixtureId === fixtureId ? { ...l, ...newLeg } : l);
+      const newOdds = newLegs.reduce((s, l) => parseFloat((s * parseFloat(l.odds||1)).toFixed(4)), 1.0);
+      return { ...t, legs: newLegs, totalOdds: newOdds.toFixed(2) };
+    }));
+  }, []); // user-tunable market diversity cap
+
+  // ── Remix a whole ticket ──────────────────────────────────────────────────
+  // Rebuilds this ticket with a fresh stratified shuffle.
+  // Other tickets in the set are untouched.
+  const remixTicket = async (ticketId) => {
+    const rates = await ensureHistoricalRates();
+    setTickets(prev => {
+      const original = prev.find(t => t.id === ticketId);
+      if (!original) return prev;
+      // Inherit the original ticket's odds as the rebuild target so a 100× ticket
+      // doesn't come back as 5× (the builder default). Use totalOdds from the ticket.
+      const inheritedTarget = parseFloat(original.totalOdds) || targetOdds;
+      const otherUsed = new Set(
+        prev.filter(t => t.id !== ticketId).flatMap(t => t.legs.map(l => l.fixtureId))
+      );
+      const available = fixtures.filter(f => !otherUsed.has(f.id));
+      const rebuilt = buildManualParlays(available, {
+        numParlays: 1, targetOdds: inheritedTarget, historicalRates: rates,
+        budget, budgetPct, maxSameMarket,
+      });
+      if (!rebuilt.length) return prev;
+      const remixed = { ...rebuilt[0], id: ticketId, _remixed: true };
+      return prev.map(t => t.id === ticketId ? remixed : t);
+    });
+  };
+
+  // ── Swap a single leg ─────────────────────────────────────────────────────
+  // Tries same-game alt pick first (2nd ranked from that fixture's pool).
+  // Falls back to next unused pool game.
+  const swapLeg = async (ticketId, legIndex) => {
+    const rates = await ensureHistoricalRates();
+    let swapped = false;
+    setTickets(prev => {
+      const ticket = prev.find(t => t.id === ticketId);
+      if (!ticket) return prev;
+      const usedFixtureIds = new Set(
+        prev.flatMap(t => t.legs.map(l => l.fixtureId))
+      );
+      const pool = buildUniversalPool(fixtures, rates);
+      const currentLeg = ticket.legs[legIndex];
+
+      // Try alt market on same fixture first
+      const sameFixtureAlts = pool.filter(
+        e => e.fixtureId === currentLeg.fixtureId && e.market !== currentLeg.market
+      );
+      let replacement = sameFixtureAlts[0] || null;
+
+      // Fall back to next unused fixture in pool
+      if (!replacement) {
+        replacement = pool.find(e =>
+          !ticket.legs.some(l => l.fixtureId === e.fixtureId)
+        ) || null;
+      }
+
+      if (!replacement) {
+        swapped = false;
+        return prev; // will trigger toast below
+      }
+
+      swapped = true;
+      const newLegs = ticket.legs.map((l, i) =>
+        i === legIndex ? {
+          fixtureId: replacement.fixtureId, game: replacement.game,
+          pick: replacement.pick, odds: replacement.odds,
+          conf: replacement.conf, market: replacement.market,
+          league: replacement.league, strategyId: null,
+          empiricalRate: replacement.empiricalRate,
+          score: parseFloat(replacement.score.toFixed(4)),
+        } : l
+      );
+      const newOdds = newLegs.reduce((s, l) => parseFloat((s * parseFloat(l.odds)).toFixed(4)), 1.0);
+      return prev.map(t => t.id === ticketId
+        ? { ...t, legs: newLegs, totalOdds: newOdds.toFixed(2), _remixed: true }
+        : t
+      );
+    });
+    // Show toast if pool had no alternatives
+    if (!swapped) {
+      setAutoMessage("No alternatives available — pool is exhausted. Try raising Max Same Market or fetching a new snapshot.");
+      setTimeout(() => setAutoMessage(""), 4000);
+    }
+  };
+
+  // Warm up historical rates immediately on open — so DailyBestBetsBanner
+  // shows without the user needing to hit Build first.
+  useEffect(() => { ensureHistoricalRates(); }, []);
 
   // Content hash — fixtureId+pick per leg, sorted so order doesn't matter
   const ticketContentKey = (ticket) => {
@@ -3767,21 +4702,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
 
   // Inject results into a ticket inline
-  const handleInject = async (ticket, ticketSetter, ticketId) => {
-    setInjectingId(ticketId);
-    const result = await injectTicketResults(ticket, date);
-    if (result?.legs) {
-      const updatedLegs = ticket.legs.map((leg, i) => ({
-        ...leg,
-        _result: result.legs[i]?.result,
-        _score:  result.legs[i]?.score,
-      }));
-      const updatedTicket = { ...ticket, legs:updatedLegs, _parlayResult:result.parlayResult };
-      if (ticketSetter) ticketSetter(prev => prev.map(t => t.id === ticketId ? updatedTicket : t));
-    }
-    setInjectingId(null);
-  };
-
   const draftTicket = draftLegs.length > 0 ? {
     id: "draft", source: "card_add",
     legs: draftLegs,
@@ -3789,9 +4709,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     stake: 0, exhausted: false,
   } : null;
 
-  const openFixture = (fixtureId, from) => {
+  const openFixture = (fixtureId, from, fromTicketId = null) => {
     const f = fixtures.find(x => x.id === fixtureId);
     if (!f) return;
+    setActiveTicketId(fromTicketId);
     setFocus(f); setReturnTo(from); setView("fixture");
   };
 
@@ -3800,12 +4721,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     const rates = await ensureHistoricalRates();
     if (builderMode === "auto") {
       const pool   = buildUniversalPool(fixtures, rates);
-      const result = buildUniversalParley(fixtures, { targetOdds, historicalRates:rates, budget, budgetPct });
+      const result = buildUniversalParley(fixtures, { targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket });
       setTickets([{ ...result, id:1, slotLabel:"🎯 Best Picks", slotId:"universal", isAuto:true }]);
       setAutoMessage(result.reason + (pool.length ? ` · pool: ${pool.length} qualifying` : ""));
       savePoolToServer(pool, date); // fire-and-forget
     } else {
-      const results = buildManualParlays(fixtures, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct });
+      const results = buildManualParlays(fixtures, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket });
       setTickets(results);
     }
     setBuilding(false);
@@ -3834,15 +4755,30 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
   if (view === "fixture") return (
     <div style={{ position:"fixed",inset:0,background:C.bg,zIndex:200,overflowY:"auto",padding:16 }}>
-      <button onClick={() => { setFocus(null); setView(returnTo); }} className="gb"
+      <button onClick={() => { setActiveTicketId(null); setFocus(null); setView(returnTo); }} className="gb"
         style={{ marginBottom:16,padding:"6px 14px",background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,fontSize:10 }}>
         ← Back
       </button>
       <FixtureCard
         f={focusFixture}
-        draftLegs={draftLegs}
-        onAddToParlay={onAddLegToDraft}
+        draftLegs={activeTicketId ? [] : draftLegs}
+        onAddToParlay={(fixture, pick) => {
+          if (activeTicketId) {
+            // Replace this leg in the loaded ticket
+            patchTicketLeg(activeTicketId, fixture.id, {
+              pick: pick.pick, odds: pick.odds, market: pick.market,
+              prob: pick.prob, game: `${fixture.teams.home} vs ${fixture.teams.away}`,
+              league: fixture.league,
+            });
+            setActiveTicketId(null);
+            setFocus(null);
+            setView(returnTo);
+          } else {
+            onAddLegToDraft(fixture, pick);
+          }
+        }}
         isEngineQualified={engineFixtureIds.has(focusFixture?.id)}
+        onFullModel={(f) => { setFocus(null); setMainFocusFixture && setMainFocusFixture(f); }}
       />
     </div>
   );
@@ -3857,11 +4793,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           ["perf",    `📊 Performance`, C.edge],
         ].map(([id, label, color]) => (
           <button key={id} onClick={() => setView(id)} className="gb"
-            style={{ flex:1,padding:"13px 0",background:"transparent",color:view===id?color:C.muted,border:"none",borderBottom:view===id?`2px solid ${color}`:"2px solid transparent",borderRadius:0,fontSize:10 }}>
+            style={{ flex:1,padding:"13px 0",background:"transparent",color:view===id?color:C.text,border:"none",borderBottom:view===id?`2px solid ${color}`:"2px solid transparent",borderRadius:0,fontSize:10 }}>
             {label}
           </button>
         ))}
-        <button onClick={onClose} className="gb" style={{ padding:"13px 16px",background:"transparent",color:C.muted,border:"none",borderRadius:0,fontSize:16 }}>✕</button>
+        <button onClick={onClose} className="gb" style={{ padding:"13px 16px",background:"transparent",color:C.text,border:"none",borderRadius:0,fontSize:16 }}>✕</button>
       </div>
 
       <div style={{ padding:16,paddingBottom:80 }}>
@@ -3891,11 +4827,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   onRemoveLeg={i => setDraftLegs(prev => prev.filter((_, idx) => idx !== i))}
                   onOpenFixture={id => openFixture(id, "parlay")}
                   onSaveInternal={stake => { saveTicketInternal(draftTicket, stake); setDraftLegs([]); }}
-                  onInject={() => handleInject(draftTicket, (updater) => {
-                    const updated = updater([draftTicket]);
-                    if (updated?.[0]) setDraftLegs(updated[0].legs);
-                  }, "draft")}
-                  injecting={injectingId === "draft"}
                   savedCode={savedCodes[ticketContentKey(draftTicket)]}
                 />
               </div>
@@ -3905,7 +4836,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
               {/* Mode toggle */}
               <div style={{ display:"flex",marginBottom:14,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}` }}>
-                {[["auto","⚡ Auto"],["manual","🎛 Manual"]].map(([id,label]) => (
+                {[["auto","⚡ Jarvis"],["manual","🎛 Manual"]].map(([id,label]) => (
                   <button key={id} onClick={() => setBuilderMode(id)} className="gb"
                     style={{ flex:1,padding:"7px 0",fontSize:10,fontWeight:700,background:builderMode===id?C.accent:"transparent",color:builderMode===id?C.accentText:C.muted,border:"none",borderRadius:6,transition:"all .15s" }}>
                     {label}
@@ -3913,21 +4844,55 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 ))}
               </div>
 
-              <div style={{ fontSize:8,color:C.muted,marginBottom:12,lineHeight:1.6 }}>
+              <div style={{ fontSize:8,color:C.text,marginBottom:12,lineHeight:1.6 }}>
                 {builderMode === "auto"
-                  ? <>Engine picks best single ticket from <span style={{ color:C.gold }}>The Read</span> pool · runs until target hit or pool exhausted.</>
+                  ? <>Jarvis picks best single ticket from <span style={{ color:C.gold }}>The Read</span> pool · runs until target hit or pool exhausted.</>
                   : <>Builds <span style={{ color:C.gold }}>N non-overlapping tickets</span> — each picks from fixtures unused by previous tickets.</>
                 }
               </div>
 
+              {/* Parley System explainer */}
+              <div style={{ background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:8,padding:"10px 12px",marginBottom:12,fontSize:8,color:C.text,lineHeight:1.6 }}>
+                <div style={{ fontWeight:800,color:C.gold,marginBottom:6,fontSize:9 }}>⚡ How the Parley System works</div>
+                <div style={{ marginBottom:4 }}><span style={{ color:C.gold,fontWeight:700 }}>Auto</span> — Jarvis picks the single best ticket from the qualified pool, ordered by confidence × value. One ticket, best legs.</div>
+                <div style={{ marginBottom:4 }}><span style={{ color:C.gold,fontWeight:700 }}>Manual</span> — Builds N non-overlapping tickets. Each ticket shuffles the pool within confidence bands so tickets differ. Market cap prevents correlated legs.</div>
+                <div style={{ marginBottom:4 }}><span style={{ color:C.gold,fontWeight:700 }}>🔀 Remix</span> — Rebuilds a ticket with a fresh shuffle. Same pool quality, different combination. Per-leg ↺ swaps one leg at a time.</div>
+                <div><span style={{ color:C.gold,fontWeight:700 }}>Market cap</span> — Max legs of the same market per ticket. Lower = more diverse. Higher = more legs when pool is thin.</div>
+              </div>
+
               <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
-                <div><div style={{ fontSize:8,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Budget ($)</div><input type="number" value={budget} onChange={e=>setBudget(+e.target.value)} onFocus={e=>e.target.select()} className="gi"/></div>
-                <div><div style={{ fontSize:8,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Target Odds</div><input type="number" step="0.5" value={targetOdds} onChange={e=>setTargetOdds(+e.target.value)} onFocus={e=>e.target.select()} className="gi"/></div>
-                {builderMode === "manual" && (
-                  <div><div style={{ fontSize:8,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Tickets (max 10)</div><input type="number" min={1} max={10} value={numParlays} onChange={e=>setNumParlays(Math.max(1,Math.min(10,+e.target.value)))} onFocus={e=>e.target.select()} className="gi"/></div>
-                )}
-                <div style={{ gridColumn: builderMode==="manual" ? "auto" : "span 1" }}>
-                  <div style={{ fontSize:8,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Budget % {budgetPct}%</div>
+                <div><div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Budget ($)</div><input type="number" value={budget} onChange={e=>setBudget(+e.target.value)} onFocus={e=>e.target.select()} className="gi"/></div>
+                <div><div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Target Odds</div><input type="number" step="0.5" value={targetOdds} onChange={e=>setTargetOdds(+e.target.value)} onFocus={e=>e.target.select()} className="gi"/></div>
+
+                {builderMode === "manual" && (<>
+                  {/* Tickets stepper — replaces broken type=number input on Android */}
+                  <div>
+                    <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Tickets (max 10)</div>
+                    <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+                      <button className="gb" onClick={() => setNumParlays(p => Math.max(1, p - 1))}
+                        style={{ width:28,height:28,fontSize:14,fontWeight:800,padding:0,background:C.faint,border:`1px solid ${C.border}`,color:C.text,borderRadius:5 }}>−</button>
+                      <span style={{ fontSize:13,fontWeight:800,color:C.gold,minWidth:20,textAlign:"center" }}>{numParlays}</span>
+                      <button className="gb" onClick={() => setNumParlays(p => Math.min(10, p + 1))}
+                        style={{ width:28,height:28,fontSize:14,fontWeight:800,padding:0,background:C.faint,border:`1px solid ${C.border}`,color:C.text,borderRadius:5 }}>+</button>
+                    </div>
+                  </div>
+                </>)}
+
+                {/* Market cap — shared between Jarvis and Manual, affects both */}
+                <div>
+                  <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Max Same Market</div>
+                  <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+                    <button className="gb" onClick={() => setMaxSameMarket(p => Math.max(1, p - 1))}
+                      style={{ width:28,height:28,fontSize:14,fontWeight:800,padding:0,background:C.faint,border:`1px solid ${C.border}`,color:C.text,borderRadius:5 }}>−</button>
+                    <span style={{ fontSize:13,fontWeight:800,color:C.radar,minWidth:20,textAlign:"center" }}>{maxSameMarket}</span>
+                    <button className="gb" onClick={() => setMaxSameMarket(p => Math.min(5, p + 1))}
+                      style={{ width:28,height:28,fontSize:14,fontWeight:800,padding:0,background:C.faint,border:`1px solid ${C.border}`,color:C.text,borderRadius:5 }}>+</button>
+                  </div>
+                  <div style={{ fontSize:7,color:C.muted,marginTop:3 }}>1=strict · 5=free for all</div>
+                </div>
+
+                <div style={{ gridColumn: builderMode==="manual" ? "span 2" : "span 1" }}>
+                  <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Budget % {budgetPct}%</div>
                   <input type="range" min={1} max={100} value={budgetPct} onChange={e=>setBudgetPct(+e.target.value)} style={{ width:"100%",marginTop:6 }}/>
                 </div>
               </div>
@@ -3936,6 +4901,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 style={{ width:"100%",background:building?C.faint:C.accent,color:building?C.muted:C.accentText,padding:"12px 0",fontSize:13,fontWeight:800 }}>
                 {building ? "BUILDING…" : builderMode === "auto" ? "⚡ BUILD BEST TICKET" : `⚡ BUILD ${numParlays} TICKET${numParlays>1?"S":""}`}
               </button>
+              {building && (
+                <div style={{ textAlign:"center",marginTop:5 }}>
+                  <span className="pu" style={{ fontSize:8,color:C.muted }}>
+                    Scanning {fixtures.length} fixture{fixtures.length!==1?"s":""} · scoring every qualifying pick…
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Auto mode — engine message + Gemini analysis */}
@@ -3956,7 +4928,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     <div style={{ fontSize:8,fontWeight:800,color:C.edge,letterSpacing:".1em",textTransform:"uppercase",marginBottom:6 }}>🤓 Jarvis Analysis</div>
                     <div style={{ fontSize:9,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap" }}>{autoAnalysis}</div>
                     <button onClick={()=>setAutoAnalysis(null)} className="gb"
-                      style={{ marginTop:8,background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,padding:"3px 10px",fontSize:8 }}>
+                      style={{ marginTop:8,background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"3px 10px",fontSize:8 }}>
                       ↺ Re-analyse
                     </button>
                   </div>
@@ -3967,18 +4939,25 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             {tickets.length > 0 && (
               <>
                 <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
-                  <span style={{ fontSize:9,color:C.muted }}>{tickets.length} built ticket{tickets.length>1?"s":""}</span>
+                  <span style={{ fontSize:9,color:C.text }}>{tickets.length} built ticket{tickets.length>1?"s":""}</span>
                   <button onClick={() => setTickets([])} className="gb" style={{ fontSize:9,color:C.red,border:`1px solid ${C.red}40`,padding:"3px 8px" }}>Clear all</button>
                 </div>
                 <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
                   {tickets.map(t => (
-                    <TicketCard key={t.id} ticket={t} date={date} isJarvis={false}
+                    <TicketCard key={t.id} ticket={t} date={date} isJarvis={!!t.isAuto}
                       onRemove={() => setTickets(prev => prev.filter(x => x.id !== t.id))}
-                      onOpenFixture={id => openFixture(id, "parlay")}
+                      onOpenFixture={id => openFixture(id, "parlay", t.id)}
                       onSaveInternal={stake => saveTicketInternal(t, stake)}
-                      onInject={() => handleInject(t, setTickets, t.id)}
-                      injecting={injectingId === t.id}
                       savedCode={savedCodes[ticketContentKey(t)]}
+                      onRemix={t.isAuto
+                        ? async () => {
+                            const rates = await ensureHistoricalRates();
+                            const result = buildUniversalParley(fixtures, { targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket });
+                            setTickets([{ ...result, id:1, slotLabel:"🎯 Best Picks", slotId:"universal", isAuto:true, _remixed:true }]);
+                          }
+                        : () => remixTicket(t.id)
+                      }
+                      onSwapLeg={legIdx => swapLeg(t.id, legIdx)}
                     />
                   ))}
                 </div>
@@ -4005,7 +4984,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
                     <div>
                       <span style={{ fontSize:11,fontWeight:800,color:C.radar,letterSpacing:".08em" }}>{t.code}</span>
-                      <span style={{ fontSize:8,color:C.muted,marginLeft:8 }}>{t.date} · {t.legs?.length||0} legs · ×{t.totalOdds}</span>
+                      <span style={{ fontSize:8,color:C.text,marginLeft:8 }}>{t.date} · {t.legs?.length||0} legs · ×{t.totalOdds}</span>
                     </div>
                     <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
                       <CopyCodeButton code={t.code} />
@@ -4017,17 +4996,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       }} className="gb" style={{ background:`${C.gold}15`,border:`1px solid ${C.goldBorder}`,color:C.gold,padding:"2px 8px",fontSize:9,fontWeight:700 }}>
                         ↩ Load
                       </button>
-                      <button onClick={() => deleteSavedTicket(t.code)} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
+                      <button onClick={() => deleteSavedTicket(t.code)} style={{ background:"none",border:"none",color:C.text,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
                     </div>
                   </div>
                   {t.stake > 0 && (
-                    <div style={{ fontSize:9,color:C.muted,marginBottom:6 }}>
+                    <div style={{ fontSize:9,color:C.text,marginBottom:6 }}>
                       Stake ${t.stake} · Return ${parseFloat((t.stake*parseFloat(t.totalOdds)).toFixed(2))}
                     </div>
                   )}
                   <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
                     {(t.legs||[]).map((leg, i) => (
-                      <div key={i} style={{ display:"flex",justifyContent:"space-between",fontSize:9,color:C.muted }}>
+                      <div key={i} style={{ display:"flex",justifyContent:"space-between",fontSize:9,color:C.text }}>
                         <span style={{ color:C.text,fontWeight:600,flex:1 }}>{leg.game}</span>
                         <span style={{ color:mktStyle(leg.market||"").color,fontWeight:700,marginLeft:8 }}>{leg.pick}</span>
                         <span style={{ marginLeft:6 }}>{leg.odds ? `${leg.odds}x` : "—"}</span>
@@ -4045,6 +5024,365 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 }
 
 // ── MAIN COMPONENT ────────────────────────────────────────────────────────
+// ── HELP MODAL — collapsible sections ─────────────────────────────────────
+const HELP_SECTIONS = [
+  {
+    id: "read", emoji: "📖", title: "THE READ", sub: "best pick", color: () => C.gold,
+    what:    "The model's primary recommendation for each fixture.",
+    telling: "The market with the highest signal after running xG, team form, standings and calibration through the engine. If STRONG badge shows, the model has extra confidence — the probability clears the threshold by a wide margin.",
+    use:     "Tap '+ Add to Ticket' directly from the card. This is the pick to start with for most fixtures.",
+    caution: "⚠ LOW CONF badge means the model had limited data (few games played). VOLATILE badge means the league has high variance — treat as higher risk even if the probability looks good.",
+  },
+  {
+    id: "edge", emoji: "🔮", title: "THE EDGE", sub: "value pick", color: () => C.edge,
+    what:    "A secondary pick where the model's probability exceeds what the bookmaker's odds imply.",
+    telling: "The book is potentially underpricing this outcome. The '+X% vs BOOK' badge shows by how much. '2 signals' or more means multiple model checks converged on the same pick.",
+    use:     "Best paired with The Read in a 2-leg ticket. Use it alone only if the edge is strong (+5% or more vs book). Skip it when the 'value unclear' badge shows.",
+    caution: "Higher risk than The Read. No signal today doesn't mean the model failed — it means no value was found vs the current odds.",
+  },
+  {
+    id: "radar", emoji: "🎯", title: "GOAL RADAR", sub: "scoring odds", color: () => C.radar,
+    what:    "Per-team scoring probability — each team's chance of scoring at least once (O0.5) or twice (O1.5).",
+    telling: "Which team the model expects to find the net. Only shows when the probability clears a minimum threshold — absence means no qualifying signal, not a low score.",
+    use:     "Build Team Total legs, confirm a BTTS read, or add as a third leg. The O1.5 advisory (💡) is for information only — add it via Custom Pick if you want it in the ticket.",
+    caution: "Team Total markets often have low odds. Check the implied odds shown — if it's under 1.15, the value may not justify including it.",
+  },
+  {
+    id: "tags", emoji: "🏷", title: "STRATEGY TAGS", sub: "on the card", color: () => C.amber,
+    what:    "Labels on each fixture card — Home Win, BTTS Value, Draw, Low Scoring etc.",
+    telling: "The fixture passes a specific multi-condition filter the model uses internally. Each tag requires several conditions to be true simultaneously — not just one high probability.",
+    use:     "Switch to the Custom tab and filter by strategy to find concentrated picks across all fixtures of the same type in one view.",
+    caution: "A tag means the conditions are met today — not a guarantee. A 'Low Scoring' tag on a volatile league fixture still carries risk.",
+  },
+  {
+    id: "enginetab", emoji: "⚡", title: "THE ENGINE TAB", sub: "today's best picks", color: () => C.gold,
+    what:    "A filtered view of today's fixtures that the self-learning engine has pre-qualified as its strongest picks.",
+    telling: "Every fixture shown has passed the engine's scoring system — a Bayesian model that combines xG probability, empirical win rates from historical results, odds value and calibration quality. The list is sorted by engine score descending, so the top picks are always first.",
+    use:     "Switch to The Engine tab from the main fixture view. These are the fixtures the system is most confident about today — use them as your shortlist before building a ticket.",
+    caution: "A shorter Engine list doesn't mean a bad day — it means fewer fixtures cleared the qualifying threshold. Quality over quantity. Always cross-check The Read and The Edge on each card before adding to a ticket.",
+  },
+  {
+    id: "custom", emoji: "🔒", title: "CUSTOM TAB", sub: "strategy filter view", color: () => C.radar,
+    what:    "Browse all fixtures filtered by strategy tag — Home Win, BTTS Value, Draw, Low Scoring etc.",
+    telling: "Every fixture shown already passes that strategy's conditions. Sorted by model confidence descending so the strongest picks are at the top.",
+    use:     "Pick a strategy → tap fixtures to select them → hit 'Add to Ticket'. You can mix strategies. Selected picks land in your ticket draft.",
+    caution: "The filter removes fixtures that don't qualify — a short list means few games met the conditions today, not a data problem.",
+  },
+  {
+    id: "parlay", emoji: "📜", title: "PARLEY SYSTEM", sub: "Engine · Jarvis builder · saved picks · performance", color: () => C.edge,
+    what:    "The floating 📜 button opens the Engine Parley System — the self-learning automated builder that scores every qualifying pick and constructs the best ticket for your target odds.",
+    telling: "Jarvis scores picks using empirical win rates from historical results × log(odds), building the optimal ticket for your target. Three tabs inside — Builder (Jarvis or manual), Saved (today's pre-built Safe + Value parlays + your saved tickets), Performance (historical hit rates by market and strategy). The system gets sharper over time as more results feed back in.",
+    use:     "Add picks from fixture cards first, then open here to build. Or skip straight to Saved for today's pre-built engine picks. Book directly to SportyBet from any ticket.",
+    caution: "Draft legs show as a count badge on the button — they're not saved until you hit Build or Save inside. Empirical rates improve as results accumulate, so check the Performance tab to gauge current accuracy.",
+  },
+  {
+    id: "perf", emoji: "📊", title: "PERFORMANCE TAB", sub: "inside the parley system", color: () => C.muted,
+    what:    "Historical hit rate for every pick the engine has made, broken down by market, strategy tag and date.",
+    telling: "Which markets have been profitable, which are cold, and whether confidence bands are calibrated (i.e. does 65% model confidence actually hit ~65% of the time).",
+    use:     "Check before building tickets. If BTTS has a low hit rate this week, consider down-weighting it. Tap a day row to see every individual pick and its result.",
+    caution: "Small sample sizes (under 20 picks per market) have wide variance. Don't over-adjust strategy based on a 5-pick sample.",
+  },
+  {
+    id: "jarvis", emoji: "🤖", title: "JARVIS", sub: "AI match assistant", color: () => C.accent,
+    what:    "AI assistant with full access to the model data for every fixture.",
+    telling: "Plain-language reasoning behind any pick — xG, form, H2H context, calibration quality and strategy tags all fed in.",
+    use:     "Tap 'Ask Jarvis' on any card. Ask anything: 'why is this the pick?', 'any concerns about this game?', 'is BTTS backed by both teams' form?' The Mind Box at the top of the fixture list gives a daily board-level brief.",
+    caution: "Jarvis explains and contextualises the model — it doesn't override it. If Jarvis sounds uncertain, it's because the model data is thin or conflicting.",
+  },
+];
+
+function HelpModal({ onClose }) {
+  const [openSection, setOpenSection] = useState(null);
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:600,background:"rgba(0,0,0,0.88)",display:"flex",alignItems:"flex-end",justifyContent:"center" }}
+      onClick={onClose}>
+      <div style={{ background:C.modalBg,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,
+        width:"100%",maxWidth:480,maxHeight:"90vh",overflowY:"auto",paddingBottom:32 }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{ position:"sticky",top:0,background:C.modalBg,borderBottom:`1px solid ${C.border}`,
+          padding:"18px 20px 14px",zIndex:1 }}>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+            <div>
+              <div style={{ fontSize:14,fontWeight:800,color:C.accent,letterSpacing:".04em" }}>⚡ Learn How GRM Works</div>
+              <div style={{ fontSize:8,color:C.text,opacity:.45,marginTop:2 }}>Tap any section to expand</div>
+            </div>
+            <button onClick={onClose} className="gb"
+              style={{ background:"transparent",border:"none",color:C.text,fontSize:18,padding:0,lineHeight:1 }}>✕</button>
+          </div>
+        </div>
+
+        {/* Quick workflow */}
+        <div style={{ margin:"14px 20px 6px",background:C.surface,borderRadius:10,
+          border:`1px solid ${C.goldBorder}`,padding:"12px 14px" }}>
+          <div style={{ fontSize:8,color:C.gold,fontWeight:800,letterSpacing:".12em",
+            textTransform:"uppercase",marginBottom:10 }}>⚡ Quick Start — 3 Steps</div>
+          {[
+            ["1", C.blue,   "Tap FETCH",          "Load today's fixtures. The engine analyses every match."],
+            ["2", C.green,  "Add to Ticket",       "Find a card with THE READ (best pick). Tap + Add to Ticket."],
+            ["3", C.radar,  "Build & Book",         "Tap the 📜 Parley System button → Build → Book to SportyBet."],
+          ].map(([n, col, title, desc]) => (
+            <div key={n} style={{ display:"flex",gap:10,alignItems:"flex-start",marginBottom:8 }}>
+              <div style={{ width:20,height:20,borderRadius:"50%",background:`${col}20`,
+                border:`1px solid ${col}40`,display:"flex",alignItems:"center",justifyContent:"center",
+                flexShrink:0,marginTop:1 }}>
+                <span style={{ fontSize:9,fontWeight:800,color:col }}>{n}</span>
+              </div>
+              <div>
+                <div style={{ fontSize:10,fontWeight:800,color:C.text }}>{title}</div>
+                <div style={{ fontSize:8,color:C.text,opacity:.55,marginTop:1,lineHeight:1.5 }}>{desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Collapsible sections */}
+        <div style={{ padding:"6px 20px 0" }}>
+          {HELP_SECTIONS.map(sec => {
+            const isOpen = openSection === sec.id;
+            const col    = sec.color();
+            return (
+              <div key={sec.id} style={{ marginBottom:6,borderRadius:9,
+                border:`1px solid ${isOpen ? col+"40" : C.border}`,
+                background:isOpen ? `${col}06` : C.surface,
+                overflow:"hidden",transition:"border-color .15s" }}>
+                {/* Section header — always visible */}
+                <button onClick={() => setOpenSection(isOpen ? null : sec.id)}
+                  style={{ width:"100%",display:"flex",alignItems:"center",gap:10,
+                    padding:"11px 14px",background:"transparent",border:"none",
+                    cursor:"pointer",textAlign:"left",fontFamily:C.font }}>
+                  <span style={{ fontSize:14,lineHeight:1,flexShrink:0 }}>{sec.emoji}</span>
+                  <div style={{ flex:1,minWidth:0 }}>
+                    <div style={{ display:"flex",alignItems:"baseline",gap:6 }}>
+                      <span style={{ fontSize:10,fontWeight:800,color:col,letterSpacing:".08em",textTransform:"uppercase" }}>
+                        {sec.title}
+                      </span>
+                      <span style={{ fontSize:8,color:col,opacity:.6,fontWeight:500,textTransform:"none",letterSpacing:".02em" }}>
+                        ({sec.sub})
+                      </span>
+                    </div>
+                  </div>
+                  <span style={{ fontSize:9,color:C.text,opacity:.35,flexShrink:0 }}>
+                    {isOpen ? "▲" : "▼"}
+                  </span>
+                </button>
+
+                {/* Expanded content */}
+                {isOpen && (
+                  <div style={{ padding:"0 14px 14px",display:"flex",flexDirection:"column",gap:10 }}>
+                    {[
+                      { label:"What it is",           text: sec.what,    labelColor: C.text },
+                      { label:"What it's telling you", text: sec.telling, labelColor: col   },
+                      { label:"How to use it",         text: sec.use,     labelColor: C.green },
+                      { label:"When to be cautious",   text: sec.caution, labelColor: C.amber },
+                    ].map(({ label, text, labelColor }) => (
+                      <div key={label}>
+                        <div style={{ fontSize:7,fontWeight:800,color:labelColor,opacity:.8,
+                          textTransform:"uppercase",letterSpacing:".1em",marginBottom:3 }}>
+                          {label}
+                        </div>
+                        <div style={{ fontSize:9,color:C.text,opacity:.8,lineHeight:1.6 }}>
+                          {text}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ fontSize:8,color:C.text,opacity:.25,textAlign:"center",marginTop:14,padding:"0 20px" }}>
+          Tap outside to close · No account or data stored
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── FIRST-RUN ONBOARDING FLOW ─────────────────────────────────────────────
+// Full-screen slide overlay. Shows once on first launch.
+// Flag: grm_onboarded_v2 in localStorage (bumped from v1 so existing users see updated tutorial).
+const ONBOARD_SLIDES = [
+  {
+    emoji:   "📋",
+    color:   () => C.blue,
+    title:   "Fetch Today's Fixtures",
+    body:    "Select today's date and tap FETCH. The engine pulls live match data, runs every game through Dixon-Coles + Poisson and builds picks — takes about 60 seconds.",
+    tip:     "Load past dates to review historical picks. Results auto-merge when you load a past snapshot.",
+  },
+  {
+    emoji:   "📖",
+    color:   () => C.gold,
+    title:   "Read · Edge · Radar",
+    body:    "Each fixture shows a three-card strip: THE READ (model's best pick), THE EDGE (value pick where model disagrees with bookmaker), and GOAL RADAR (team scoring likelihood).\n\nTap + Ticket on any card to add it. Tap the card to expand the full model.",
+    tip:     "STRONG badge = highest confidence. LOW CONF = limited data — treat with caution.",
+  },
+  {
+    emoji:   "⚙️",
+    color:   () => C.radar,
+    title:   "Engine Pool & Performance",
+    body:    "The Engine tab shows fixtures that passed all quality thresholds — calibration weight, data volume, and odds value. These are the model's most confident picks.\n\nThe Performance tab tracks hit rate by market, strategy, and day.",
+    tip:     "By Market and By Strategy in Performance show engine pool picks only, not all fixtures.",
+  },
+  {
+    emoji:   "📜",
+    color:   () => C.edge,
+    title:   "Build Tickets",
+    body:    "Tap the 📜 Parley System button. JARVIS auto-builds the best ticket from the pool. MANUAL builds multiple non-overlapping tickets.\n\n🔀 Remix shuffles the pool for a different combination. ↺ on each leg swaps just that pick.",
+    tip:     "Set Max Same Market to control diversity — lower = more varied picks across markets.",
+  },
+  {
+    emoji:   "🚀",
+    color:   () => C.green,
+    title:   "Book & Track",
+    body:    "Built a ticket you like? Tap Book Now and select your bookmaker. The code pre-loads your picks directly.\n\nCheck the Engine Parlay Evaluator in the Performance tab to see how the engine's own daily picks perform.",
+    tip:     "Today's Engine Picks (banner at top of Builder) shows the pre-built Safe and Value parlays generated at fetch time.",
+  },
+];
+
+function FirstRunFlow({ onDone }) {
+  const [slide, setSlide] = useState(0);
+  const total  = ONBOARD_SLIDES.length;
+  const s      = ONBOARD_SLIDES[slide];
+  const col    = s.color();
+
+  const finish = () => {
+    try { localStorage.setItem("grm_onboarded_v2", "1"); } catch {}
+    onDone();
+  };
+
+  const next = () => slide < total - 1 ? setSlide(slide + 1) : finish();
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:800,background:C.bg,
+      display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      padding:"32px 24px",fontFamily:C.font }}>
+
+      {/* Skip */}
+      <button onClick={finish} className="gb"
+        style={{ position:"absolute",top:20,right:20,background:"transparent",
+          border:"none",color:C.text,opacity:.4,fontSize:10,padding:"6px 10px" }}>
+        Skip
+      </button>
+
+      {/* Slide content */}
+      <div style={{ width:"100%",maxWidth:360,display:"flex",flexDirection:"column",
+        alignItems:"center",textAlign:"center",flex:1,justifyContent:"center",gap:20 }}>
+
+        {/* Emoji circle */}
+        <div style={{ width:80,height:80,borderRadius:"50%",background:`${col}18`,
+          border:`2px solid ${col}40`,display:"flex",alignItems:"center",justifyContent:"center",
+          fontSize:36,lineHeight:1 }}>
+          {s.emoji}
+        </div>
+
+        {/* Step indicator */}
+        <div style={{ display:"flex",gap:6 }}>
+          {ONBOARD_SLIDES.map((_,i) => (
+            <div key={i} style={{ width:i===slide?20:6,height:6,borderRadius:3,
+              background:i===slide?col:`${col}30`,transition:"all .25s" }}/>
+          ))}
+        </div>
+
+        {/* Text */}
+        <div>
+          <div style={{ fontSize:20,fontWeight:800,color:C.text,lineHeight:1.25,marginBottom:12 }}>
+            {s.title}
+          </div>
+          <div style={{ fontSize:13,color:C.text,opacity:.7,lineHeight:1.65 }}>
+            {s.body}
+          </div>
+        </div>
+
+        {/* Tip */}
+        <div style={{ background:`${col}10`,border:`1px solid ${col}28`,borderRadius:8,
+          padding:"9px 14px",width:"100%" }}>
+          <div style={{ fontSize:8,color:col,fontWeight:800,letterSpacing:".1em",
+            textTransform:"uppercase",marginBottom:3 }}>TIP</div>
+          <div style={{ fontSize:9,color:C.text,opacity:.65,lineHeight:1.55 }}>{s.tip}</div>
+        </div>
+      </div>
+
+      {/* Next / Done button */}
+      <div style={{ width:"100%",maxWidth:360,marginTop:24 }}>
+        <button onClick={next} className="gb"
+          style={{ width:"100%",padding:"14px 0",background:col,color:C.accentText,
+            fontSize:12,fontWeight:800,letterSpacing:".06em",borderRadius:12 }}>
+          {slide < total - 1 ? "Next →" : "Let's Go ⚡"}
+        </button>
+        <div style={{ fontSize:8,color:C.text,opacity:.3,textAlign:"center",marginTop:10 }}>
+          No account required · no data stored on our servers
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CUSTOM TAB BANNER ─────────────────────────────────────────────────────
+// Shown once on first visit to the Custom tab. Dismissed with "Got it".
+// Flag: grm_custom_onboarded_v1
+function CustomTabBanner({ onDismiss }) {
+  return (
+    <div style={{ background:`${C.radar}0C`,border:`1px solid ${C.radar}30`,
+      borderRadius:10,padding:"12px 14px",marginBottom:14,
+      display:"flex",gap:12,alignItems:"flex-start" }}>
+      <span style={{ fontSize:20,lineHeight:1,flexShrink:0 }}>🔒</span>
+      <div style={{ flex:1,minWidth:0 }}>
+        <div style={{ fontSize:10,fontWeight:800,color:C.radar,marginBottom:4 }}>
+          Custom Tab — how it works
+        </div>
+        <div style={{ fontSize:8,color:C.text,opacity:.65,lineHeight:1.6,marginBottom:10 }}>
+          <strong style={{ color:C.text,opacity:1 }}>Step 1</strong> — Choose a strategy filter (Home Win, BTTS Value, Draw, etc.).<br/>
+          <strong style={{ color:C.text,opacity:1 }}>Step 2</strong> — Tap fixtures to select them. Confidence % shown for each pick.<br/>
+          <strong style={{ color:C.text,opacity:1 }}>Step 3</strong> — Hit Add to Ticket. Your picks land in the draft. Open the 📜 Parley System to build.
+        </div>
+        <button onClick={onDismiss} className="gb"
+          style={{ padding:"4px 14px",background:C.radar,color:C.accentText,
+            fontSize:9,fontWeight:800,borderRadius:6 }}>
+          Got it
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── PARLAY BUTTON NUDGE ───────────────────────────────────────────────────
+// One-time tooltip above the floating Parley System button.
+// Shows after fixtures first load, auto-dismisses after 5s.
+// Flag: grm_parlay_nudge_seen
+function ParlayNudge({ onDismiss }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 5000);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div style={{ position:"fixed",bottom:100,right:16,zIndex:160,maxWidth:220,
+      background:C.modalBg,border:`1px solid ${C.edgeBorder}`,borderRadius:10,
+      padding:"10px 12px",boxShadow:`0 4px 20px rgba(0,0,0,0.5)`,
+      animation:"fadeUp .3s ease forwards" }}>
+      {/* Arrow pointing down to button */}
+      <div style={{ position:"absolute",bottom:-7,right:28,width:12,height:12,
+        background:C.modalBg,border:`1px solid ${C.edgeBorder}`,
+        transform:"rotate(45deg)",borderTop:"none",borderLeft:"none" }}/>
+      <div style={{ display:"flex",justifyContent:"space-between",
+        alignItems:"flex-start",gap:8,marginBottom:5 }}>
+        <span style={{ fontSize:9,fontWeight:800,color:C.edge,letterSpacing:".06em",
+          textTransform:"uppercase" }}>📜 Parley System</span>
+        <button onClick={onDismiss} style={{ background:"none",border:"none",
+          color:C.text,cursor:"pointer",fontSize:11,padding:0,lineHeight:1,flexShrink:0 }}>✕</button>
+      </div>
+      <div style={{ fontSize:8,color:C.text,opacity:.7,lineHeight:1.55 }}>
+        Tap here for today's engine picks, ticket builder and performance history.
+      </div>
+    </div>
+  );
+}
+
 export default function GRMPro() {
 
   // ── THEME ─────────────────────────────────────────────────────────────────
@@ -4075,6 +5413,7 @@ export default function GRMPro() {
   const [tab, setTab]             = useState("all");
   const [search, setSearch]       = useState("");
   const [leagueFilter, setLeagueFilter] = useState(null);
+  const [sortActive,   setSortActive]   = useState(new Set()); // Set of active sort/filter ids
 
   const [budget, setBudget]       = useState(100);
   const [budgetPct, setBudgetPct] = useState(10);
@@ -4094,6 +5433,8 @@ export default function GRMPro() {
   const pollRef                   = useRef(null);
 
   const [parlayJarvisOpen, setParlayJarvisOpen] = useState(false);
+  const [mainFocusFixture, setMainFocusFixture] = useState(null); // Full Model page overlay
+  const [drawerOpen, setDrawerOpen]             = useState(false); // right-side filter drawer
   const [draftLegs, setDraftLegs] = useState([]);
   const [adminMode, setAdminMode] = useState(() => {
     try { return sessionStorage.getItem("grm_admin") === "1"; } catch { return false; }
@@ -4102,6 +5443,16 @@ export default function GRMPro() {
   const [adminPromptOpen, setAdminPromptOpen] = useState(false);
   const [adminTokenInput, setAdminTokenInput] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // ── Onboarding flags ──────────────────────────────────────────────────────
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try { return !localStorage.getItem("grm_onboarded_v2"); } catch { return false; }
+  });
+  const [showCustomBanner, setShowCustomBanner] = useState(() => {
+    try { return !localStorage.getItem("grm_custom_onboarded_v1"); } catch { return false; }
+  });
+  const [showParlayNudge, setShowParlayNudge] = useState(false);
+  const parlayNudgeShownRef = useRef(false);
 
   const toggleAdmin = () => {
     if (adminMode) {
@@ -4173,7 +5524,10 @@ export default function GRMPro() {
       try {
         const r = await fetch(`${SERVER}/api/progress?session=${session}`), d = await r.json();
         setProgress(d.pct||0); setProgressStage(d.stage||""); setProgressMsg(d.message||"");
-        if (d.stage === "done" || d.stage === "error" || d.pct >= 100) { clearInterval(pollRef.current); pollRef.current = null; }
+        // Only stop on explicit terminal stage — NOT pct>=100 alone.
+        // A stale session on the server returns pct:100 immediately which would
+        // kill the poll before the new fetch updates progress.
+        if (d.stage === "done" || d.stage === "error") { clearInterval(pollRef.current); pollRef.current = null; }
       } catch {}
     }, 800);
   };
@@ -4181,6 +5535,7 @@ export default function GRMPro() {
   useEffect(() => () => stopPolling(), []);
 
   const fetchData = useCallback(async (force = false) => {
+    stopPolling(); // kill any stale poll from previous fetch before resetting state
     setLoading(true); setError(null); setCached(false); setLegacySnapshot(false); setTickets([]);
     setProgress(0); setProgressStage("starting"); setProgressMsg("Initialising…");
     const session = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
@@ -4190,28 +5545,86 @@ export default function GRMPro() {
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       setFixtures(data); safeCacheWrite(CACHE_KEY, { date, data });
+      // Show parlay nudge once after first successful fetch
+      if (data.length && !parlayNudgeShownRef.current) {
+        try {
+          if (!localStorage.getItem("grm_parlay_nudge_seen")) {
+            parlayNudgeShownRef.current = true;
+            setTimeout(() => setShowParlayNudge(true), 1200);
+          }
+        } catch {}
+      }
       if (json.legacySchema) setLegacySnapshot(true);
       setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures ready`);
 
-      // Auto-save pool silently after fetch — every fetched date contributes to training data.
-      // Uses empty rates initially; rates warm up via ensureHistoricalRates shortly after.
+      // Auto-save pool + engine parlays after fetch.
+      // Rates must be loaded first — parlays built with empty rates produce wrong picks
+      // and would be locked on the server before the correct version can be saved.
       if (data.length) {
-        const rates = historicalRates || {};
-        const pool  = buildUniversalPool(data, rates);
-        if (pool.length) savePoolToServer(pool, date); // fire-and-forget
+        const capturedDate = date; // capture before any async gap
+        (async () => {
+          let rates = historicalRates;
+          if (!rates || historicalRatesDateRef.current !== todayStr()) {
+            rates = await ensureHistoricalRates();
+          }
+          rates = rates || {};
+          const pool = buildUniversalPool(data, rates);
+          if (pool.length) savePoolToServer(pool, capturedDate);
+          saveEngineParlaysForDate(capturedDate, data, rates);
+        })();
       }
     } catch(e) { setError(e.message); setProgressStage("error"); setProgressMsg(e.message); }
     finally { stopPolling(); setLoading(false); }
   }, [date]);
 
   const loadSnapshot = useCallback(async snapDate => {
+    stopPolling();
     setLoading(true); setError(null); setCached(false); setLegacySnapshot(false); setTickets([]);
+    setProgress(20); setProgressStage("loading"); setProgressMsg("Loading snapshot…");
     try {
       const res = await fetch(`${SERVER}/api/load-snapshot?date=${snapDate}`);
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       setFixtures(data); setDate(snapDate); setCached(true);
       if (json.legacySchema) setLegacySnapshot(true);
+      setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures loaded`);
+
+      // Auto-merge saved results for past dates — the results file already has
+      // scores and outcomes from when the results loop ran that day.
+      // No need to wait for the user to trigger anything.
+      const isToday = snapDate === todayStr();
+      if (!isToday) {
+        try {
+          const rRes = await fetch(`${SERVER}/api/load-results?date=${snapDate}`);
+          if (rRes.ok) {
+            const rJson = await rRes.json();
+            const rData = rJson.results || rJson.data || [];
+            if (Array.isArray(rData) && rData.length) {
+              // Merge scores/state/results into fixtures from the snapshot
+              setFixtures(prev => {
+                if (!prev.length) return prev;
+                const rMap = new Map(rData.map(r => [r.id, r]));
+                return prev.map(f => {
+                  const r = rMap.get(f.id);
+                  if (!r) return f;
+                  return {
+                    ...f,
+                    hGoals:     r.hGoals,
+                    aGoals:     r.aGoals,
+                    state:      r.finished ? "finished" : f.state,
+                    finished:   r.finished,
+                    result:     r.result,
+                    readResult: r.readResult,
+                    edgeResult: r.edgeResult,
+                    strategyResults: r.strategyResults,
+                  };
+                });
+              });
+              setLastResultsRefresh(new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }));
+            }
+          }
+        } catch {} // silently ignore — results file may not exist for this date
+      }
     } catch(e) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -4275,7 +5688,7 @@ export default function GRMPro() {
         const data = json.results || json.data || [];
         if (Array.isArray(data) && data.length) mergeResultsIntoFixtures(data);
       } catch {}
-    }, 45_000); // every 45s — fast enough to catch state changes without hammering
+    }, 60_000); // every 60s — matches server results loop cadence, no point polling faster
   }, [mergeResultsIntoFixtures]);
 
   const stopResultsRefresh = useCallback(() => {
@@ -4295,38 +5708,76 @@ export default function GRMPro() {
   }, [fixtures.length > 0, date, activeTab]);
 
   // ── Live states ticker — polls /api/live-states every 45s ────────────────
+  // When server is 403'd by SofaScore, data.states is empty and the display goes stale.
+  // Time-based fallback: estimate state from startTimestamp + elapsed wall-clock time.
+  // Not perfectly accurate (no actual score) but keeps the UI honest about game status.
+  const inferStateFromTime = useCallback((f) => {
+    const ts = f.startTimestamp;
+    if (!ts) return null;
+    const kickoffMs  = ts * 1000;
+    const nowMs      = Date.now();
+    const elapsedMin = (nowMs - kickoffMs) / 60_000;
+    const curState   = (f.state || "").toLowerCase();
+    // Don't override states that are already live/finished from server data
+    if (["finished","ft","fulltime","ended","aet","afterextratime"].includes(curState)) return null;
+    if (elapsedMin < 0) return null; // hasn't kicked off yet
+    if (elapsedMin > 105) return { state: "finished", stateNorm: "finished", isLive: false, isDone: true, minute: 90 };
+    if (elapsedMin > 47 && elapsedMin < 60) return { state: "halftime", stateNorm: "halftime", isLive: true, isDone: false, minute: 45 };
+    if (elapsedMin >= 0) return { state: "inprogress", stateNorm: "inprogress", isLive: true, isDone: false, minute: Math.min(Math.floor(elapsedMin), 90) };
+    return null;
+  }, []);
+
   const liveTickerRef = useRef(null);
   const pollLiveStates = useCallback(async (d) => {
     if (!d) return;
     try {
       const res  = await fetch(`${SERVER}/api/live-states?date=${d}`);
       const data = await res.json();
-      if (!data.states?.length) return;
-      const patchMap = new Map(data.states.map(s => [s.id, s]));
+
+      if (data.states?.length) {
+        // Server has live data — apply patches normally
+        const patchMap = new Map(data.states.map(s => [s.id, s]));
+        setFixtures(prev => prev.map(f => {
+          const p = patchMap.get(f.id);
+          if (!p) return f;
+          if (p.state === f.state && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
+          return {
+            ...f,
+            state:       p.state,
+            stateNorm:   p.stateNorm,
+            minute:      p.minute,
+            isPPD:       p.isPPD,
+            isCancelled: p.isCancelled,
+            scores: { ...(f.scores||{}), hGoals: p.hScore ?? f.scores?.hGoals, aGoals: p.aScore ?? f.scores?.aGoals },
+            hGoals: p.isDone ? (p.hScore ?? f.hGoals) : f.hGoals,
+            aGoals: p.isDone ? (p.aScore ?? f.aGoals) : f.aGoals,
+          };
+        }));
+        if (data.liveCount > 0) setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
+      } else {
+        // Server has no data (backing off 403) — apply time-based fallback
+        setFixtures(prev => prev.map(f => {
+          const inferred = inferStateFromTime(f);
+          if (!inferred) return f;
+          if (inferred.state === f.state) return f; // no change needed
+          return { ...f, ...inferred };
+        }));
+      }
+    } catch {
+      // Network error — still apply time fallback so UI doesn't freeze
       setFixtures(prev => prev.map(f => {
-        const p = patchMap.get(f.id);
-        if (!p) return f;
-        if (p.state === f.state && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
-        return {
-          ...f,
-          state:       p.state,
-          stateNorm:   p.stateNorm,
-          minute:      p.minute,
-          isPPD:       p.isPPD,
-          isCancelled: p.isCancelled,
-          scores: { ...(f.scores||{}), hGoals: p.hScore ?? f.scores?.hGoals, aGoals: p.aScore ?? f.scores?.aGoals },
-          hGoals: p.isDone ? (p.hScore ?? f.hGoals) : f.hGoals,
-          aGoals: p.isDone ? (p.aScore ?? f.aGoals) : f.aGoals,
-        };
+        const inferred = inferStateFromTime(f);
+        if (!inferred) return f;
+        if (inferred.state === f.state) return f;
+        return { ...f, ...inferred };
       }));
-      if (data.liveCount > 0) setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
-    } catch {}
-  }, []);
+    }
+  }, [inferStateFromTime]);
 
   useEffect(() => {
     if (!fixtures.length || activeTab !== "live") return;
     pollLiveStates(date);
-    liveTickerRef.current = setInterval(() => pollLiveStates(date), 45_000);
+    liveTickerRef.current = setInterval(() => pollLiveStates(date), 60_000);
     return () => { if (liveTickerRef.current) clearInterval(liveTickerRef.current); };
   }, [fixtures.length > 0, date, activeTab]);
 
@@ -4364,7 +5815,7 @@ export default function GRMPro() {
   const TABS = [
     { id:"all",    label:`All (${counts.total})` },
     { id:"engine", label:`The Engine (${enginePool.length})`, color:C.gold },
-    { id:"custom", label:"Custom",                           color:C.muted },
+    { id:"custom", label:"Custom",                           color:C.text },
   ];
 
   const filtered = useMemo(() => {
@@ -4372,7 +5823,7 @@ export default function GRMPro() {
     if (tab === "engine") {
       let list = fixtures.filter(f => engineFixtureIds.has(f.id));
       if (search) { const s = search.toLowerCase(); list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league||"").toLowerCase().includes(s)); }
-      if (leagueFilter) list = list.filter(f => f.leagueId === leagueFilter);
+      if (leagueFilter) { const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]); list = list.filter(f => lf.has(f.leagueId)); }
       return list.sort((a,b) => {
         const sa = enginePool.find(e=>e.fixtureId===a.id)?.score||0;
         const sb = enginePool.find(e=>e.fixtureId===b.id)?.score||0;
@@ -4381,127 +5832,187 @@ export default function GRMPro() {
     }
     let list = [...fixtures];
     if (search) { const s = search.toLowerCase(); list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league||"").toLowerCase().includes(s)); }
-    if (leagueFilter) list = list.filter(f => f.leagueId === leagueFilter);
+    if (leagueFilter) { const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]); list = list.filter(f => lf.has(f.leagueId)); }
+    if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
+    if (sortActive.has("hq_data"))    list = list.filter(f => (f.markets?._calibrationWeight ?? 0) >= 50);
+    if (sortActive.has("ltd_data"))   list = list.filter(f => (f.markets?._calibrationWeight ?? 100) < 25);
+
     list = [...list].sort((a, b) => {
+      // Upcoming sort: not started (0) → live (1) → FT (2)
+      if (sortActive.has("upcoming")) {
+        const ga = getStateGroup(a), gb = getStateGroup(b);
+        if (ga !== gb) return ga - gb;
+      }
+      // Conf sort
+      if (sortActive.has("conf")) {
+        const ca = a.theRead?.anchor?.prob ?? 0;
+        const cb = b.theRead?.anchor?.prob ?? 0;
+        if (ca !== cb) return cb - ca;
+      }
+      // Strong first
+      if (sortActive.has("strong_first") || sortActive.has("strong_only")) {
+        const aS = (a.theRead?.anchor?.strong && !a.markets?._lowConfidence) ? 1 : 0;
+        const bS = (b.theRead?.anchor?.strong && !b.markets?._lowConfidence) ? 1 : 0;
+        if (aS !== bS) return bS - aS;
+      }
+      // Default: league rank → kick-off
       const ra = a.leagueRank ?? (LEAGUE_RANK[a.league] ?? 999);
       const rb = b.leagueRank ?? (LEAGUE_RANK[b.league] ?? 999);
       if (ra !== rb) return ra - rb;
       return (a.startingAt || "").localeCompare(b.startingAt || "");
     });
     return list;
-  }, [fixtures, tab, search, leagueFilter, enginePool, engineFixtureIds]);
+  }, [fixtures, tab, search, leagueFilter, sortActive, enginePool, engineFixtureIds]);
 
   return (
     <div style={{ minHeight:"100vh",background:C.bg,fontFamily:C.font,paddingBottom:66 }}>
 
-      {/* ── SINGLE STICKY BLOCK — header + tab/search row ────────────────── */}
+      {/* ── SINGLE STICKY BLOCK — compact header ─────────────────────────── */}
       <div style={{ position:"sticky",top:0,zIndex:50,background:C.headerBg,backdropFilter:"blur(24px)",borderBottom:`1px solid ${C.headerBorder}` }}>
 
-        {/* Top row: GRM PRO + counts + date/fetch */}
-        <div style={{ padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap" }}>
-          <div>
-            <div style={{ fontSize:16,fontWeight:800,letterSpacing:"-.04em",color:C.text }}>
-              GRM <span style={{ color:C.gold }}>PRO</span>
-              <span style={{ fontSize:9,color:C.faint,fontWeight:400,marginLeft:8 }}>v15.0</span>
-              {cached && <span style={{ fontSize:8,color:C.muted,marginLeft:6 }}>● cached</span>}
-              {lastResultsRefresh && <span style={{ fontSize:7,color:C.green,marginLeft:6 }}>↺ {lastResultsRefresh}</span>}
-              {legacySnapshot && <span style={{ fontSize:7,color:C.amber,marginLeft:6,background:C.amberDim,border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px" }}>Legacy</span>}
+        {/* Top row: GRM PRO + Live/Backtest + date/fetch */}
+        <div style={{ padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:10,flexWrap:"wrap" }}>
+            <div>
+              <div style={{ fontSize:15,fontWeight:800,letterSpacing:"-.04em",color:C.text,lineHeight:1 }}>
+                GRM <span style={{ color:C.gold }}>PRO</span>
+                <span style={{ fontSize:8,color:C.text,fontWeight:400,marginLeft:6 }}>v15.0</span>
+                {cached && <span style={{ fontSize:7,color:C.text,marginLeft:5 }}>● cached</span>}
+                {lastResultsRefresh && <span style={{ fontSize:7,color:C.green,marginLeft:5 }}>↺ {lastResultsRefresh}</span>}
+              </div>
             </div>
-            <div style={{ fontSize:8,color:C.text,letterSpacing:".12em",textTransform:"uppercase",marginTop:1 }}>
-              Dixon-Coles · Deflation · The Read · The Edge · Goal Radar
-            </div>
-            <div style={{ display:"flex",gap:6,marginTop:8,flexWrap:"wrap" }}>
-              {[["live","Live Model"],["backtest","Backtest"]].map(([id,label]) => (
-                <button key={id} onClick={() => setActiveTab(id)} className="gb"
-                  style={{ padding:"4px 12px",fontSize:9,background:activeTab===id?C.accent:"transparent",color:activeTab===id?C.accentText:C.muted,border:`1px solid ${activeTab===id?C.accent:C.faint}` }}>
-                  {label}
-                </button>
-              ))}
-            </div>
+            {[["live","Live Model"],["backtest","Backtest"]].map(([id,label]) => (
+              <button key={id} onClick={() => setActiveTab(id)} className="gb"
+                style={{ padding:"4px 11px",fontSize:9,background:activeTab===id?C.accent:"transparent",color:activeTab===id?C.accentText:C.muted,border:`1px solid ${activeTab===id?C.accent:C.faint}` }}>
+                {label}
+              </button>
+            ))}
           </div>
 
-          {/* Counts — only when fixtures loaded */}
-          {activeTab === "live" && fixtures.length > 0 && (
-            <div style={{ display:"flex",gap:12 }}>
-              {[["TOTAL",counts.total,C.text],["READ",counts.read,C.gold],["EDGE",counts.edge,C.edge],["RADAR",counts.radar,C.radar]].map(([l,v,c]) => (
-                <div key={l} style={{ textAlign:"center" }}>
-                  <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:1 }}>{l}</div>
-                  <div style={{ fontSize:16,fontWeight:800,color:c }}>{v}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Date / Fetch / Admin controls */}
           {activeTab === "live" && (
-            <div style={{ display:"flex",gap:5,alignItems:"center",flexWrap:"wrap" }}>
-              <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="gi" style={{ color:C.gold,width:140,fontSize:10 }}/>
+            <div style={{ display:"flex",gap:5,alignItems:"center" }}>
+              <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="gi" style={{ color:C.gold,width:130,fontSize:10 }}/>
               <button onClick={() => fetchData(false)} disabled={loading} className="gb"
-                style={{ background:loading?C.faint:C.accent,color:loading?C.muted:C.accentText,padding:"7px 16px",fontSize:10 }}>
-                {loading ? <span className="pu">LOADING…</span> : "FETCH"}
-              </button>
-              {adminMode && (
-                <button onClick={() => fetchData(true)} disabled={loading} className="gb"
-                  style={{ background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,padding:"7px 10px",fontSize:9 }}>
-                  ↺
-                </button>
-              )}
-              {adminMode && fixtures.length > 0 && (
-                <button onClick={async () => {
-                  try {
-                    const res = await fetch(`${SERVER}/api/refresh-odds?date=${date}`, { method:"POST", headers:{"x-admin-token":"sterling77"} });
-                    const d = await res.json();
-                    if (d.updated) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${date}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } }
-                  } catch {}
-                }} className="gb"
-                  style={{ background:"transparent",border:`1px solid ${C.gold}50`,color:C.gold,padding:"7px 10px",fontSize:9 }}>
-                  $
-                </button>
-              )}
-              <button onClick={toggleAdmin} className="gb"
-                style={{ background:adminMode?"C.redDim":"transparent",border:`1px solid ${adminMode?C.red:C.faint}`,color:adminMode?C.red:C.faint,padding:"7px 8px",fontSize:9 }}>
-                {adminMode ? "🔓" : "🔒"}
-              </button>
-              <button onClick={() => setHelpOpen(true)} className="gb"
-                style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,padding:"7px 10px",fontSize:9 }}>
-                How it works
+                style={{ background:loading?C.faint:C.accent,color:loading?C.muted:C.accentText,padding:"6px 14px",fontSize:10 }}>
+                {loading ? <span className="pu">…</span> : "FETCH"}
               </button>
             </div>
           )}
         </div>
 
-        {/* Tab + search row — only when fixtures loaded */}
+        {/* Tab + search + filter drawer trigger — only when fixtures loaded */}
         {activeTab === "live" && fixtures.length > 0 && (
-          <div style={{ padding:"8px 16px 8px",borderTop:`1px solid ${C.border}` }}>
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:6 }}>
-              <div style={{ display:"flex",gap:5,flexWrap:"wrap" }}>
-                {TABS.map(t => (
-                  <button key={t.id} onClick={() => {
-                    setTab(t.id);
-                    if (t.id === "custom") setLeagueFilter(null);
-                  }} className="gb"
-                    style={{ padding:"5px 12px",background:tab===t.id?(t.color||C.text):"transparent",color:tab===t.id?C.accentText:(t.color||C.muted),border:`1px solid ${tab===t.id?(t.color||C.text):C.faint}`,opacity:tab===t.id?1:0.75,fontSize:10 }}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-              <div style={{ display:"flex",gap:6,alignItems:"center" }}>
-                <input type="text" placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)} className="gi" style={{ width:120,fontSize:10 }}/>
-                {/* Theme button — visible here, not buried in admin controls */}
-                <button onClick={() => setThemePickerOpen(true)} className="gb"
-                  style={{ background:C.accentDim,border:`1px solid ${C.accentBorder}`,color:C.accent,padding:"6px 10px",fontSize:9,flexShrink:0,whiteSpace:"nowrap" }}>
-                  🎨 Change Theme<span className="theme-label"> Theme</span>
+          <div style={{ padding:"6px 14px 8px",borderTop:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:6 }}>
+            {/* Tab buttons */}
+            <div style={{ display:"flex",gap:4,flex:1,flexWrap:"wrap" }}>
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => { setTab(t.id); if (t.id === "custom") setLeagueFilter(null); }} className="gb"
+                  style={{ padding:"5px 10px",background:tab===t.id?(t.color||C.text):"transparent",color:tab===t.id?C.accentText:(t.color||C.muted),border:`1px solid ${tab===t.id?(t.color||C.text):C.faint}`,fontSize:9 }}>
+                  {t.label}
                 </button>
-              </div>
+              ))}
             </div>
-            {availableLeagues.length > 1 && tab !== "custom" && tab !== "engine" && (
-              <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
-            )}
+            {/* Search */}
+            <input type="text" placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)} className="gi" style={{ width:110,fontSize:10,flexShrink:0 }}/>
+            {/* Drawer trigger — badge when filters active */}
+            <button onClick={() => setDrawerOpen(true)} className="gb"
+              style={{ position:"relative",background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"6px 10px",fontSize:13,flexShrink:0 }}>
+              ☰
+              {(leagueFilter || sortActive.size > 0) && (
+                <span style={{ position:"absolute",top:-4,right:-4,width:8,height:8,borderRadius:"50%",background:C.gold,border:`1px solid ${C.bg}` }}/>
+              )}
+            </button>
           </div>
         )}
 
       </div>
       {/* ── END STICKY BLOCK ─────────────────────────────────────────────── */}
+
+      {/* ── RIGHT-SIDE FILTER DRAWER ─────────────────────────────────────── */}
+      {drawerOpen && (
+        <div style={{ position:"fixed",inset:0,zIndex:200 }} onClick={() => setDrawerOpen(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            position:"absolute",top:0,right:0,height:"100%",width:290,
+            background:C.modalBg,borderLeft:`1px solid ${C.border}`,
+            overflowY:"auto",display:"flex",flexDirection:"column",gap:0,
+            transform:"translateX(0)",
+          }}>
+            {/* Drawer header */}
+            <div style={{ padding:"14px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
+              <span style={{ fontSize:12,fontWeight:800,color:C.text,letterSpacing:".05em" }}>FILTERS</span>
+              <button onClick={() => setDrawerOpen(false)} className="gb"
+                style={{ background:"transparent",border:"none",color:C.text,fontSize:16,padding:"2px 8px" }}>✕</button>
+            </div>
+
+            <div style={{ padding:"14px 16px",display:"flex",flexDirection:"column",gap:14 }}>
+              {/* League Filter */}
+              {availableLeagues.length > 1 && tab !== "custom" && tab !== "engine" && (
+                <div>
+                  <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>League</div>
+                  <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
+                </div>
+              )}
+
+              {/* Sort/Filter */}
+              {tab !== "custom" && tab !== "engine" && (
+                <div>
+                  <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Sort & Filter</div>
+                  <SortFilter active={sortActive} setActive={setSortActive} />
+                </div>
+              )}
+
+              {/* Theme */}
+              <div>
+                <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Appearance</div>
+                <button onClick={() => { setThemePickerOpen(true); setDrawerOpen(false); }} className="gb"
+                  style={{ background:C.accentDim,border:`1px solid ${C.accentBorder}`,color:C.accent,padding:"7px 14px",fontSize:10,width:"100%" }}>
+                  🎨 Change Theme
+                </button>
+              </div>
+
+              {/* Admin controls — only when adminMode */}
+              {adminMode && (
+                <div>
+                  <div style={{ fontSize:8,color:C.red,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Admin</div>
+                  <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
+                    <button onClick={() => { fetchData(true); setDrawerOpen(false); }} disabled={loading} className="gb"
+                      style={{ background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,padding:"7px 12px",fontSize:9 }}>
+                      ↺ Force Refresh
+                    </button>
+                    {fixtures.length > 0 && (
+                      <button onClick={async () => {
+                        try {
+                          const res = await fetch(`${SERVER}/api/refresh-odds?date=${date}`, { method:"POST", headers:{"x-admin-token":"sterling77"} });
+                          const d = await res.json();
+                          if (d.updated) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${date}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } }
+                          // Auto-fetch after odds refresh — no need to manually hit Fetch again
+                          await fetchData(true);
+                        } catch {}
+                        setDrawerOpen(false);
+                      }} className="gb"
+                        style={{ background:"transparent",border:`1px solid ${C.gold}50`,color:C.gold,padding:"7px 12px",fontSize:9 }}>
+                        $ Refresh Odds
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Lock/Unlock admin + Help */}
+              <div style={{ display:"flex",flexDirection:"column",gap:6,marginTop:4 }}>
+                <button onClick={() => { toggleAdmin(); setDrawerOpen(false); }} className="gb"
+                  style={{ background:adminMode?C.redDim:"transparent",border:`1px solid ${adminMode?C.red:C.faint}`,color:adminMode?C.red:C.text,padding:"7px 12px",fontSize:9 }}>
+                  {adminMode ? "🔓 Lock Admin" : "🔒 Admin"}
+                </button>
+                <button onClick={() => { setHelpOpen(true); setDrawerOpen(false); }} className="gb"
+                  style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"7px 12px",fontSize:9 }}>
+                  Learn how it works
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {activeTab === "backtest" && <BacktestTab loadSnapshot={loadSnapshot} adminMode={adminMode} onReloadFixtures={async (d) => { if (d === date) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${d}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } } }} />}
 
@@ -4509,7 +6020,7 @@ export default function GRMPro() {
         <div style={{ maxWidth:1480,margin:"0 auto",padding:activeTab==="live"?"28px 16px 0":"28px 24px 0" }}>
           {error && <div style={{ background:C.redDim,border:"1px solid rgba(248,113,113,0.2)",borderRadius:10,padding:"12px 18px",marginBottom:24,fontSize:12,color:C.red }}>✕ {error}</div>}
           {!loading && !error && !fixtures.length && (
-            <div style={{ textAlign:"center",padding:"80px 0",color:C.faint,fontSize:11,letterSpacing:".18em",textTransform:"uppercase" }}>Select a date and press FETCH</div>
+            <div style={{ textAlign:"center",padding:"80px 0",color:C.text,fontSize:11,letterSpacing:".18em",textTransform:"uppercase" }}>Select a date and press FETCH</div>
           )}
 
           {loading && (
@@ -4539,7 +6050,7 @@ export default function GRMPro() {
                   <div style={{ position:"absolute",inset:0,borderRadius:6,background:"linear-gradient(90deg,transparent,rgba(255,255,255,0.2),transparent)",animation:"shimmer 1.8s infinite" }}/>
                 </div>
               </div>
-              <div style={{ fontSize:9,color:C.muted,textAlign:"center",minHeight:16,lineHeight:1.5,marginBottom:24 }}>{progressMsg}</div>
+              <div style={{ fontSize:9,color:C.text,textAlign:"center",minHeight:16,lineHeight:1.5,marginBottom:24 }}>{progressMsg}</div>
               {/* Skeleton fixture cards */}
               {[1,2,3].map(i => (
                 <div key={i} style={{ background:C.cardBg,border:`1px solid ${C.border}`,borderRadius:C.cardRadius||12,padding:"14px 16px",marginBottom:10,display:"flex",flexDirection:"column",gap:10 }}>
@@ -4572,27 +6083,38 @@ export default function GRMPro() {
               <JarvisMindBox fixtures={fixtures} date={date} backtestSummary={historicalRates} />
 
               {tab === "custom" ? (
-                <CustomListView
-                  fixtures={fixtures} search={search}
-                  draftLegs={draftLegs} onAddToParlay={addLegToDraft}
-                  onAddToTicket={ticket => {
-                    setDraftLegs(prev => {
-                      const existing = new Set(prev.map(l => l.fixtureId));
-                      const newLegs  = (ticket.legs||[]).filter(l => !existing.has(l.fixtureId));
-                      return [...prev, ...newLegs];
-                    });
-                    setParlayJarvisOpen(true);
-                  }}
-                />
+                <>
+                  {showCustomBanner && (
+                    <CustomTabBanner onDismiss={() => {
+                      setShowCustomBanner(false);
+                      try { localStorage.setItem("grm_custom_onboarded_v1","1"); } catch {}
+                    }} />
+                  )}
+                  <CustomListView
+                    fixtures={fixtures} search={search}
+                    draftLegs={draftLegs} onAddToParlay={addLegToDraft}
+                    onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
+                    onAddToTicket={ticket => {
+                      setDraftLegs(prev => {
+                        const existing = new Set(prev.map(l => l.fixtureId));
+                        const newLegs  = (ticket.legs||[]).filter(l => !existing.has(l.fixtureId));
+                        return [...prev, ...newLegs];
+                      });
+                      setParlayJarvisOpen(true);
+                    }}
+                  />
+                </>
               ) : (
                 <>
                   <div className="grm-grid" style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:14,paddingBottom:80 }}>
                     {filtered.map(f => (
-                      <FixtureCard key={f.id} f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)} />
+                      <FixtureCard key={f.id} f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
+                        onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
+                      />
                     ))}
                   </div>
                   {!filtered.length && (
-                    <div style={{ textAlign:"center",padding:"60px 0",color:C.faint,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches found</div>
+                    <div style={{ textAlign:"center",padding:"60px 0",color:C.text,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches found</div>
                   )}
                 </>
               )}
@@ -4655,34 +6177,7 @@ export default function GRMPro() {
       )}
 
       {/* GRM Explainer Modal */}
-      {helpOpen && (
-        <div style={{ position:"fixed",inset:0,zIndex:600,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"flex-end",justifyContent:"center" }}
-          onClick={() => setHelpOpen(false)}>
-          <div style={{ background:C.modalBg,borderRadius:"16px 16px 0 0",border:`1px solid ${C.border}`,padding:"24px 20px",width:"100%",maxWidth:480,maxHeight:"85vh",overflowY:"auto" }}
-            onClick={e => e.stopPropagation()}>
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16 }}>
-              <div style={{ fontSize:14,fontWeight:800,color:C.accent }}>⚡ How GRM Works</div>
-              <button onClick={() => setHelpOpen(false)} className="gb"
-                style={{ background:"transparent",border:"none",color:C.muted,fontSize:18,padding:0 }}>✕</button>
-            </div>
-            {[
-              ["📖 The Read",  C.gold,  "The model's main pick for each fixture. Built from xG, team form, standings and Dixon-Coles ratings. Shows confidence % and implied odds. Tap + Add to Ticket to include it in your parley."],
-              ["🔮 The Edge",  C.edge,  "A secondary pick where the model sees value vs the bookmaker's odds. Only fires when the model's probability is significantly higher than what the odds imply. Higher risk, higher reward."],
-              ["🎯 Goal Radar", C.radar, "Team-specific scoring probability. Shows each team's chance of scoring at least once or twice. Use it to build Team Total legs or confirm BTTS picks."],
-              ["⚡ The Engine", C.gold,  "The automated parley builder. Scores every qualifying pick using empirical win rates × log(odds), filters out PPD/live games, and builds the best ticket(s) for your target odds. Gets smarter as more results come in."],
-              ["🎟️ Parley System", C.edge, "Open via the '📜 Parley System' button. Build a draft by adding picks from cards, then hit Build in Auto or Manual mode. Book directly to SportyBet or Lucky's Ledger — opens the app on mobile."],
-              ["🔒 Custom List",C.radar, "The Custom tab lets you browse fixtures by strategy (Home Win, BTTS Value etc.) and select multiple games for a single parley. Sort is by confidence descending within each strategy."],
-              ["📊 Performance",C.muted,"Tracks the engine's historical hit rate by market, strategy tag, and probability band. Updates automatically as results come in each day."],
-            ].map(([title, color, desc]) => (
-              <div key={title} style={{ marginBottom:16,borderLeft:`3px solid ${color}`,paddingLeft:12 }}>
-                <div style={{ fontSize:11,fontWeight:800,color,marginBottom:4 }}>{title}</div>
-                <div style={{ fontSize:9,color:C.muted,lineHeight:1.6 }}>{desc}</div>
-              </div>
-            ))}
-            <div style={{ fontSize:8,color:C.text,opacity:.3,textAlign:"center",marginTop:8 }}>Tap anywhere outside to close</div>
-          </div>
-        </div>
-      )}
+      {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
       {adminPromptOpen && (
         <div style={{ position:"fixed",inset:0,zIndex:500,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center" }}
           onClick={() => setAdminPromptOpen(false)}>
@@ -4708,7 +6203,31 @@ export default function GRMPro() {
       )}
 
       <DraftTicketBanner draftLegs={draftLegs} onOpen={() => setParlayJarvisOpen(true)} onClear={() => setDraftLegs([])} />
-      <GrmNewsTicker historicalRates={historicalRates} />
+
+      {/* First-run onboarding overlay */}
+      {showOnboarding && <FirstRunFlow onDone={() => setShowOnboarding(false)} />}
+
+      {/* Parlay button one-time nudge */}
+      {showParlayNudge && (
+        <ParlayNudge onDismiss={() => {
+          setShowParlayNudge(false);
+          try { localStorage.setItem("grm_parlay_nudge_seen","1"); } catch {}
+        }} />
+      )}
+
+      {/* FullModelPage — opened from any FixtureCard "▼ Full Model" button */}
+      {mainFocusFixture && (
+        <FullModelPage
+          f={mainFocusFixture}
+          onBack={() => {
+            setMainFocusFixture(null);
+            // restore scroll position saved before opening
+            try { window.scrollTo(0, parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
+          }}
+          draftLegs={draftLegs}
+          onAddToParlay={addLegToDraft}
+        />
+      )}
 
       {parlayJarvisOpen && (
         <ParlayJarvisTab
