@@ -85,21 +85,21 @@ export const THEME_CLAUDE = {
   id: "claude", name: "Claude Warm", emoji: "☀️",
   desc: "Parchment canvas, terracotta, editorial",
 
-  bg:         "#f5f4ed",
-  surface:    "#faf9f5",
-  surfaceHi:  "#ffffff",
-  cardBg:     "#ffffff",
-  modalBg:    "#faf9f5",
-  inputBg:    "#ffffff",
+  bg:         "#eeeade",          // was #f5f4ed — deeper warm parchment
+  surface:    "#f2ede4",          // was #faf9f5
+  surfaceHi:  "#f7f2ea",          // was #ffffff
+  cardBg:     "#f5f0e6",          // was #ffffff — cards no longer blinding white
+  modalBg:    "#f2ede4",
+  inputBg:    "#f7f2ea",
 
-  headerBg:   "rgba(245,244,237,0.96)",
-  headerBorder:"#e8e6dc",
+  headerBg:   "rgba(238,234,222,0.96)",
+  headerBorder:"#d8d4c8",
 
-  border:     "#e8e6dc",
-  borderHi:   "#d4d1c7",
+  border:     "#d8d4c8",          // slightly more defined
+  borderHi:   "#c6c0b2",
 
   text:       "#141413",
-  muted:      "#87867f",
+  muted:      "#5c5b55",   // was #87867f — 3.8:1 fail → now ~6.2:1 on parchment
   faint:      "#d4d1c7",
   subtleBg:   "#e8e6dc",
 
@@ -151,64 +151,64 @@ export const THEME_NIKE = {
   id: "nike", name: "Nike Pitch", emoji: "⚫",
   desc: "Monochrome, pill buttons, stadium energy",
 
-  bg:         "#FFFFFF",
-  surface:    "#F5F5F5",
-  surfaceHi:  "#EBEBEB",
-  cardBg:     "#FAFAFA",
-  modalBg:    "#FFFFFF",
-  inputBg:    "#F5F5F5",
+  bg:         "#E2E2E2",          // darker base — enough contrast for cards to stand out
+  surface:    "#D8D8D8",
+  surfaceHi:  "#CDCDCD",
+  cardBg:     "#EBEBEB",          // cards slightly lighter than bg so they lift
+  modalBg:    "#E2E2E2",
+  inputBg:    "#D8D8D8",
 
-  headerBg:   "rgba(255,255,255,0.97)",
-  headerBorder:"#CACACB",
+  headerBg:   "rgba(226,226,226,0.97)",
+  headerBorder:"#AAAAAA",
 
-  border:     "#CACACB",
-  borderHi:   "#909092",
+  border:     "#AAAAAA",          // strong visible borders
+  borderHi:   "#777777",
 
-  text:       "#111111",
-  muted:      "#707072",
-  faint:      "#E5E5E5",
-  subtleBg:   "#E5E5E5",
+  text:       "#0a0a0a",          // near-black — maximum contrast
+  muted:      "#383838",          // was #4a4a4c — now reads clearly on #E2E2E2 (7:1 contrast)
+  faint:      "#CDCDCD",
+  subtleBg:   "#D4D4D4",
 
-  accent:      "#111111",
-  accentDim:   "rgba(17,17,17,0.07)",
-  accentBorder:"rgba(17,17,17,0.25)",
+  accent:      "#0a0a0a",
+  accentDim:   "rgba(10,10,10,0.08)",
+  accentBorder:"rgba(10,10,10,0.30)",
   accentText:  "#FFFFFF",
-  gold:        "#111111",
-  goldDim:     "rgba(17,17,17,0.07)",
-  goldBorder:  "rgba(17,17,17,0.25)",
+  gold:        "#0a0a0a",
+  goldDim:     "rgba(10,10,10,0.08)",
+  goldBorder:  "rgba(10,10,10,0.28)",
 
-  // Market colours — high contrast for white surface
-  green:       "#005c35",
-  greenDim:    "rgba(0,92,53,0.10)",
-  blue:        "#0033cc",
-  blueDim:     "rgba(0,51,204,0.10)",
-  purple:      "#5b00d6",
-  purpleDim:   "rgba(91,0,214,0.08)",
-  orange:      "#cc3d00",
-  orangeDim:   "rgba(204,61,0,0.08)",
-  radar:       "#006b75",
-  radarDim:    "rgba(0,107,117,0.10)",
-  radarBorder: "rgba(0,107,117,0.30)",
-  edge:        "#3333aa",
-  edgeDim:     "rgba(51,51,170,0.10)",
-  edgeBorder:  "rgba(51,51,170,0.28)",
-  red:         "#cc0004",
-  redDim:      "rgba(204,0,4,0.08)",
-  amber:       "#8a5700",
-  amberDim:    "rgba(138,87,0,0.08)",
-  dc:          "#a3005e",
-  dcDim:       "rgba(163,0,94,0.08)",
-  silver:      "#707072",
-  silverDim:   "rgba(112,112,114,0.08)",
+  // Market colours — all deepened for white-surface legibility
+  green:       "#004d2c",         // deeper green
+  greenDim:    "rgba(0,77,44,0.12)",
+  blue:        "#002bb3",
+  blueDim:     "rgba(0,43,179,0.10)",
+  purple:      "#4a00b8",
+  purpleDim:   "rgba(74,0,184,0.09)",
+  orange:      "#b83300",
+  orangeDim:   "rgba(184,51,0,0.09)",
+  radar:       "#005560",
+  radarDim:    "rgba(0,85,96,0.12)",
+  radarBorder: "rgba(0,85,96,0.32)",
+  edge:        "#25259a",
+  edgeDim:     "rgba(37,37,154,0.11)",
+  edgeBorder:  "rgba(37,37,154,0.30)",
+  red:         "#aa0003",
+  redDim:      "rgba(170,0,3,0.09)",
+  amber:       "#724800",         // darkened amber for readability
+  amberDim:    "rgba(114,72,0,0.10)",
+  dc:          "#8a004e",
+  dcDim:       "rgba(138,0,78,0.09)",
+  silver:      "#383838",
+  silverDim:   "rgba(56,56,56,0.10)",
 
-  track:       "#E5E5E5",
-  skeleton:    "#EBEBEB",
-  skeletonHi:  "#F5F5F5",
+  track:       "#D0D0D0",
+  skeleton:    "#D8D8D8",
+  skeletonHi:  "#E5E5E5",
 
   font:        '"Helvetica Neue","Helvetica","Arial",sans-serif',
   btnRadius:   30,
   cardRadius:  20,
-  scrollThumb: "#CACACB",
+  scrollThumb: "#BBBBBB",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,21 +217,21 @@ export const THEME_APPLE = {
   id: "apple", name: "Apple Glass", emoji: "🍎",
   desc: "Parchment tiles, single blue accent, SF Pro",
 
-  bg:         "#f5f5f7",
-  surface:    "#ffffff",
-  surfaceHi:  "#fafafc",
-  cardBg:     "#ffffff",
-  modalBg:    "#f5f5f7",
-  inputBg:    "#ffffff",
+  bg:         "#e8e8ec",          // was #f5f5f7 — deeper cool grey
+  surface:    "#f0f0f4",          // was #ffffff
+  surfaceHi:  "#f5f5f8",          // was #fafafc
+  cardBg:     "#ededf1",          // was #ffffff — no blinding white
+  modalBg:    "#e8e8ec",
+  inputBg:    "#f0f0f4",
 
-  headerBg:   "rgba(245,245,247,0.92)",
-  headerBorder:"rgba(0,0,0,0.10)",
+  headerBg:   "rgba(232,232,236,0.92)",
+  headerBorder:"rgba(0,0,0,0.12)",
 
-  border:     "rgba(0,0,0,0.09)",
-  borderHi:   "rgba(0,0,0,0.18)",
+  border:     "rgba(0,0,0,0.11)",
+  borderHi:   "rgba(0,0,0,0.20)",
 
   text:       "#1d1d1f",
-  muted:      "rgba(0,0,0,0.50)",
+  muted:      "rgba(0,0,0,0.62)",  // was 0.50 — ~4.0:1 fail → now ~5.2:1 on #f5f5f7
   faint:      "rgba(0,0,0,0.08)",
   subtleBg:   "rgba(0,0,0,0.07)",
 
@@ -264,7 +264,7 @@ export const THEME_APPLE = {
   amberDim:    "rgba(138,87,0,0.08)",
   dc:          "#a3005e",
   dcDim:       "rgba(163,0,94,0.08)",
-  silver:      "rgba(0,0,0,0.50)",
+  silver:      "rgba(0,0,0,0.62)",  // matched to muted fix
   silverDim:   "rgba(0,0,0,0.05)",
 
   track:       "rgba(0,0,0,0.08)",
@@ -283,21 +283,21 @@ export const THEME_VODAFONE = {
   id: "vodafone", name: "Vodafone Red", emoji: "🔴",
   desc: "White editorial canvas, single brand red, charcoal institutions",
 
-  bg:         "#ffffff",
-  surface:    "#f2f2f2",
-  surfaceHi:  "#ffffff",
-  cardBg:     "#ffffff",
-  modalBg:    "#f2f2f2",
-  inputBg:    "#ffffff",
+  bg:         "#ebebeb",          // was #ffffff
+  surface:    "#e4e4e4",          // was #f2f2f2
+  surfaceHi:  "#eeeeee",          // was #ffffff
+  cardBg:     "#e8e8e8",          // was #ffffff — cards off-white not pure
+  modalBg:    "#e4e4e4",
+  inputBg:    "#eeeeee",
 
-  headerBg:   "rgba(255,255,255,0.97)",
-  headerBorder:"rgba(0,0,0,0.10)",
+  headerBg:   "rgba(235,235,235,0.97)",
+  headerBorder:"rgba(0,0,0,0.12)",
 
-  border:     "rgba(0,0,0,0.10)",
-  borderHi:   "rgba(0,0,0,0.20)",
+  border:     "rgba(0,0,0,0.12)",
+  borderHi:   "rgba(0,0,0,0.22)",
 
   text:       "#25282b",
-  muted:      "#7e7e7e",
+  muted:      "#545457",   // was #7e7e7e — 3.9:1 on #f2f2f2 faint → now ~6.1:1
   faint:      "#f2f2f2",
   subtleBg:   "#f2f2f2",
 
@@ -329,7 +329,7 @@ export const THEME_VODAFONE = {
   amberDim:    "rgba(138,87,0,0.08)",
   dc:          "#ac1811",
   dcDim:       "rgba(172,24,17,0.09)",
-  silver:      "#7e7e7e",
+  silver:      "#545457",   // matched to muted fix
   silverDim:   "rgba(126,126,126,0.08)",
 
   track:       "#f2f2f2",
