@@ -1,0 +1,1299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"/>
+  <title>Folio</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    :root {
+      --bg:#09090b; --surface:#111113; --card:#1c1c1e; --border:rgba(255,255,255,.08);
+      --text:#f4f4f5; --sub:#71717a; --muted:#3f3f46; --accent:#0a84ff;
+      --safe-b: env(safe-area-inset-bottom, 0px);
+    }
+    .light {
+      --bg:#f2f2f7; --surface:#ffffff; --card:#ffffff; --border:rgba(0,0,0,.08);
+      --text:#1c1c1e; --sub:#8e8e93; --muted:#c7c7cc; --accent:#0a84ff;
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    html,body,#root{height:100%;overflow:hidden;}
+    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+      background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;
+      touch-action:manipulation;}
+    button,input{font:inherit;color:inherit;}
+    button{border:none;background:none;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+    input{outline:none;}
+    ::-webkit-scrollbar{width:3px;height:3px;}
+    ::-webkit-scrollbar-thumb{background:rgba(128,128,128,.25);border-radius:99px;}
+    /* DOCX page styles */
+    .dp h1{font-size:20px;font-weight:700;margin:1.4em 0 .5em;line-height:1.2;}
+    .dp h2{font-size:17px;font-weight:600;margin:1.2em 0 .45em;line-height:1.25;}
+    .dp h3{font-size:15px;font-weight:600;margin:1em 0 .4em;}
+    .dp p{margin:0 0 .9em;line-height:1.72;}
+    .dp ul,.dp ol{padding-left:20px;margin:0 0 .9em;}
+    .dp li{margin-bottom:.3em;line-height:1.65;}
+    .dp table{width:100%;border-collapse:collapse;margin:.9em 0;font-size:13px;}
+    .dp td,.dp th{border:1px solid rgba(0,0,0,.12);padding:6px 10px;}
+    .dp th{font-weight:600;background:rgba(0,0,0,.04);}
+    .dp-dark td,.dp-dark th{border-color:rgba(255,255,255,.1);}
+    .dp-dark th{background:rgba(255,255,255,.04);}
+    .dp strong{font-weight:600;} .dp em{font-style:italic;}
+    .dp img{max-width:100%;height:auto;border-radius:4px;}
+    /* Range */
+    input[type=range]{-webkit-appearance:none;appearance:none;height:4px;border-radius:99px;outline:none;cursor:pointer;}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.3);cursor:pointer;}
+    /* Animations */
+    @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    .fade-up{animation:fadeUp .2s ease-out;}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .spin{animation:spin .9s linear infinite;display:inline-flex;}
+    /* Dock */
+    .dock{position:absolute;left:12px;right:12px;bottom:calc(72px + var(--safe-b));
+      background:rgba(17,17,19,.96);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);
+      border:1px solid rgba(255,255,255,.1);border-radius:22px;
+      box-shadow:0 8px 40px rgba(0,0,0,.4);overflow:hidden;z-index:80;
+      transition:transform .28s cubic-bezier(.4,0,.2,1),opacity .28s ease;}
+    .dock.light-dock{background:rgba(255,255,255,.96);border-color:rgba(0,0,0,.1);box-shadow:0 8px 40px rgba(0,0,0,.15);}
+    .dock.hidden{transform:translateY(120%);opacity:0;pointer-events:none;}
+    /* Thumb drawer */
+    .thumb-drawer{position:absolute;top:0;left:0;bottom:0;width:96px;
+      background:rgba(17,17,19,.97);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+      border-right:1px solid rgba(255,255,255,.08);z-index:70;overflow-y:auto;
+      padding:8px 6px;display:flex;flex-direction:column;gap:5px;}
+    .thumb-drawer.light-drawer{background:rgba(248,248,249,.97);border-right-color:rgba(0,0,0,.08);}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useEffect,useRef,useCallback,useMemo,memo}=React;
+const SERVER="http://localhost:3477";
+
+/* ── utils ── */
+const clamp=(n,a,b)=>Math.min(b,Math.max(a,n));
+const fmtSize=b=>!b?"":b<1024?`${b}B`:b<1048576?`${(b/1024).toFixed(1)}KB`:`${(b/1048576).toFixed(1)}MB`;
+const extOf=n=>{const i=n?.lastIndexOf?.(".");return i>=0?n.slice(i).toLowerCase():"";};
+const extColor=e=>({".pdf":"#ff453a",".docx":"#0a84ff",".txt":"#30d158",".md":"#30d158",
+  ".png":"#ff9f0a",".jpg":"#ff9f0a",".jpeg":"#ff9f0a",".webp":"#ff9f0a",".svg":"#bf5af2",".gif":"#ff9f0a"}[e]||"#8e8e93");
+const extLabel=e=>({".pdf":"PDF",".docx":"DOCX",".txt":"TXT",".md":"MD",
+  ".png":"PNG",".jpg":"JPG",".jpeg":"JPG",".webp":"WEBP",".svg":"SVG",".gif":"GIF"}[e]||(e||"").replace(".","").toUpperCase()||"FILE");
+const SUPPORTED=[".pdf",".docx",".txt",".md",".png",".jpg",".jpeg",".webp",".svg",".gif"];
+
+/* normalize a file object so fullPath is always present */
+function norm(f,base=""){
+  if(!f)return null;
+  const name=f.name||f.filename||"Untitled";
+  const ext=(f.ext||extOf(name)).toLowerCase();
+  const fullPath=f.fullPath||f.path||f.filePath||(base?`${base.replace(/\/$/,"")}/${name}`:"");
+  return{...f,name,ext,fullPath,size:Number(f.size||0)};
+}
+
+/* ── icons ── */
+const I={
+  back:     ()=><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>,
+  home:     ()=><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg>,
+  chevron:  ()=><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 18l6-6-6-6"/></svg>,
+  search:   ()=><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>,
+  clock:    ()=><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
+  folder:   ()=><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg>,
+  file:     ()=><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>,
+  moon:     ()=><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>,
+  sun:      ()=><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>,
+  pages:    ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>,
+  zoomIn:   ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/></svg>,
+  zoomOut:  ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35M8 11h6"/></svg>,
+  fit:      ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M8 21H5a2 2 0 01-2-2v-3"/></svg>,
+  night:    ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 3a9 9 0 010 18"/></svg>,
+  prev:     ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>,
+  next:     ()=><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M9 18l6-6-6-6"/></svg>,
+  loader:   ()=><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>,
+};
+
+/* ── swipe hook — touch events, non-passive touchmove for horizontal swipe ── */
+function useSwipe({onLeft,onRight,onTap,threshold=50}){
+  const s=useRef({active:false,x:0,y:0,dx:0,dy:0});
+  const elRef=useRef(null);
+  const cbRef=useRef({onLeft,onRight,onTap});
+  useEffect(()=>{cbRef.current={onLeft,onRight,onTap};},[onLeft,onRight,onTap]);
+
+  useEffect(()=>{
+    const el=elRef.current;
+    if(!el)return;
+    function onStart(e){
+      const t=e.touches[0];
+      s.current={active:true,x:t.clientX,y:t.clientY,dx:0,dy:0};
+    }
+    function onMove(e){
+      if(!s.current.active)return;
+      s.current.dx=e.touches[0].clientX-s.current.x;
+      s.current.dy=e.touches[0].clientY-s.current.y;
+      if(Math.abs(s.current.dx)>Math.abs(s.current.dy)*1.3&&Math.abs(s.current.dx)>10)
+        e.preventDefault();
+    }
+    function onEnd(){
+      if(!s.current.active)return;
+      const{dx,dy}=s.current;
+      s.current.active=false;
+      if(Math.abs(dx)>=threshold&&Math.abs(dx)>Math.abs(dy)*1.3){
+        dx<0?cbRef.current.onLeft?.():cbRef.current.onRight?.();
+      } else if(Math.abs(dx)<8&&Math.abs(dy)<8){
+        cbRef.current.onTap?.();
+      }
+    }
+    el.addEventListener("touchstart",onStart,{passive:true});
+    el.addEventListener("touchmove",onMove,{passive:false});
+    el.addEventListener("touchend",onEnd,{passive:true});
+    el.addEventListener("touchcancel",()=>{s.current.active=false;},{passive:true});
+    return()=>{
+      el.removeEventListener("touchstart",onStart);
+      el.removeEventListener("touchmove",onMove);
+      el.removeEventListener("touchend",onEnd);
+    };
+  },[threshold]);
+
+  return elRef;
+}
+
+/* ── pinch-zoom hook ── */
+function usePinch({onPinch,onDoubleTap}){
+  const s=useRef({pinching:false,dist:0,lastTap:0});
+  const elRef=useRef(null);
+  const cbRef=useRef({onPinch,onDoubleTap});
+  useEffect(()=>{cbRef.current={onPinch,onDoubleTap};},[onPinch,onDoubleTap]);
+
+  useEffect(()=>{
+    const el=elRef.current;
+    if(!el)return;
+    function dist(t){return Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY);}
+    function onStart(e){
+      if(e.touches.length===2){
+        s.current={pinching:true,dist:dist(e.touches),lastTap:s.current.lastTap};
+        e.preventDefault();
+      }
+    }
+    function onMove(e){
+      if(!s.current.pinching||e.touches.length!==2)return;
+      e.preventDefault();
+      const d=dist(e.touches);
+      const delta=d/s.current.dist;
+      s.current.dist=d;
+      cbRef.current.onPinch?.(delta);
+    }
+    function onEnd(e){
+      if(s.current.pinching){s.current.pinching=false;return;}
+      // double tap detection
+      const now=Date.now();
+      if(now-s.current.lastTap<300){cbRef.current.onDoubleTap?.();}
+      s.current.lastTap=now;
+    }
+    el.addEventListener("touchstart",onStart,{passive:false});
+    el.addEventListener("touchmove",onMove,{passive:false});
+    el.addEventListener("touchend",onEnd,{passive:true});
+    return()=>{
+      el.removeEventListener("touchstart",onStart);
+      el.removeEventListener("touchmove",onMove);
+      el.removeEventListener("touchend",onEnd);
+    };
+  },[]);
+  return elRef;
+}
+
+/* ── bookmark utils ── */
+const BM_KEY="folio_bookmarks";
+function loadBookmarks(){try{return JSON.parse(localStorage.getItem(BM_KEY)||"{}");}catch{return{};}}
+function saveBookmarks(all){try{localStorage.setItem(BM_KEY,JSON.stringify(all));}catch{}}
+function getFileBookmarks(filePath){return loadBookmarks()[filePath]||[];}
+function addBookmark(filePath,bm){
+  const all=loadBookmarks();
+  const list=all[filePath]||[];
+  // avoid duplicate page/scroll
+  const key=bm.page||Math.round(bm.scrollY||0);
+  const deduped=list.filter(b=>(b.page||Math.round(b.scrollY||0))!==key);
+  all[filePath]=[{...bm,id:Date.now(),createdAt:new Date().toISOString()},...deduped].slice(0,20);
+  saveBookmarks(all);
+  return all[filePath];
+}
+function removeBookmark(filePath,id){
+  const all=loadBookmarks();
+  all[filePath]=(all[filePath]||[]).filter(b=>b.id!==id);
+  saveBookmarks(all);
+  return all[filePath];
+}
+
+/* ── reading progress bar ── */
+function ProgressBar({pct,color="var(--accent)"}){
+  return(
+    <div style={{position:"absolute",top:0,left:0,right:0,height:2,zIndex:200,background:"rgba(128,128,128,.12)"}}>
+      <div style={{height:"100%",width:`${clamp(pct,0,100)}%`,background:color,transition:"width .3s ease",borderRadius:"0 2px 2px 0"}}/>
+    </div>
+  );
+}
+
+/* ── bookmark panel ── */
+function BookmarkPanel({bookmarks,onJump,onRemove,dark,onClose}){
+  return(
+    <div className="fade-up" style={{position:"absolute",top:0,right:0,bottom:0,width:240,
+      background:dark?"rgba(17,17,19,.98)":"rgba(255,255,255,.98)",
+      backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",
+      borderLeft:"1px solid var(--border)",zIndex:90,display:"flex",flexDirection:"column"}}>
+      <div style={{padding:"14px 14px 10px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{fontSize:13,fontWeight:600,color:"var(--text)"}}>Bookmarks</span>
+        <button onClick={onClose} style={{fontSize:12,color:"var(--sub)",padding:"2px 8px",borderRadius:6,background:"rgba(128,128,128,.12)"}}>Done</button>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:"8px 0"}}>
+        {bookmarks.length===0&&(
+          <div style={{padding:"40px 20px",textAlign:"center",color:"var(--sub)",fontSize:13}}>
+            No bookmarks yet.<br/>
+            <span style={{fontSize:11,opacity:.7}}>Tap the bookmark button while reading.</span>
+          </div>
+        )}
+        {bookmarks.map((b,i)=>(
+          <div key={b.id||i} style={{display:"flex",alignItems:"center",padding:"10px 14px",
+            borderBottom:"1px solid var(--border)",gap:10}}>
+            <button onClick={()=>onJump(b)} style={{flex:1,textAlign:"left",color:"var(--text)"}}>
+              <div style={{fontSize:13,fontWeight:500,marginBottom:2}}>
+                {b.label||`Page ${b.page||""}${b.scrollPct?` · ${b.scrollPct}%`:""}` }
+              </div>
+              <div style={{fontSize:11,color:"var(--sub)"}}>{new Date(b.createdAt).toLocaleDateString()}</div>
+            </button>
+            <button onClick={()=>onRemove(b.id)}
+              style={{color:"#ff453a",fontSize:18,padding:"2px 6px",lineHeight:1}}>×</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── App ── */
+function App(){
+  const[dark,setDark]=useState(true);
+  const[view,setView]=useState("browser");
+  const[currentPath,setCurrentPath]=useState("/storage/emulated/0");
+  const[browseData,setBrowseData]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[error,setError]=useState(null);
+  const[file,setFile]=useState(null);
+  const[search,setSearch]=useState("");
+  const abortRef=useRef(null);
+
+  const loadDir=useCallback(async p=>{
+    abortRef.current?.abort();
+    const ac=new AbortController();
+    abortRef.current=ac;
+    setLoading(true);setError(null);
+    try{
+      const r=await fetch(`${SERVER}/api/browse?path=${encodeURIComponent(p)}`,{signal:ac.signal});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      if(d.error)throw new Error(d.error);
+      // normalize all file objects so fullPath is always present
+      const base=d.path||p;
+      setBrowseData({
+        ...d,
+        dirs:(d.dirs||[]).map(x=>norm(x,base)),
+        files:(d.files||[]).map(x=>norm(x,base)),
+        recentFiles:(d.recentFiles||[]).map(x=>norm(x,base)),
+      });
+      setCurrentPath(p);
+    }catch(e){
+      if(e.name!=="AbortError")setError("Cannot reach server. Is node server.js running in Termux?");
+    }finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{loadDir(currentPath);},[]);
+
+  // URL param from terminal: ?file=/path/to/file
+  useEffect(()=>{
+    const fp=new URLSearchParams(window.location.search).get("file");
+    if(fp){
+      const f=norm({fullPath:fp,name:fp.split("/").pop(),ext:extOf(fp.split("/").pop())});
+      openFile(f);
+    }
+  },[]);
+
+  function openFile(f){
+    if(!f?.fullPath)return;
+    setFile(norm(f));
+    setView("viewer");
+    setSearch("");
+  }
+
+  const dirs=useMemo(()=>(browseData?.dirs||[]).filter(d=>d.name.toLowerCase().includes(search.toLowerCase())),[browseData,search]);
+  const files=useMemo(()=>(browseData?.files||[]).filter(f=>f.name.toLowerCase().includes(search.toLowerCase())),[browseData,search]);
+
+  return(
+    <div className={dark?"":"light"} style={{height:"100vh",display:"flex",flexDirection:"column",background:"var(--bg)",color:"var(--text)"}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');`}</style>
+
+      {/* ── Top bar ── */}
+      <header style={{height:52,display:"flex",alignItems:"center",padding:"0 14px",gap:8,flexShrink:0,zIndex:100,
+        background:dark?"rgba(9,9,11,.92)":"rgba(242,242,247,.92)",
+        backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",
+        borderBottom:"1px solid var(--border)"}}>
+
+        {view==="viewer"?(
+          <>
+            <button onClick={()=>{setView("browser");setFile(null);}}
+              style={{display:"flex",alignItems:"center",gap:4,color:"var(--accent)",fontWeight:500,fontSize:14,flexShrink:0}}>
+              <I.back/><span>Files</span>
+            </button>
+            <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:6,overflow:"hidden"}}>
+              <span style={{fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:5,
+                background:extColor(file?.ext)+"22",color:extColor(file?.ext),letterSpacing:.5,flexShrink:0}}>
+                {extLabel(file?.ext||"")}
+              </span>
+              <span style={{fontSize:13,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{file?.name}</span>
+            </div>
+          </>
+        ):(
+          <>
+            <div style={{display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
+              <div style={{width:27,height:27,background:dark?"#f4f4f5":"#1c1c1e",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{fontSize:14,fontWeight:700,color:dark?"#09090b":"#f4f4f5",letterSpacing:-.5}}>F</span>
+              </div>
+              <span style={{fontSize:15,fontWeight:600,letterSpacing:-.3}}>Folio</span>
+            </div>
+            {/* breadcrumb */}
+            <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:1,overflow:"hidden"}}>
+              <button onClick={()=>loadDir("/storage/emulated/0")} style={{color:"var(--sub)",padding:"2px 4px",flexShrink:0,display:"flex"}}>
+                <I.home/>
+              </button>
+              {currentPath.split("/").filter(Boolean).map((p,i,arr)=>{
+                const full="/"+arr.slice(0,i+1).join("/");
+                const last=i===arr.length-1;
+                return(
+                  <span key={i} style={{display:"flex",alignItems:"center",gap:0,minWidth:0,flexShrink:last?1:0}}>
+                    <span style={{color:"var(--muted)",flexShrink:0,display:"flex"}}><I.chevron/></span>
+                    <button onClick={()=>!last&&loadDir(full)}
+                      style={{fontSize:12,color:last?"var(--text)":"var(--sub)",fontWeight:last?500:400,
+                        maxWidth:last?110:50,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+                        padding:"2px 2px",cursor:last?"default":"pointer"}}>
+                      {p}
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        <button onClick={()=>setDark(d=>!d)} style={{color:"var(--sub)",padding:4,flexShrink:0,display:"flex"}}>
+          {dark?<I.sun/>:<I.moon/>}
+        </button>
+      </header>
+
+      {/* ── Content ── */}
+      <div style={{flex:1,overflow:"hidden",display:"flex"}}>
+        {view==="browser"&&(
+          <Browser dark={dark} dirs={dirs} files={files} recentFiles={browseData?.recentFiles||[]}
+            loading={loading} error={error} search={search} setSearch={setSearch}
+            loadDir={loadDir} openFile={openFile} browseData={browseData}/>
+        )}
+        {view==="viewer"&&file&&<Viewer dark={dark} file={file} onClose={()=>{setView("browser");setFile(null);}}/>}
+      </div>
+    </div>
+  );
+}
+
+/* ── Browser ── */
+function Browser({dark,dirs,files,recentFiles,loading,error,search,setSearch,loadDir,openFile,browseData}){
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{padding:"10px 14px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
+        <div style={{position:"relative"}}>
+          <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"var(--sub)",display:"flex"}}><I.search/></span>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search files and folders…"
+            style={{width:"100%",padding:"9px 12px 9px 32px",background:dark?"rgba(255,255,255,.06)":"rgba(0,0,0,.05)",
+              border:"1px solid var(--border)",borderRadius:10,fontSize:14,color:"var(--text)"}}/>
+        </div>
+      </div>
+
+      <div style={{flex:1,overflowY:"auto",padding:"14px 14px 40px"}}>
+        {error&&<div style={{padding:14,background:"rgba(255,69,58,.1)",border:"1px solid rgba(255,69,58,.2)",borderRadius:10,color:"#ff453a",fontSize:13,marginBottom:12}}>{error}</div>}
+        {loading&&<Loader/>}
+        {!loading&&!error&&(
+          <>
+            {/* Recent — horizontal scroll, shows fullPath so user knows where file is */}
+            {!search&&recentFiles.length>0&&(
+              <Section icon={<I.clock/>} label={`Recent (${recentFiles.length})`}>
+                <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:6}}>
+                  {recentFiles.slice(0,10).map((f,i)=>(
+                    <button key={i} onClick={()=>openFile(f)}
+                      style={{flexShrink:0,width:150,padding:"11px 12px",background:"var(--card)",
+                        border:"1px solid var(--border)",borderRadius:14,display:"flex",flexDirection:"column",
+                        alignItems:"flex-start",gap:5,textAlign:"left"}}>
+                      <span style={{fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:5,
+                        background:extColor(f.ext)+"22",color:extColor(f.ext),letterSpacing:.5}}>
+                        {extLabel(f.ext)}
+                      </span>
+                      <span style={{fontSize:13,fontWeight:500,color:"var(--text)",overflow:"hidden",
+                        textOverflow:"ellipsis",whiteSpace:"nowrap",width:"100%"}}>{f.name}</span>
+                      <span style={{fontSize:10,color:"var(--sub)",overflow:"hidden",textOverflow:"ellipsis",
+                        whiteSpace:"nowrap",width:"100%"}}>{f.fullPath}</span>
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+            {/* Folders */}
+            {dirs.length>0&&(
+              <Section icon={<I.folder/>} label={`Folders (${dirs.length})`}>
+                <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                  {dirs.map((d,i)=>(
+                    <button key={i} onClick={()=>loadDir(d.fullPath)}
+                      style={{width:"100%",padding:"12px 14px",background:"var(--surface)",
+                        border:"1px solid var(--border)",borderRadius:10,display:"flex",
+                        alignItems:"center",gap:10,textAlign:"left"}}>
+                      <span style={{fontSize:20,lineHeight:1,flexShrink:0}}>📁</span>
+                      <span style={{fontSize:14,fontWeight:500,color:"var(--text)",flex:1,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.name}</span>
+                      <span style={{color:"var(--muted)",flexShrink:0,display:"flex"}}><I.chevron/></span>
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+            {/* Files */}
+            {files.length>0&&(
+              <Section icon={<I.file/>} label={`Files (${files.length})`}>
+                <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                  {files.map((f,i)=>(
+                    <button key={i} onClick={()=>openFile(f)}
+                      style={{width:"100%",padding:"11px 14px",background:"var(--surface)",
+                        border:"1px solid var(--border)",borderRadius:10,display:"flex",
+                        alignItems:"center",gap:10,textAlign:"left"}}>
+                      <span style={{fontSize:11,fontWeight:700,padding:"3px 7px",borderRadius:6,
+                        background:extColor(f.ext)+"22",color:extColor(f.ext),letterSpacing:.4,flexShrink:0}}>
+                        {extLabel(f.ext)}
+                      </span>
+                      <span style={{fontSize:14,fontWeight:500,color:"var(--text)",flex:1,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</span>
+                      <span style={{fontSize:11,color:"var(--sub)",flexShrink:0}}>{fmtSize(f.size)}</span>
+                      <span style={{color:"var(--muted)",flexShrink:0,display:"flex"}}><I.chevron/></span>
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+            {!loading&&dirs.length===0&&files.length===0&&(
+              <div style={{textAlign:"center",padding:"60px 20px",color:"var(--sub)",fontSize:14}}>
+                {search?"No results.":"This folder is empty."}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Section({icon,label,children}){
+  return(
+    <div style={{marginBottom:18}}>
+      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:8,color:"var(--sub)"}}>
+        <span style={{display:"flex"}}>{icon}</span>
+        <span style={{fontSize:11,fontWeight:600,letterSpacing:.5,textTransform:"uppercase"}}>{label}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Loader(){
+  return(
+    <div style={{display:"flex",justifyContent:"center",padding:60}}>
+      <span className="spin" style={{color:"var(--sub)"}}><I.loader/></span>
+    </div>
+  );
+}
+
+/* ── Viewer router ── */
+function Viewer({dark,file,onClose}){
+  const ext=(file.ext||"").toLowerCase();
+  if(ext===".pdf")return<PDFViewer dark={dark} file={file}/>;
+  if(ext===".docx")return<DocxViewer dark={dark} file={file}/>;
+  if([".png",".jpg",".jpeg",".webp",".svg",".gif"].includes(ext))return<ImageViewer dark={dark} file={file}/>;
+  if([".txt",".md"].includes(ext))return<TextViewer dark={dark} file={file}/>;
+  return<div style={{padding:40,color:"var(--sub)"}}>Unsupported file type.</div>;
+}
+
+/* ══════════════════════════════════════════════════════
+   PDF VIEWER — pinch zoom, bookmarks, progress, swipe
+══════════════════════════════════════════════════════ */
+function PDFViewer({dark,file}){
+  const containerRef=useRef(null);
+  const canvasRef=useRef(null);
+  const pdfRef=useRef(null);
+  const renderToken=useRef(0);
+  const renderTask=useRef(null);
+  const thumbAbort=useRef(null);
+  const roRef=useRef(null);
+
+  const[busy,setBusy]=useState(true);
+  const[err,setErr]=useState(null);
+  const[total,setTotal]=useState(0);
+  const[page,setPage]=useState(1);
+  const[pageInput,setPageInput]=useState("1");
+  const[fitScale,setFitScale]=useState(1);
+  const[manualZoom,setManualZoom]=useState(null);
+  const[thumbs,setThumbs]=useState([]);
+  const[showDrawer,setShowDrawer]=useState(false);
+  const[showDock,setShowDock]=useState(true);
+  const[showBM,setShowBM]=useState(false);
+  const[bookmarks,setBookmarks]=useState([]);
+  const[night,setNight]=useState(false);
+  const[nightLevel,setNightLevel]=useState(80);
+  const[progress,setProgress]=useState(0);
+  const dockTimer=useRef(null);
+
+  const activeZoom=manualZoom??fitScale;
+
+  // load bookmarks
+  useEffect(()=>{setBookmarks(getFileBookmarks(file.fullPath));},[file.fullPath]);
+
+  /* load PDF */
+  useEffect(()=>{
+    const token=++renderToken.current;
+    setBusy(true);setErr(null);setThumbs([]);setShowDrawer(false);
+    setPage(1);setPageInput("1");setManualZoom(null);setProgress(0);
+
+    async function go(){
+      try{
+        if(!window.pdfjsLib){
+          await new Promise((res,rej)=>{
+            const s=document.createElement("script");
+            s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+            s.onload=res;s.onerror=rej;document.head.appendChild(s);
+          });
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc=
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+        const resp=await fetch(`${SERVER}/api/file?path=${encodeURIComponent(file.fullPath)}`);
+        if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+        const buf=await resp.arrayBuffer();
+        if(token!==renderToken.current)return;
+        const pdf=await window.pdfjsLib.getDocument({data:buf}).promise;
+        if(token!==renderToken.current)return;
+        pdfRef.current=pdf;
+        setTotal(pdf.numPages);
+        try{
+          const rr=await fetch(`${SERVER}/api/resume?path=${encodeURIComponent(file.fullPath)}`);
+          const rd=await rr.json();
+          const p=clamp(rd?.data?.page||1,1,pdf.numPages);
+          setPage(p);setPageInput(String(p));
+          setProgress(Math.round((p/pdf.numPages)*100));
+        }catch{}
+        setBusy(false);
+        warmThumbs(pdf,token);
+      }catch(e){
+        if(token!==renderToken.current)return;
+        setErr(e.message||"Failed to load PDF");setBusy(false);
+      }
+    }
+    go();
+    return()=>{renderToken.current++;thumbAbort.current?.abort();};
+  },[file.fullPath]);
+
+  useEffect(()=>{if(pdfRef.current&&!busy)fitAndRender(page,true);},[page,busy]);
+  useEffect(()=>{if(pdfRef.current&&!busy&&manualZoom!==null)doRender(page,manualZoom);},[manualZoom]);
+
+  /* ResizeObserver */
+  useEffect(()=>{
+    if(!containerRef.current)return;
+    roRef.current=new ResizeObserver(()=>{if(pdfRef.current&&!busy)fitAndRender(page,true);});
+    roRef.current.observe(containerRef.current);
+    return()=>roRef.current?.disconnect();
+  },[]);
+
+  async function fitAndRender(pageNum,setFit=false){
+    const pdf=pdfRef.current,cont=containerRef.current,canvas=canvasRef.current;
+    if(!pdf||!cont||!canvas)return;
+    const token=renderToken.current;
+    try{
+      const pg=await pdf.getPage(pageNum);
+      if(token!==renderToken.current)return;
+      const w=Math.max(200,cont.clientWidth-16);
+      const native=pg.getViewport({scale:1});
+      const fs=w/native.width;
+      if(setFit)setFitScale(fs);
+      await renderCanvas(pg,manualZoom??fs,canvas,token);
+      saveResume(pageNum);
+    }catch(e){if(e?.name!=="RenderingCancelledException")console.error(e);}
+  }
+
+  async function doRender(pageNum,z){
+    const pdf=pdfRef.current,canvas=canvasRef.current;
+    if(!pdf||!canvas)return;
+    const token=renderToken.current;
+    try{
+      const pg=await pdf.getPage(pageNum);
+      if(token!==renderToken.current)return;
+      await renderCanvas(pg,z,canvas,token);
+    }catch(e){if(e?.name!=="RenderingCancelledException")console.error(e);}
+  }
+
+  async function renderCanvas(pg,z,canvas,token){
+    try{renderTask.current?.cancel();}catch{}
+    const dpr=window.devicePixelRatio||1;
+    const vp=pg.getViewport({scale:z*dpr});
+    canvas.width=vp.width;canvas.height=vp.height;
+    canvas.style.width=`${vp.width/dpr}px`;canvas.style.height=`${vp.height/dpr}px`;
+    const task=pg.render({canvasContext:canvas.getContext("2d",{alpha:false}),viewport:vp});
+    renderTask.current=task;
+    await task.promise;
+  }
+
+  async function warmThumbs(pdf,token){
+    thumbAbort.current?.abort();
+    const ac=new AbortController();thumbAbort.current=ac;
+    const out=[];
+    try{
+      for(let i=1;i<=Math.min(pdf.numPages,40);i++){
+        if(token!==renderToken.current||ac.signal.aborted)break;
+        const pg=await pdf.getPage(i);
+        const vp=pg.getViewport({scale:.12});
+        const c=document.createElement("canvas");
+        c.width=vp.width;c.height=vp.height;
+        await pg.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
+        out.push(c.toDataURL());
+        if(i===1||i%4===0)setThumbs([...out]);
+      }
+      if(token===renderToken.current&&!ac.signal.aborted)setThumbs([...out]);
+    }catch{}
+  }
+
+  function saveResume(p){
+    fetch(`${SERVER}/api/resume`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({filePath:file.fullPath,data:{page:p}})}).catch(()=>{});
+  }
+
+  function goPage(delta){
+    const np=clamp(page+delta,1,total);
+    if(np===page)return;
+    setPage(np);setPageInput(String(np));setManualZoom(null);
+    setProgress(Math.round((np/total)*100));
+  }
+
+  function commitPageInput(){
+    const n=parseInt(pageInput,10);
+    if(!isNaN(n)&&n>=1&&n<=total){setPage(n);setManualZoom(null);setProgress(Math.round((n/total)*100));}
+    else setPageInput(String(page));
+  }
+
+  function adjustZoom(delta){setManualZoom(clamp(activeZoom+delta,.2,6));}
+  function resetFit(){setManualZoom(null);if(pdfRef.current)fitAndRender(page,true);}
+
+  function onCanvasTap(){
+    clearTimeout(dockTimer.current);
+    setShowDock(s=>{
+      if(!s)dockTimer.current=setTimeout(()=>setShowDock(false),4000);
+      return!s;
+    });
+  }
+
+  function addBM(){
+    const label=`Page ${page}`;
+    const updated=addBookmark(file.fullPath,{page,label});
+    setBookmarks(updated);
+    // brief visual feedback via dock flash — already handled by state
+  }
+
+  /* pinch zoom on canvas */
+  const pinchRef=usePinch({
+    onPinch:(delta)=>setManualZoom(z=>clamp((z??activeZoom)*delta,.2,6)),
+    onDoubleTap:resetFit,
+  });
+
+  /* swipe pages */
+  const swipeRef=useSwipe({onLeft:()=>goPage(1),onRight:()=>goPage(-1),onTap:onCanvasTap});
+
+  /* combine refs on canvas scroll div */
+  function setRefs(el){
+    containerRef.current=el;
+    swipeRef.current=el;
+    pinchRef.current=el;
+  }
+
+  const nightFilter=night
+    ?`invert(1) hue-rotate(180deg) brightness(${.15+(nightLevel/100)*.9})`
+    :"none";
+
+  const isBookmarked=bookmarks.some(b=>b.page===page);
+
+  if(err)return<div style={{padding:32,color:"#ff453a",fontSize:14}}>{err}</div>;
+
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative",
+      background:dark?"#111":"#e2e2e4"}}>
+
+      {/* Progress bar */}
+      <ProgressBar pct={progress} color={night?"#bf5af2":"var(--accent)"}/>
+
+      {/* Page thumbnail drawer */}
+      {showDrawer&&(
+        <div className={`thumb-drawer fade-up ${dark?"":"light-drawer"}`} onClick={e=>e.stopPropagation()}>
+          <div style={{fontSize:10,fontWeight:700,color:"var(--sub)",padding:"0 3px 5px",letterSpacing:.8}}>PAGES</div>
+          {thumbs.length===0&&<div style={{fontSize:11,color:"var(--sub)",padding:4}}>Generating…</div>}
+          {thumbs.map((src,i)=>(
+            <button key={i} onClick={()=>{goPage(i+1-page);setShowDrawer(false);}}
+              style={{border:`2px solid ${page===i+1?"var(--accent)":"transparent"}`,
+                borderRadius:6,overflow:"hidden",padding:0,width:"100%",background:"none",position:"relative"}}>
+              <img src={src} alt="" style={{width:"100%",display:"block",
+                filter:night?"invert(1) hue-rotate(180deg)":"none"}}/>
+              {bookmarks.some(b=>b.page===i+1)&&(
+                <span style={{position:"absolute",top:2,right:2,fontSize:8,background:"#ff9f0a",
+                  borderRadius:3,padding:"0 3px",color:"#000",fontWeight:700}}>BM</span>
+              )}
+              <span style={{fontSize:9,color:page===i+1?"var(--accent)":"var(--sub)",
+                display:"block",textAlign:"center",padding:"2px 0"}}>{i+1}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Bookmark panel */}
+      {showBM&&(
+        <BookmarkPanel dark={dark} bookmarks={bookmarks}
+          onClose={()=>setShowBM(false)}
+          onJump={b=>{setPage(b.page);setPageInput(String(b.page));setShowBM(false);setProgress(Math.round((b.page/total)*100));}}
+          onRemove={id=>{setBookmarks(removeBookmark(file.fullPath,id));}}/>
+      )}
+
+      {/* Canvas area */}
+      <div ref={setRefs}
+        style={{flex:1,overflowY:"auto",overflowX:"hidden",display:"flex",
+          justifyContent:"center",alignItems:"flex-start",padding:"8px 8px 180px"}}>
+        {busy
+          ?<div style={{paddingTop:80,color:"var(--sub)",display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
+            <span className="spin"><I.loader/></span>
+            <span style={{fontSize:13}}>Loading PDF…</span>
+          </div>
+          :<canvas ref={canvasRef} style={{display:"block",maxWidth:"100%",borderRadius:2,
+            boxShadow:"0 2px 24px rgba(0,0,0,.3)",filter:nightFilter,transition:"filter .3s",
+            touchAction:"none"}}/>
+        }
+      </div>
+
+      {/* ── Floating dock ── */}
+      <div className={`dock ${dark?"":"light-dock"} ${showDock?"":"hidden"}`}>
+        <div style={{display:"flex",alignItems:"center",padding:"6px 8px",gap:0}}>
+
+          <Tb icon={<I.pages/>} label="Pages" active={showDrawer}
+            color={showDrawer?"var(--accent)":"var(--sub)"}
+            title="Page thumbnails" onClick={()=>setShowDrawer(s=>!s)}/>
+
+          <DockDiv/>
+
+          <Tb icon={<I.prev/>} label="Prev" color="var(--sub)" off={page<=1}
+            title="Previous page" onClick={()=>goPage(-1)}/>
+
+          <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:1,padding:"4px 2px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:3}}>
+              <input value={pageInput}
+                onChange={e=>setPageInput(e.target.value)}
+                onBlur={commitPageInput}
+                onKeyDown={e=>{if(e.key==="Enter")commitPageInput();}}
+                style={{width:36,textAlign:"center",
+                  background:dark?"rgba(255,255,255,.1)":"rgba(0,0,0,.07)",
+                  border:"none",borderRadius:7,color:"var(--text)",
+                  fontSize:15,fontWeight:600,padding:"3px 4px"}}/>
+              <span style={{fontSize:12,color:"var(--sub)"}}>/{total||"…"}</span>
+            </div>
+            <span style={{fontSize:9,color:"var(--muted)",letterSpacing:.4}}>PAGE</span>
+          </div>
+
+          <Tb icon={<I.next/>} label="Next" color="var(--sub)" off={page>=total}
+            title="Next page" onClick={()=>goPage(1)}/>
+
+          <DockDiv/>
+
+          <Tb icon={<I.zoomOut/>} label="−" color="var(--sub)" title="Zoom out" onClick={()=>adjustZoom(-.2)}/>
+          <Tb icon={<I.fit/>}     label="Fit" color="var(--sub)" title="Fit to width (double-tap also works)" onClick={resetFit}/>
+          <Tb icon={<I.zoomIn/>}  label="+" color="var(--sub)" title="Zoom in" onClick={()=>adjustZoom(.2)}/>
+
+          <DockDiv/>
+
+          {/* Bookmark */}
+          <Tb
+            icon={<svg width="19" height="19" viewBox="0 0 24 24" fill={isBookmarked?"#ff9f0a":"none"} stroke={isBookmarked?"#ff9f0a":"currentColor"} strokeWidth="2" strokeLinecap="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>}
+            label={isBookmarked?"Saved":"Mark"}
+            color={isBookmarked?"#ff9f0a":"var(--sub)"}
+            title="Bookmark this page"
+            onClick={addBM}/>
+
+          <Tb
+            icon={<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/><path d="M12 8v4M12 16h.01"/></svg>}
+            label={`${bookmarks.length}`}
+            color={bookmarks.length?"#ff9f0a":"var(--sub)"}
+            title="View all bookmarks"
+            active={showBM}
+            onClick={()=>setShowBM(s=>!s)}/>
+
+          <DockDiv/>
+
+          <Tb icon={<I.night/>} label="Night" active={night}
+            color={night?"#bf5af2":"var(--sub)"}
+            title="Night mode — tap slider to adjust darkness"
+            onClick={()=>setNight(n=>!n)}/>
+        </div>
+
+        {night&&(
+          <div className="fade-up" style={{padding:"2px 18px 13px",display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:12}}>☀️</span>
+            <input type="range" min={10} max={100} value={nightLevel}
+              onChange={e=>setNightLevel(Number(e.target.value))}
+              style={{flex:1,background:`linear-gradient(to right,#bf5af2 ${nightLevel}%,${dark?"#3f3f46":"#c7c7cc"} ${nightLevel}%)`}}/>
+            <span style={{fontSize:12}}>🌑</span>
+            <span style={{fontSize:11,color:"#bf5af2",fontWeight:600,minWidth:30,textAlign:"right"}}>{nightLevel}%</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Tb({icon,label,onClick,active,color,off,title}){
+  return(
+    <button onClick={onClick} disabled={off} title={title}
+      style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2,
+        padding:"6px 5px",minWidth:42,borderRadius:12,
+        opacity:off?.28:1,background:active?"rgba(128,128,128,.12)":"none"}}>
+      <span style={{color,display:"flex"}}>{icon}</span>
+      <span style={{fontSize:9,color,letterSpacing:.3,fontWeight:500,whiteSpace:"nowrap"}}>{label}</span>
+    </button>
+  );
+}
+
+function DockDiv(){
+  return<div style={{width:1,height:30,background:"rgba(128,128,128,.2)",margin:"0 1px",flexShrink:0}}/>;
+}
+
+/* ══════════════════════════════════════════════════════
+   DOCX VIEWER
+   - Word-style print layout (grey bg + white page)
+   - Page break dividers
+   - Floating dock: font size, line spacing, find, word count, night
+   - Resume scroll position
+══════════════════════════════════════════════════════ */
+function DocxViewer({dark,file}){
+  const[html,setHtml]=useState("");
+  const[rawText,setRawText]=useState("");
+  const[busy,setBusy]=useState(true);
+  const[err,setErr]=useState(null);
+  const[fontSize,setFontSize]=useState(15);
+  const[lineHeight,setLineHeight]=useState(1.75);
+  const[showDock,setShowDock]=useState(true);
+  const[showFind,setShowFind]=useState(false);
+  const[findQ,setFindQ]=useState("");
+  const[findCount,setFindCount]=useState(0);
+  const[nightDoc,setNightDoc]=useState(false);
+  const scrollRef=useRef(null);
+  const contentRef=useRef(null);
+  const findRef=useRef(null);
+  const dockTimer=useRef(null);
+
+  useEffect(()=>{setBookmarks(getFileBookmarks(file.fullPath));},[file.fullPath]);
+
+  useEffect(()=>{
+    let cancelled=false;
+    setBusy(true);setErr(null);setHtml("");setRawText("");setProgress(0);
+    async function go(){
+      try{
+        if(!window.mammoth){
+          await new Promise((res,rej)=>{
+            const s=document.createElement("script");
+            s.src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+            s.onload=res;s.onerror=rej;document.head.appendChild(s);
+          });
+        }
+        const resp=await fetch(`${SERVER}/api/file?path=${encodeURIComponent(file.fullPath)}`);
+        if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+        const buf=await resp.arrayBuffer();
+        if(cancelled)return;
+        const result=await window.mammoth.convertToHtml({arrayBuffer:buf});
+        const messages=result.messages||[];
+        if(cancelled)return;
+        setHtml(result.value);
+        // extract plain text for word count
+        const tmp=document.createElement("div");
+        tmp.innerHTML=result.value;
+        setRawText(tmp.textContent||"");
+        try{
+          const rr=await fetch(`${SERVER}/api/resume?path=${encodeURIComponent(file.fullPath)}`);
+          const rd=await rr.json();
+          if(rd?.data?.scrollY&&scrollRef.current)
+            setTimeout(()=>{scrollRef.current.scrollTop=rd.data.scrollY;},200);
+        }catch{}
+      }catch(e){
+        if(!cancelled)setErr(e.message);
+      }finally{
+        if(!cancelled)setBusy(false);
+      }
+    }
+    go();
+    return()=>{cancelled=true;};
+  },[file.fullPath]);
+
+  function onScroll(){
+    const el=scrollRef.current;if(!el)return;
+    const pct=Math.round((el.scrollTop/(el.scrollHeight-el.clientHeight||1))*100);
+    setProgress(clamp(pct,0,100));
+    fetch(`${SERVER}/api/resume`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({filePath:file.fullPath,data:{scrollY:el.scrollTop,scrollPct:pct}})}).catch(()=>{});
+  }
+
+  function addBM(){
+    const el=scrollRef.current;
+    const pct=Math.round((el.scrollTop/(el.scrollHeight-el.clientHeight||1))*100);
+    const updated=addBookmark(file.fullPath,{scrollY:el.scrollTop,scrollPct:pct,label:`${pct}% through`});
+    setBookmarks(updated);
+  }
+
+  const pinchRef=usePinch({onPinch:d=>setFontSize(s=>clamp(Math.round(s*d),9,28))});
+  function setDocRefs(el){scrollRef.current=el;pinchRef.current=el;}
+
+  // find in document — highlight matches
+  const highlightedHtml=useMemo(()=>{
+    if(!findQ||findQ.length<2)return html;
+    try{
+      const escaped=findQ.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+      const re=new RegExp(`(${escaped})`,"gi");
+      let count=0;
+      const h=html.replace(re,m=>{count++;return`<mark style="background:#ff9f0a55;color:inherit;border-radius:2px">${m}</mark>`;});
+      setFindCount(count);
+      return h;
+    }catch{return html;}
+  },[html,findQ]);
+
+  useEffect(()=>{
+    if(!findQ||findQ.length<2)setFindCount(0);
+  },[findQ]);
+
+  const wordCount=useMemo(()=>{
+    if(!rawText)return 0;
+    return rawText.trim().split(/\s+/).filter(Boolean).length;
+  },[rawText]);
+
+  const charCount=useMemo(()=>rawText.replace(/\s/g,"").length,[rawText]);
+
+  function toggleDock(){
+    clearTimeout(dockTimer.current);
+    setShowDock(s=>{
+      if(!s) dockTimer.current=setTimeout(()=>setShowDock(false),5000);
+      return!s;
+    });
+  }
+
+  // inject page-break visual separators between mammoth sections
+  function injectPageBreaks(h){
+    // mammoth outputs <p> blocks; insert a visual page break after every ~3000 chars of content
+    // We do this by splitting on existing page-break markers mammoth may include
+    return h.replace(/<hr\s*\/?>/gi,
+      `<div style="display:flex;align-items:center;gap:10px;margin:28px 0;opacity:.4">
+        <div style="flex:1;height:1px;background:currentColor"></div>
+        <span style="fontSize:10px;letterSpacing:1px;textTransform:uppercase;fontWeight:500">Page Break</span>
+        <div style="flex:1;height:1px;background:currentColor"></div>
+      </div>`);
+  }
+
+  const docBg=nightDoc?(dark?"#0d0d0f":"#1a1a1c"):(dark?"#1c1c1e":"#ffffff");
+  const docText=nightDoc?"#c8c8ca":(dark?"#e8e8ea":"#1c1c1e");
+
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
+
+      {/* Find bar */}
+      {showFind&&(
+        <div className="fade-up" style={{padding:"8px 14px",borderBottom:"1px solid var(--border)",
+          background:"var(--surface)",display:"flex",alignItems:"center",gap:8,flexShrink:0,zIndex:10}}>
+          <span style={{display:"flex",color:"var(--sub)",flexShrink:0}}><I.search/></span>
+          <input ref={findRef} value={findQ} onChange={e=>setFindQ(e.target.value)}
+            placeholder="Find in document…" autoFocus
+            style={{flex:1,fontSize:14,background:"none",color:"var(--text)",border:"none"}}/>
+          {findQ.length>=2&&(
+            <span style={{fontSize:11,color:"var(--sub)",flexShrink:0,fontWeight:500}}>
+              {findCount} match{findCount!==1?"es":""}
+            </span>
+          )}
+          <button onClick={()=>{setShowFind(false);setFindQ("");}}
+            style={{fontSize:12,color:"var(--sub)",padding:"2px 8px",borderRadius:6,
+              background:"rgba(128,128,128,.12)"}}>Done</button>
+        </div>
+      )}
+
+      {/* Progress */}
+      <ProgressBar pct={progress}/>
+
+      {/* Bookmark panel */}
+      {showBM&&(
+        <BookmarkPanel dark={dark} bookmarks={bookmarks}
+          onClose={()=>setShowBM(false)}
+          onJump={b=>{if(scrollRef.current)scrollRef.current.scrollTop=b.scrollY||0;setShowBM(false);}}
+          onRemove={id=>{setBookmarks(removeBookmark(file.fullPath,id));}}/>
+      )}
+
+      {/* Scrollable page area */}
+      <div ref={setDocRefs} onScroll={onScroll} onClick={toggleDock}
+        style={{flex:1,overflowY:"auto",
+          background:nightDoc?(dark?"#111":"#1a1a1c"):(dark?"#1a1a1c":"#e8e8ea"),
+          padding:"12px 0 140px"}}>
+
+        {busy&&<div style={{display:"flex",justifyContent:"center",padding:60}}><span className="spin" style={{color:"var(--sub)"}}><I.loader/></span></div>}
+        {err&&<div style={{margin:14,padding:14,background:"rgba(255,69,58,.1)",borderRadius:10,color:"#ff453a",fontSize:13}}>{err}</div>}
+
+        {!busy&&!err&&(
+          <div style={{maxWidth:480,margin:"0 auto",background:docBg,
+            padding:"32px 24px 48px",
+            boxShadow:"0 0 0 1px rgba(0,0,0,.06),0 8px 32px rgba(0,0,0,.18)",minHeight:"60vh"}}>
+
+            {/* Doc stats bar */}
+            <div style={{display:"flex",gap:12,marginBottom:20,paddingBottom:12,
+              borderBottom:`1px solid ${dark?"rgba(255,255,255,.06)":"rgba(0,0,0,.06)"}`}}>
+              <span style={{fontSize:11,color:"var(--sub)"}}>{wordCount.toLocaleString()} words</span>
+              <span style={{fontSize:11,color:"var(--muted)"}}>·</span>
+              <span style={{fontSize:11,color:"var(--sub)"}}>{charCount.toLocaleString()} chars</span>
+              <span style={{fontSize:11,color:"var(--muted)"}}>·</span>
+              <span style={{fontSize:11,color:"var(--sub)"}}>{file.name}</span>
+            </div>
+
+            <div ref={contentRef} className={`dp ${(dark||nightDoc)?"dp-dark":""}`}
+              style={{fontSize:fontSize,lineHeight:lineHeight,color:docText,wordBreak:"break-word",
+                transition:"font-size .15s,line-height .15s"}}
+              dangerouslySetInnerHTML={{__html:injectPageBreaks(highlightedHtml)}}/>
+          </div>
+        )}
+      </div>
+
+      {/* ── DOCX floating dock ── */}
+      <div className={`dock ${dark?"":"light-dock"} ${showDock?"":"hidden"}`}>
+        <div style={{display:"flex",alignItems:"center",padding:"6px 8px",gap:0}}>
+
+          {/* Font size */}
+          <Tb icon={<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><text x="2" y="17" fontSize="14" fontWeight="700" stroke="none" fill="currentColor">A</text><text x="12" y="17" fontSize="9" stroke="none" fill="currentColor">A</text></svg>}
+            label="Smaller" color="var(--sub)" title="Decrease font size"
+            onClick={()=>setFontSize(s=>Math.max(11,s-1))}/>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1,padding:"4px 6px",minWidth:36}}>
+            <span style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{fontSize}</span>
+            <span style={{fontSize:9,color:"var(--muted)",letterSpacing:.4}}>SIZE</span>
+          </div>
+          <Tb icon={<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><text x="2" y="17" fontSize="9" stroke="none" fill="currentColor">A</text><text x="10" y="17" fontSize="14" fontWeight="700" stroke="none" fill="currentColor">A</text></svg>}
+            label="Bigger" color="var(--sub)" title="Increase font size"
+            onClick={()=>setFontSize(s=>Math.min(24,s+1))}/>
+
+          <DockDiv/>
+
+          {/* Line spacing */}
+          {[1.4,1.75,2.1].map(lh=>(
+            <Tb key={lh}
+              icon={<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>}
+              label={lh===1.4?"Tight":lh===1.75?"Normal":"Wide"}
+              active={lineHeight===lh}
+              color={lineHeight===lh?"var(--accent)":"var(--sub)"}
+              title={`Line spacing ${lh}`}
+              onClick={()=>setLineHeight(lh)}/>
+          ))}
+
+          <DockDiv/>
+
+          {/* Find */}
+          <Tb icon={<I.search/>} label="Find" active={showFind}
+            color={showFind?"var(--accent)":"var(--sub)"}
+            title="Find text in document"
+            onClick={()=>{setShowFind(s=>!s);if(!showFind)setTimeout(()=>findRef.current?.focus(),100);}}/>
+
+          <DockDiv/>
+
+          {/* Bookmark */}
+          <Tb
+            icon={<svg width="19" height="19" viewBox="0 0 24 24" fill={bookmarks.length?"#ff9f0a":"none"} stroke={bookmarks.length?"#ff9f0a":"currentColor"} strokeWidth="2" strokeLinecap="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>}
+            label="+ Mark" color="#ff9f0a" title="Bookmark current position"
+            onClick={addBM}/>
+          <Tb
+            icon={<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/><path d="M12 8v4M12 16h.01"/></svg>}
+            label={`${bookmarks.length}`} color={bookmarks.length?"#ff9f0a":"var(--sub)"}
+            title="View bookmarks" active={showBM}
+            onClick={()=>setShowBM(s=>!s)}/>
+
+          <DockDiv/>
+
+          {/* Night */}
+          <Tb icon={<I.night/>} label="Night" active={nightDoc}
+            color={nightDoc?"#bf5af2":"var(--sub)"}
+            title="Night mode — darkens the page background for comfortable reading"
+            onClick={()=>setNightDoc(n=>!n)}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Image Viewer — pinch zoom + double-tap to fit ── */
+function ImageViewer({dark,file}){
+  const[zoom,setZoom]=useState(1);
+  const[loaded,setLoaded]=useState(false);
+  const wrapRef=useRef(null);
+  const url=`${SERVER}/api/file?path=${encodeURIComponent(file.fullPath)}`;
+
+  const pinchRef=usePinch({
+    onPinch:d=>setZoom(z=>clamp(z*d,.2,8)),
+    onDoubleTap:()=>setZoom(1),
+  });
+
+  function setRefs(el){wrapRef.current=el;pinchRef.current=el;}
+
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      {/* zoom presets strip */}
+      <div style={{height:40,display:"flex",alignItems:"center",justifyContent:"center",gap:5,
+        borderBottom:"1px solid var(--border)",background:"var(--surface)",flexShrink:0,padding:"0 10px"}}>
+        {[.25,.5,1,1.5,2,3].map(z=>(
+          <button key={z} onClick={()=>setZoom(z)}
+            style={{padding:"3px 9px",borderRadius:7,fontSize:11,fontWeight:500,
+              background:Math.abs(zoom-z)<.05?"rgba(10,132,255,.15)":"none",
+              color:Math.abs(zoom-z)<.05?"var(--accent)":"var(--sub)",
+              border:`1px solid ${Math.abs(zoom-z)<.05?"rgba(10,132,255,.4)":"transparent"}`}}>
+            {Math.round(z*100)}%
+          </button>
+        ))}
+        <span style={{fontSize:10,color:"var(--muted)",marginLeft:4}}>pinch · double-tap to fit</span>
+      </div>
+      <div ref={setRefs}
+        style={{flex:1,overflow:"auto",display:"flex",justifyContent:"center",
+          alignItems:"flex-start",padding:16,background:dark?"#111":"#e2e2e4",
+          touchAction:"pan-x pan-y"}}>
+        <img src={url} onLoad={()=>setLoaded(true)} alt={file.name}
+          style={{width:`${zoom*100}%`,maxWidth:zoom<=1?"100%":undefined,height:"auto",
+            borderRadius:6,boxShadow:"0 4px 24px rgba(0,0,0,.25)",
+            opacity:loaded?1:0,transition:"opacity .3s",userSelect:"none",pointerEvents:"none"}}/>
+      </div>
+    </div>
+  );
+}
+
+/* ── Text/Markdown Viewer — pinch font size, bookmarks, progress ── */
+function TextViewer({dark,file}){
+  const[content,setContent]=useState("");
+  const[busy,setBusy]=useState(true);
+  const[fontSize,setFontSize]=useState(14);
+  const[showBM,setShowBM]=useState(false);
+  const[bookmarks,setBookmarks]=useState([]);
+  const[progress,setProgress]=useState(0);
+  const scrollRef=useRef(null);
+  const isMD=file.ext===".md";
+
+  useEffect(()=>{setBookmarks(getFileBookmarks(file.fullPath));},[file.fullPath]);
+
+  useEffect(()=>{
+    let cancelled=false;
+    setBusy(true);setProgress(0);
+    (async()=>{
+      try{
+        const r=await fetch(`${SERVER}/api/file?path=${encodeURIComponent(file.fullPath)}`);
+        const t=await r.text();
+        if(!cancelled){
+          setContent(t);setBusy(false);
+          const rr=await fetch(`${SERVER}/api/resume?path=${encodeURIComponent(file.fullPath)}`);
+          const rd=await rr.json();
+          if(rd?.data?.scrollY&&scrollRef.current)
+            setTimeout(()=>{scrollRef.current.scrollTop=rd.data.scrollY;},100);
+        }
+      }catch{if(!cancelled)setBusy(false);}
+    })();
+    return()=>{cancelled=true;};
+  },[file.fullPath]);
+
+  function onScroll(){
+    const el=scrollRef.current;if(!el)return;
+    const pct=Math.round((el.scrollTop/(el.scrollHeight-el.clientHeight||1))*100);
+    setProgress(clamp(pct,0,100));
+    fetch(`${SERVER}/api/resume`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({filePath:file.fullPath,data:{scrollY:el.scrollTop,scrollPct:pct}})}).catch(()=>{});
+  }
+
+  function addBM(){
+    const el=scrollRef.current;
+    const pct=Math.round((el.scrollTop/(el.scrollHeight-el.clientHeight||1))*100);
+    const updated=addBookmark(file.fullPath,{scrollY:el.scrollTop,scrollPct:pct,label:`${pct}% through`});
+    setBookmarks(updated);
+  }
+
+  const pinchRef=usePinch({
+    onPinch:d=>setFontSize(s=>clamp(Math.round(s*d),9,28)),
+  });
+
+  function setRefs(el){scrollRef.current=el;pinchRef.current=el;}
+
+  function md2html(t){
+    return t
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h2>$1</h2>").replace(/^# (.+)$/gm,"<h1>$1</h1>")
+      .replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/\*(.+?)\*/g,"<em>$1</em>")
+      .replace(/`(.+?)`/g,`<code style="background:rgba(128,128,128,.15);padding:1px 5px;border-radius:4px;font-size:.88em">$1</code>`)
+      .replace(/^- (.+)$/gm,"<li>$1</li>")
+      .replace(/\n\n/g,"</p><p>")
+      .split("\n").map(l=>l.match(/^<[hli]/)?l:`<p>${l}</p>`).join("\n");
+  }
+
+  return(
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
+      <ProgressBar pct={progress}/>
+
+      {showBM&&(
+        <BookmarkPanel dark={dark} bookmarks={bookmarks}
+          onClose={()=>setShowBM(false)}
+          onJump={b=>{if(scrollRef.current)scrollRef.current.scrollTop=b.scrollY||0;setShowBM(false);}}
+          onRemove={id=>{setBookmarks(removeBookmark(file.fullPath,id));}}/>
+      )}
+
+      {/* toolbar */}
+      <div style={{height:40,display:"flex",alignItems:"center",gap:6,padding:"0 12px",
+        borderBottom:"1px solid var(--border)",background:"var(--surface)",flexShrink:0}}>
+        <span style={{fontSize:11,color:"var(--sub)"}}>Aa</span>
+        <button onClick={()=>setFontSize(s=>Math.max(9,s-1))}
+          style={{fontSize:16,color:"var(--sub)",padding:"0 6px",borderRadius:6,background:"rgba(128,128,128,.1)"}}>−</button>
+        <span style={{fontSize:12,fontWeight:600,color:"var(--text)",minWidth:20,textAlign:"center"}}>{fontSize}</span>
+        <button onClick={()=>setFontSize(s=>Math.min(28,s+1))}
+          style={{fontSize:16,color:"var(--sub)",padding:"0 6px",borderRadius:6,background:"rgba(128,128,128,.1)"}}>+</button>
+        <span style={{fontSize:10,color:"var(--muted)",marginLeft:2}}>pinch to resize</span>
+        <div style={{flex:1}}/>
+        <button onClick={addBM}
+          style={{fontSize:11,color:"#ff9f0a",padding:"3px 9px",borderRadius:7,
+            background:"rgba(255,159,10,.12)",border:"1px solid rgba(255,159,10,.25)",fontWeight:500}}>
+          + Bookmark
+        </button>
+        {bookmarks.length>0&&(
+          <button onClick={()=>setShowBM(s=>!s)}
+            style={{fontSize:11,color:"var(--sub)",padding:"3px 9px",borderRadius:7,
+              background:"rgba(128,128,128,.1)",fontWeight:500}}>
+            {bookmarks.length} saved
+          </button>
+        )}
+      </div>
+
+      <div ref={setRefs} onScroll={onScroll}
+        style={{flex:1,overflowY:"auto",padding:"20px 16px",background:dark?"#09090b":"#f2f2f7"}}>
+        <div style={{maxWidth:680,margin:"0 auto"}}>
+          {busy&&<Loader/>}
+          {!busy&&(isMD
+            ?<div style={{fontSize:fontSize,lineHeight:1.8,color:dark?"#e8e8ea":"#1c1c1e",
+                transition:"font-size .1s"}} dangerouslySetInnerHTML={{__html:md2html(content)}}/>
+            :<pre style={{fontFamily:"'SF Mono',monospace",fontSize:fontSize,lineHeight:1.7,
+                color:dark?"#a1a1aa":"#52525b",whiteSpace:"pre-wrap",wordBreak:"break-word",
+                transition:"font-size .1s"}}>{content}</pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
