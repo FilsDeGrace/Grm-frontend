@@ -35,16 +35,37 @@ const RVL_UUID_KEY     = "rvl_user_uuid";
 
 // Generate or retrieve a stable device UUID
 function getOrCreateUUID() {
+  // E1-FIX: never return "anon" (4 chars) — server rejects userId.length < 6 with 400,
+  // silently breaking the entire Rollover feature in private mode / Safari ITP.
+  // Strategy: try localStorage first, then sessionStorage (survives the tab, not the session),
+  // then generate an in-memory ID. The generated fallback won't persist across refreshes
+  // in private mode, but it will at least work for the current session without server errors.
+  const SESSION_KEY = RVL_UUID_KEY + "_session";
+  const makeId = () =>
+    typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID()
+      : "u-" + Math.random().toString(36).slice(2,10) + Math.random().toString(36).slice(2,10);
+
+  // 1. Try localStorage (normal mode)
   try {
     let id = localStorage.getItem(RVL_UUID_KEY);
-    if (!id || id.length < 10) {
-      id = typeof crypto?.randomUUID === "function"
-        ? crypto.randomUUID()
-        : "u-" + Math.random().toString(36).slice(2,10) + Math.random().toString(36).slice(2,10);
-      localStorage.setItem(RVL_UUID_KEY, id);
-    }
+    if (id && id.length >= 10 && id !== "anon") return id;
+    id = makeId();
+    localStorage.setItem(RVL_UUID_KEY, id);
     return id;
-  } catch { return "anon"; }
+  } catch { /* localStorage blocked */ }
+
+  // 2. Try sessionStorage (private mode — survives tab, not restart)
+  try {
+    let id = sessionStorage.getItem(SESSION_KEY);
+    if (id && id.length >= 10) return id;
+    id = makeId();
+    sessionStorage.setItem(SESSION_KEY, id);
+    return id;
+  } catch { /* sessionStorage also blocked */ }
+
+  // 3. In-memory last resort — won't persist but won't break the server
+  return makeId();
 }
 
 const GATE_TABLE = [
@@ -1942,6 +1963,11 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
   const [offline,    setOffline]    = useState(false);
   const [pick,       setPick]       = useState(null);
   const [showWelcome, setShowWelcome] = useState(false);
+  // E6-FIX: surface engine pick registration failures instead of swallowing them silently.
+  // If the second fetch (/api/rollover/engine/pick) fails, autoScoreRolloverPick may never
+  // fire and the chain step never advances. We surface a non-blocking warning so the user
+  // knows the parley is locked but engine sync failed — and retry on next load.
+  const [engineSyncError, setEngineSyncError] = useState(false);
   const pendingOnboardRef = useRef(false); // blocks auto chain-init during onboarding
   const lockedDateRef = useRef(null);
 
@@ -2108,7 +2134,22 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
             body: JSON.stringify({ date, legs:p.legs, odds:p.totalOdds }),
           });
         })
-        .catch(() => {});
+        // E6-FIX: engine/pick registration was silently swallowed with .catch(() => {}).
+        // If this fails, autoScoreRolloverPick never fires and the chain step never advances.
+        // We surface a non-blocking warning and retry automatically on the next load cycle.
+        .catch(err => {
+          console.warn("[Rollover] Engine pick registration failed:", err?.message || err);
+          setEngineSyncError(true);
+          // Retry once after 8s — covers transient network blips without hammering the server
+          setTimeout(() => {
+            fetch(`${SERVER}/api/rollover/engine/pick`, {
+              method:"POST", headers:{"Content-Type":"application/json", "X-User-ID": userId},
+              body: JSON.stringify({ date, legs:pick?.legs || p.legs, odds:pick?.totalOdds || p.totalOdds }),
+            })
+            .then(r => { if (r.ok) setEngineSyncError(false); })
+            .catch(() => { /* retry also failed — user will see the warning, manual reload will re-trigger */ });
+          }, 8000);
+        });
       })
       .catch(() => {
         // Server unreachable — build locally, don't lock
@@ -2221,6 +2262,28 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
       )}
 
       <div style={{ paddingTop:14 }}>
+        {/* E6-FIX: non-blocking engine sync warning — parley is locked but engine
+            registration failed. Auto-retry fires in background; this banner persists
+            until retry succeeds or user reloads. Does not block any functionality. */}
+        {engineSyncError && page === "dashboard" && (
+          <div style={{ marginBottom:10, padding:"8px 12px", borderRadius:8,
+                        background:`${C.amber}12`, border:`1px solid ${C.amber}30`,
+                        display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+            <div style={{ fontSize:10, color:C.amber, lineHeight:1.4 }}>
+              ⚠ Parley locked — engine sync pending. Will retry automatically.
+            </div>
+            <button onClick={() => {
+              fetch(`${SERVER}/api/rollover/engine/pick`, {
+                method:"POST", headers:{"Content-Type":"application/json", "X-User-ID": userId},
+                body: JSON.stringify({ date, legs:pick?.legs || [], odds:pick?.totalOdds || 0 }),
+              }).then(r => { if (r.ok) setEngineSyncError(false); }).catch(() => {});
+            }} style={{ flexShrink:0, fontSize:9, fontWeight:700, color:C.amber,
+                        background:"transparent", border:`1px solid ${C.amber}50`,
+                        borderRadius:6, padding:"3px 10px", cursor:"pointer", fontFamily:C.font }}>
+              Retry
+            </button>
+          </div>
+        )}
         {page === "dashboard" && (
           <DashboardPage
             chain={chain} pick={pick} date={date} C={C} SERVER={SERVER}

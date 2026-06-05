@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, useEffect, useRef } from "react"
 import ReactDOM from "react-dom";
 import RolloverSystem from "./Rollover";
 import CodeAnalyzer from "./CodeAnalyzer";
+import ChatLayout from "./ChatLayout";
 import { SERVER, LEAGUE_RANK, POOL_MIN_EMPIRICAL_RATE, POOL_SCORE_P_EXP } from "./config";
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 
@@ -47,6 +48,47 @@ function oddsOrImplied(realOdds, prob) {
   // Floor at 1.02 — very high-confidence picks (95%+) still deserve a slot in the parlay.
   // Without floor, implied=1.01 fails the >1.0 check in generateTickets and pick is dropped.
   return implied || 1.02;
+}
+
+// ── N1-FIX: copyToClipboard — safe clipboard write with execCommand fallback.
+// navigator.clipboard.writeText() triggers an unexpected permission dialog on
+// some Android versions. The Async Clipboard API requires a secure context AND
+// an active user-gesture focus — conditions that aren't always met inside nested
+// event handlers. execCommand('copy') is synchronous, requires no permission
+// prompt, and works in all Android WebViews.
+// Usage: copyToClipboard(text, onSuccess?, onError?)
+function copyToClipboard(text, onSuccess, onError) {
+  // Async Clipboard API path (modern browsers, secure context)
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => onSuccess?.(),
+      () => {
+        // API present but failed (e.g. focus lost) — fall through to execCommand
+        _execCommandCopy(text, onSuccess, onError);
+      }
+    );
+    return;
+  }
+  // execCommand fallback (Android WebView, older browsers, non-secure contexts)
+  _execCommandCopy(text, onSuccess, onError);
+}
+
+function _execCommandCopy(text, onSuccess, onError) {
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    // Off-screen but within viewport so iOS doesn't scroll
+    el.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    if (ok) onSuccess?.();
+    else onError?.();
+  } catch {
+    onError?.();
+  }
 }
 
 // Infer market string from free-text pick label (used by TicketBookNowButton / buildLegs)
@@ -341,7 +383,34 @@ const STRATEGIES_UI = [
 ];
 
 // ── TICKET HELPERS ────────────────────────────────────────────────────────
-function loadSavedTickets() { try { return JSON.parse(localStorage.getItem(SAVED_TICKETS_KEY)||"[]"); } catch { return []; } }
+// C6-FIX: migrate tickets from any prior version key so saves don't silently vanish
+// after an app version bump. Try current key first; if empty, scan for the most
+// recent prior-version data and migrate it forward under the new key.
+const SAVED_TICKETS_LEGACY_KEYS = [
+  "grm_saved_tickets_v14",
+  "grm_saved_tickets_v13",
+  "grm_saved_tickets_v12",
+  "grm_saved_tickets",
+];
+function loadSavedTickets() {
+  try {
+    const current = JSON.parse(localStorage.getItem(SAVED_TICKETS_KEY) || "[]");
+    if (Array.isArray(current) && current.length > 0) return current;
+    // Current key empty — try migrating from a legacy key
+    for (const legacyKey of SAVED_TICKETS_LEGACY_KEYS) {
+      try {
+        const legacy = JSON.parse(localStorage.getItem(legacyKey) || "[]");
+        if (Array.isArray(legacy) && legacy.length > 0) {
+          // Migrate to current key and clean up old one
+          localStorage.setItem(SAVED_TICKETS_KEY, JSON.stringify(legacy));
+          try { localStorage.removeItem(legacyKey); } catch {}
+          return legacy;
+        }
+      } catch {}
+    }
+    return [];
+  } catch { return []; }
+}
 function persistTickets(tickets) { try { localStorage.setItem(SAVED_TICKETS_KEY, JSON.stringify(tickets)); } catch {} }
 function generateTicketCode() {
   // Use 8 chars of random base-36 — virtually no collision risk
@@ -1989,62 +2058,107 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
 
 // ── ASK JARVIS (per-card) ─────────────────────────────────────────────────
 function AskJarvis({ fixture, backtestSummary, brief = null }) {
-  const [open, setOpen]         = useState(false);
+  const [open,     setOpen]     = useState(false);
   const [question, setQuestion] = useState("");
-  const [response, setResponse] = useState(null);
-  const [loading, setLoading]   = useState(false);
-  const inputRef = useRef(null);
+  const [messages, setMessages] = useState([]); // { role: "user"|"jarvis", text }
+  const [loading,  setLoading]  = useState(false);
+  const inputRef   = useRef(null);
+  const bottomRef  = useRef(null);
+
+  // Scroll to bottom whenever messages change
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
 
   const ask = async (q) => {
     const trimmed = (q || question).trim();
+    if (!trimmed) return;
+
+    // Add user bubble immediately
+    setMessages(prev => [...prev, { role: "user", text: trimmed }]);
+    setQuestion("");
     setLoading(true);
-    setResponse(null);
+
     try {
-      // Build rich context: existing brief + full markets object so Gemini references real numbers
-      const m = fixture.markets || {};
-      const hasMarkets = Object.keys(m).length > 0;
-      const marketLines = hasMarkets
+      const m  = fixture.markets || {};
+      const mLines = Object.keys(m).length
         ? Object.entries(m).map(([k, v]) =>
-            `${k}: prob=${v.prob??"-"} edge=${v.edge??"-"} odds=${v.odds??"-"} effRate=${v.effRate??v.historicalRate??"-"}`
+            `${k}: prob=${v.prob??"-"} odds=${v.odds??"-"} effRate=${v.effRate??v.historicalRate??"-"}`
           ).join("\n")
         : null;
 
-      const contextualQ = [
-        trimmed || "Give a follow-up summary of your key verdict for this fixture.",
-        brief       ? `\n\nYour earlier full analysis:\n${brief}` : "",
-        marketLines ? `\n\nModel data (markets):\n${marketLines}` : "",
+      // C4/P7-FIX: The user's question is the primary prompt. Background context
+      // is passed as a SYSTEM block so Gemini actually answers the question asked —
+      // not re-runs the Jarvis analysis. Previously contextualQ appended a hardcoded
+      // 4-section instruction after the question, which caused Gemini to ignore the
+      // question and reproduce the full analysis every time.
+      const systemContext = [
+        `You are Jarvis, an AI sports analyst embedded in a football prediction app.`,
+        `You have already produced a full match analysis for this fixture.`,
+        `The user is now asking a follow-up question. Answer ONLY that question.`,
+        `Be concise — 2-4 sentences max. Plain English. No section headers. No emoji. No "as an AI".`,
+        brief       ? `\nYour earlier analysis:\n${brief}` : "",
+        mLines      ? `\nModel data:\n${mLines}` : "",
         fixture.form?.home?.length ? `\nHome form: ${fixture.form.home.join("")}` : "",
         fixture.form?.away?.length ? `Away form: ${fixture.form.away.join("")}` : "",
-        `\n\nRespond in exactly these 4 sections, each 2–3 sentences. Use these headers verbatim:\n**Context** — match importance, form, momentum\n**Squad News** — injuries, suspensions, lineup concerns\n**Model Check** — reference specific numbers (xG, probs, edge) from the model data above\n**Verdict** — clearest pick and one risk factor\nPlain English only. No emoji. No "as an AI".`,
-      ].filter(Boolean).join("");
+      ].filter(Boolean).join("\n");
 
-      const res = await fetch(`${SERVER}/api/jarvis-match`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ fixture, question: contextualQ, backtestSummary }),
+      const res  = await fetch(`${SERVER}/api/jarvis-match`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fixture,
+          question:       trimmed,
+          systemOverride: systemContext,
+          backtestSummary,
+        }),
       });
       const data = await res.json();
-      setResponse(data.analysis || data.error || "No response");
-    } catch(e) {
+      const reply = (data.analysis || data.error || "No response").trim();
+      // Strip any section headers Gemini still sneaks in (bold **X** patterns)
+      const clean = reply.replace(/\*\*[^*]+\*\*[\s:—–-]*/g, "").trim();
+      setMessages(prev => [...prev, { role: "jarvis", text: clean }]);
+    } catch (e) {
       const msg = e.message || "";
-      const isGemini = msg.toLowerCase().includes("gemini") || msg.toLowerCase().includes("429") || msg.toLowerCase().includes("503") || msg.toLowerCase().includes("rate");
-      setResponse(isGemini
-        ? "Jarvis hit a rate limit — try again in a few seconds."
-        : "Error contacting Jarvis: " + msg
-      );
+      const isRate = /429|503|rate/i.test(msg);
+      setMessages(prev => [...prev, {
+        role: "jarvis",
+        text: isRate
+          ? "Hit a rate limit — wait a few seconds and try again."
+          : "Couldn't reach Jarvis. Check connection and retry.",
+        isError: true,
+      }]);
     } finally {
       setLoading(false);
     }
   };
 
-  const anchor = fixture.theRead?.anchor?.pick || "this pick";
-  const quickPrompts = [
-    `Why not Under 3.5 instead?`,
-    `Is the Draw the safer option?`,
-    `${anchor} — what could go wrong?`,
-    "Any key injuries or lineup news?",
-    "Best alternative market here?",
-  ];
+  // C4/P7-FIX: Dynamic preset chips — generated from the fixture's actual pick
+  // and market so they're always contextually relevant.
+  // Old hardcoded chips ("Why not Under 3.5?", "Is the Draw the safer option?")
+  // were nonsensical when the pick was something like "BTTS Yes" or "Away Win".
+  const anchor     = fixture.theRead?.anchor;
+  const pickLabel  = anchor?.pick || "this pick";
+  const market     = (anchor?.market || "").toLowerCase();
+  const homeTeam   = fixture.teams?.home || "Home";
+  const awayTeam   = fixture.teams?.away || "Away";
+
+  const quickPrompts = (() => {
+    const base = [
+      `${pickLabel} — what could go wrong?`,
+      "Any key injuries or lineup news?",
+      "Best alternative market here?",
+    ];
+    // Add market-specific chips only when relevant
+    if (/over|goals|btts/i.test(market) || /over|goals/i.test(pickLabel)) {
+      base.unshift(`How is ${homeTeam}'s defensive form?`);
+    } else if (/win|home|away/i.test(market) || /win/i.test(pickLabel)) {
+      base.unshift(`Is ${pickLabel} good value at these odds?`);
+    } else if (/draw/i.test(pickLabel)) {
+      base.unshift("Why is the draw backed here?");
+    }
+    return base.slice(0, 4); // cap at 4 chips
+  })();
 
   if (!open) {
     return (
@@ -2068,27 +2182,72 @@ function AskJarvis({ fixture, backtestSummary, brief = null }) {
     <div className="grm-jarvis-panel">
       <div className="grm-jarvis-header">
         <span className="grm-jarvis-title">Ask Jarvis</span>
-        <button onClick={() => { setOpen(false); setResponse(null); setQuestion(""); }}
+        <button onClick={() => { setOpen(false); setMessages([]); setQuestion(""); }}
           style={{ background:"transparent",border:"none",color:C.muted,fontSize:13,padding:0,cursor:"pointer",lineHeight:1 }}>✕</button>
       </div>
 
-      {/* Quick prompt chips */}
-      <div style={{ display:"flex",gap:4,flexWrap:"wrap",marginBottom:8 }}>
-        {quickPrompts.map((p,i) => (
-          <button key={i} onClick={() => { setQuestion(p); ask(p); }}
-            style={{ fontSize:8,padding:"3px 9px",background:"transparent",
-                     border:`1px solid ${C.edge}28`,color:C.text,borderRadius:5,
-                     cursor:"pointer",fontFamily:C.font,transition:"border-color .15s" }}>
-            {p}
-          </button>
-        ))}
-      </div>
+      {/* Quick prompt chips — dynamically generated from fixture pick/market */}
+      {messages.length === 0 && (
+        <div style={{ display:"flex",gap:4,flexWrap:"wrap",marginBottom:8 }}>
+          {quickPrompts.map((p, i) => (
+            <button key={i} onClick={() => ask(p)}
+              style={{ fontSize:8,padding:"3px 9px",background:"transparent",
+                       border:`1px solid ${C.edge}28`,color:C.text,borderRadius:5,
+                       cursor:"pointer",fontFamily:C.font }}>
+              {p}
+            </button>
+          ))}
+        </div>
+      )}
 
-      {/* Custom question */}
+      {/* Chat bubbles */}
+      {messages.length > 0 && (
+        <div style={{ display:"flex",flexDirection:"column",gap:8,marginBottom:10,
+                      maxHeight:240,overflowY:"auto",paddingRight:2 }}>
+          {messages.map((msg, i) => (
+            <div key={i} style={{
+              display:"flex",
+              justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+            }}>
+              <div style={{
+                maxWidth:"85%",
+                padding:"8px 11px",
+                borderRadius: msg.role === "user" ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
+                background: msg.role === "user"
+                  ? `${C.accent}18`
+                  : msg.isError ? `${C.amber}10` : `${C.edge}10`,
+                border: `1px solid ${msg.role === "user" ? `${C.accent}30` : msg.isError ? `${C.amber}25` : `${C.edge}20`}`,
+                fontSize: 10,
+                color: msg.isError ? C.amber : C.text,
+                lineHeight: 1.65,
+                fontFamily: C.font,
+              }}>
+                {msg.role === "jarvis" && (
+                  <div style={{ fontSize:8,fontWeight:800,color:C.edge,letterSpacing:".06em",
+                                textTransform:"uppercase",marginBottom:4 }}>Jarvis</div>
+                )}
+                {msg.text}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div style={{ display:"flex",justifyContent:"flex-start" }}>
+              <div style={{ padding:"8px 12px",borderRadius:"12px 12px 12px 2px",
+                            background:`${C.edge}10`,border:`1px solid ${C.edge}20`,
+                            fontSize:9,color:C.muted,fontStyle:"italic" }}>
+                <span className="pu">Jarvis is thinking…</span>
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+      )}
+
+      {/* Input row */}
       <div style={{ display:"flex",gap:6 }}>
         <input ref={inputRef} type="text" value={question}
           onChange={e => setQuestion(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && question.trim() && ask()}
+          onKeyDown={e => e.key === "Enter" && question.trim() && !loading && ask()}
           placeholder="Ask anything about this match…"
           className="gi" style={{ flex:1,fontSize:9 }} />
         <button onClick={() => ask()} disabled={loading || !question.trim()}
@@ -2097,56 +2256,6 @@ function AskJarvis({ fixture, backtestSummary, brief = null }) {
           {loading ? <span className="pu">…</span> : "→"}
         </button>
       </div>
-
-      {loading && (
-        <div style={{ fontSize:9,color:C.muted,fontStyle:"italic",marginTop:8 }}>
-          <span className="pu">Jarvis is thinking…</span>
-        </div>
-      )}
-      {response && !loading && (
-        <div className="grm-jarvis-response">
-          {/* Parse structured 4-section response (Context/Squad News/Model Check/Verdict) */}
-          {(() => {
-            const sectionKeys = ["Context","Squad News","Model Check","Verdict"];
-            const sectionColors = { "Context": C.text, "Squad News": C.amber, "Model Check": C.edge, "Verdict": C.green };
-            // Split on **Header** markers
-            const parts = response.split(/\*\*([^*]+)\*\*/g);
-            // parts: ["preamble", "Header", "body", "Header", "body", ...]
-            const sections = [];
-            for (let i = 1; i < parts.length - 1; i += 2) {
-              const hdr = parts[i].trim();
-              const body = (parts[i+1] || "").trim();
-              if (sectionKeys.some(k => hdr.includes(k))) sections.push({ hdr, body });
-            }
-
-            if (sections.length >= 2) {
-              // Structured render
-              return (
-                <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
-                  {sections.map(({ hdr, body }, idx) => (
-                    <div key={idx} style={{ borderLeft:`2px solid ${sectionColors[sectionKeys.find(k=>hdr.includes(k))]||C.faint}20`,
-                                            paddingLeft:8 }}>
-                      <div style={{ fontSize:8,fontWeight:800,letterSpacing:".08em",textTransform:"uppercase",
-                                    color:sectionColors[sectionKeys.find(k=>hdr.includes(k))]||C.muted,marginBottom:3 }}>
-                        {hdr.split("—")[0].trim()}
-                      </div>
-                      <div style={{ fontSize:9,color:C.text,lineHeight:1.6 }}>{body}</div>
-                    </div>
-                  ))}
-                </div>
-              );
-            }
-            // Fallback: plain text (no sections detected)
-            return <span style={{ fontSize:9,lineHeight:1.6 }}>{response}</span>;
-          })()}
-          {response.includes("rate limit") && (
-            <button onClick={() => ask(question)} className="gb-ghost"
-              style={{ marginTop:8,display:"block",padding:"4px 14px",fontSize:9 }}>
-              ↺ Retry
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -2677,7 +2786,7 @@ function BookNowButton({ fixture }) {
 
   const copyCode = () => {
     if (result?.code) {
-      navigator.clipboard.writeText(result.code).then(() => {
+      copyToClipboard(result.code, () => {
         setCopied(true); setTimeout(() => setCopied(false), 2000);
       });
     }
@@ -3170,23 +3279,24 @@ function buildMatchVoice(f) {
 // ── FullModelJarvis — Auto Jarvis tier 2 with caching ────────────────────────
 function FullModelJarvis({ f, backtestSummary }) {
   const cacheKey = `grm_fm_${f.id}_${new Date().toISOString().slice(0,10)}`;
-  const [brief, setBrief]       = useState(() => { try { return localStorage.getItem(cacheKey) || null; } catch { return null; } });
+  const cached   = (() => { try { return localStorage.getItem(cacheKey) || null; } catch { return null; } })();
+
+  const [brief, setBrief]       = useState(cached);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState(null);
   const [serverCached, setServerCached] = useState(false);
   const [cachedAgeH, setCachedAgeH]     = useState(null);
-  const timerRef   = useRef(null);
-  const calledRef  = useRef(!!brief);
+  // C3-FIX: consent gate — Jarvis must never auto-fire on mount.
+  // If analysis is already cached for today, skip the gate and show it directly
+  // (user already consented in a prior open; Gemini won't be called again).
+  // Only show the "Want Jarvis analysis?" prompt when there is no cache.
+  const [consented, setConsented] = useState(!!cached);
 
   const doFetch = async (force = false) => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    calledRef.current = true;
     setLoading(true);
     setError(null);
     if (force) { setBrief(null); setServerCached(false); setCachedAgeH(null); }
     try {
-      const m = f.markets || {};
-      // Pass a richer question with actual model numbers so Ask Jarvis has full context
       const question = [
         `Give a 4-5 sentence analyst briefing. Plain English, no emoji, no "as an AI".`,
         `Find and include any injury concerns, lineup issues, or squad news.`,
@@ -3194,7 +3304,7 @@ function FullModelJarvis({ f, backtestSummary }) {
         `Flag any red flags the model data might be missing.`,
         f.form?.home?.length ? `Home form (last 5): ${f.form.home.join("")}` : "",
         f.form?.away?.length ? `Away form (last 5): ${f.form.away.join("")}` : "",
-        force ? "refresh" : "",  // signals server cache to bypass when force-retried
+        force ? "refresh" : "",
       ].filter(Boolean).join(" ");
 
       const res = await fetch(`${SERVER}/api/jarvis-match`, {
@@ -3213,21 +3323,42 @@ function FullModelJarvis({ f, backtestSummary }) {
       } else {
         setError("Analysis unavailable — check back shortly.");
       }
-    } catch (e) {
+    } catch {
       setError("Could not reach analysis service.");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    if (calledRef.current) return;
-    timerRef.current = setTimeout(() => doFetch(false), 1500);
-    return () => clearTimeout(timerRef.current);
-  }, [f.id]);
+  // C3: No useEffect auto-fetch. Gemini only fires when user taps [Yes].
 
-  if (!loading && !brief && !error) return null;
+  // ── Consent gate — shown when there is no cached analysis yet ──
+  if (!consented) {
+    return (
+      <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.border}` }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div style={{ fontSize:9, fontWeight:800, color:C.edge, letterSpacing:".1em", textTransform:"uppercase" }}>
+            Jarvis Analysis
+          </div>
+        </div>
+        <div style={{ marginTop:10, display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ fontSize:11, color:C.muted, lineHeight:1.5, flex:1 }}>
+            Want Jarvis analysis?
+          </div>
+          <button
+            onClick={() => { setConsented(true); doFetch(false); }}
+            style={{ flexShrink:0, padding:"6px 16px", fontSize:10, fontWeight:700,
+                     background:C.accentDim, color:C.accent,
+                     border:`1px solid ${C.accentBorder}`, borderRadius:8,
+                     cursor:"pointer", fontFamily:C.font, letterSpacing:".04em" }}>
+            Yes
+          </button>
+        </div>
+      </div>
+    );
+  }
 
+  // ── Analysis view (loading / error / result) ──
   return (
     <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.border}` }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
@@ -3235,7 +3366,6 @@ function FullModelJarvis({ f, backtestSummary }) {
           <div style={{ fontSize:9, fontWeight:800, color:C.edge, letterSpacing:".1em", textTransform:"uppercase" }}>
             Jarvis Analysis
           </div>
-          {/* Cached indicator — shows when server returned a cached result */}
           {serverCached && cachedAgeH != null && (
             <span style={{ fontSize:7, color:C.muted, background:C.surface,
                            border:`1px solid ${C.faint}`, borderRadius:4, padding:"1px 6px" }}>
@@ -3243,7 +3373,6 @@ function FullModelJarvis({ f, backtestSummary }) {
             </span>
           )}
         </div>
-        {/* Retry button — always available when not loading */}
         {!loading && (
           <button onClick={() => doFetch(true)}
             style={{ fontSize:8, color:C.muted, background:"transparent",
@@ -3266,8 +3395,6 @@ function FullModelJarvis({ f, backtestSummary }) {
         <div style={{ fontSize:10, color:C.amber, lineHeight:1.5 }}>{error}</div>
       )}
       {brief && !loading && (() => {
-        // Parse structured Jarvis response: **HEADING** sections + body text
-        // Handles both the new structured format and the old paragraph format gracefully.
         const sectionColors = {
           "CONTEXT":     C.muted,
           "SQUAD NEWS":  C.amber,
@@ -3275,12 +3402,10 @@ function FullModelJarvis({ f, backtestSummary }) {
           "VERDICT":     C.green,
         };
 
-        // Split on **HEADING** markers
         const raw = brief.trim();
         const hasStructure = /\*\*[A-Z ]+\*\*/.test(raw);
 
         if (hasStructure) {
-          // New structured format
           const parts = raw.split(/(\*\*[A-Z][A-Z ]*\*\*)/).filter(Boolean);
           const sections = [];
           for (let i = 0; i < parts.length; i++) {
@@ -3291,7 +3416,6 @@ function FullModelJarvis({ f, backtestSummary }) {
               sections.push({ label, body, color: sectionColors[label] || C.text });
               i++;
             } else if (parts[i].trim()) {
-              // Orphan text before first heading — treat as context
               sections.push({ label: null, body: parts[i].trim(), color: C.text });
             }
           }
@@ -3319,7 +3443,7 @@ function FullModelJarvis({ f, backtestSummary }) {
           );
         }
 
-        // Old paragraph format — keep existing rendering as fallback
+        // Old paragraph format — keep as fallback
         const conflictPhrases = /injur|ruled out|doubt|absent|missing|suspend|without|unavailab|concern|caution|contradict|against|red flag|volatile|thin data|limited data|flag|warning|however|despite|but\b|worr/i;
         const supportPhrases  = /back the model|support|confirms|align|strong case|confident|clear pick|solid|endorse|in agreement|on balance|verdict.*back|back.*pick/i;
         const paragraphs = raw.split(/\n{2,}/).filter(Boolean);
@@ -4469,14 +4593,31 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       {/* Column headers */}
       {!isMobile && (
         <div style={{ display:"grid",gridTemplateColumns:hasResults?"24px 50px 1fr 140px 60px 60px 72px":"24px 50px 1fr 140px 60px 60px",gap:8,padding:"6px 14px",borderBottom:`1px solid ${C.border}`,fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
-          <span>{selectedIds.size > 0 ? <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button> : "☐"}</span>
+          {/* P10-FIX: header checkbox now wires to Select All / Clear All */}
+          <span>
+            {selectedIds.size > 0
+              ? <button onClick={clearSelection} title="Clear selection" style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button>
+              : <button onClick={() => {
+                  const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+                  setSelectedIds(new Set(eligibleIds));
+                }} title="Select all" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,padding:0,lineHeight:1 }}>☐</button>
+            }
+          </span>
           <span>Time</span><span>Match</span><span>Pick</span><span>Prob</span><span>Odds</span>
           {hasResults && <span>Score</span>}
         </div>
       )}
       {isMobile && (
         <div style={{ display:"grid",gridTemplateColumns:hasResults?"20px 1fr 44px 44px":"20px 1fr 44px",gap:6,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
-          <span>{selectedIds.size > 0 ? <button onClick={clearSelection} style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button> : "☐"}</span>
+          <span>
+            {selectedIds.size > 0
+              ? <button onClick={clearSelection} title="Clear selection" style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button>
+              : <button onClick={() => {
+                  const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+                  setSelectedIds(new Set(eligibleIds));
+                }} title="Select all" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,padding:0,lineHeight:1 }}>☐</button>
+            }
+          </span>
           <span>Match / Pick</span><span style={{ textAlign:"right" }}>%</span>
           {hasResults && <span style={{ textAlign:"right" }}>Score</span>}
         </div>
@@ -4508,11 +4649,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   <StatusBadge state={f.state} time={f.time} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
                 </div>
-                <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-                  {pick.label}
+                <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4 }}>
+                  {/* P1-FIX: in-draft dot — shows when this fixture is already in the active draft */}
+                  {draftLegs?.some(l => l.fixtureId === f.id) && (
+                    <span title="In draft" style={{ flexShrink:0,width:6,height:6,borderRadius:"50%",background:C.accent,display:"inline-block" }} />
+                  )}
+                  <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{pick.label}</span>
                   {_usedFallback && (
                     <span style={{ marginLeft:5,fontSize:7,color:C.amber,background:`${C.amber}15`,
-                                   border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px" }}>
+                                   border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
                       ↓ {_excludedMarket} excluded
                     </span>
                   )}
@@ -4549,7 +4694,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 <div style={{ fontSize:8,color:C.text,marginTop:1 }}>{f.league}{f.volatileLeague?" · volatile":""}</div>
               </div>
               <div style={{ alignSelf:"center" }}>
-                <div style={{ fontSize:10,fontWeight:700,color:pick.color||C.text,lineHeight:1.2 }}>{pick.label}</div>
+                <div style={{ fontSize:10,fontWeight:700,color:pick.color||C.text,lineHeight:1.2,display:"flex",alignItems:"center",gap:4 }}>
+                  {/* P1-FIX: in-draft dot */}
+                  {draftLegs?.some(l => l.fixtureId === f.id) && (
+                    <span title="In draft" style={{ flexShrink:0,width:6,height:6,borderRadius:"50%",background:C.accent,display:"inline-block" }} />
+                  )}
+                  {pick.label}
+                </div>
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
               <span style={{ fontSize:12,fontWeight:800,color:probColor,alignSelf:"center" }}>{Math.round(pick.prob)}%</span>
@@ -5159,23 +5310,41 @@ function TicketBookNowButton({ legs }) {
 
   const copyCode = () => {
     if (!result?.code) return;
-    navigator.clipboard.writeText(result.code)
-      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+    copyToClipboard(result.code, () => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    });
   };
 
   const shareTicket = () => {
     if (!result?.code) return;
     const bm = BOOKMAKERS.find(b => b.id === result.bookieId);
     const link = bm?.link ? bm.link(result.code) : result.code;
-    navigator.clipboard.writeText(link)
-      .then(() => { setSharedOk(true); setTimeout(() => setSharedOk(false), 2000); });
+    copyToClipboard(link, () => {
+      setSharedOk(true); setTimeout(() => setSharedOk(false), 2000);
+    });
   };
 
+  // N2-FIX: openInApp — fire the bookmaker deep-link scheme (sportybet:// / luckysledger://)
+  // ONLY when the user explicitly taps "Open in App". Previous code used bm?.link (web URL)
+  // instead of bm?.appLink — so it never opened the app AND triggered Android's chooser.
+  // We fire via a hidden <a> click rather than window.open(_blank) — the latter triggers
+  // Android's "which app?" permission prompt even for web URLs. If the app is not installed,
+  // the scheme silently fails; no broken tab, no dialog.
   const openInApp = () => {
     if (!result?.code) return;
     const bm = BOOKMAKERS.find(b => b.id === result.bookieId);
-    const link = bm?.link ? bm.link(result.code) : null;
-    if (link) window.open(link, "_blank");
+    const deepLink = bm?.appLink ? bm.appLink(result.code) : null;
+    if (!deepLink) return;
+    try {
+      const a = document.createElement("a");
+      a.href = deepLink;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {
+      // Scheme not supported — fail silently, no broken state
+    }
   };
 
   const reset = () => { setResult(null); setError(null); };
@@ -5893,13 +6062,169 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
 function CopyCodeButton({ code }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
-    navigator.clipboard.writeText(code).then(() => { setCopied(true); setTimeout(()=>setCopied(false),2000); });
+    copyToClipboard(code, () => { setCopied(true); setTimeout(()=>setCopied(false),2000); });
   };
   return (
     <button onClick={copy} className="gb"
       style={{ background:copied?`${C.green}15`:"transparent",border:`1px solid ${copied?C.green:C.radar}40`,color:copied?C.green:C.radar,padding:"2px 10px",fontSize:9,fontWeight:700 }}>
       {copied ? "✓ Copied" : `${code}`}
     </button>
+  );
+}
+
+// C6-FIX (illegal hook): TicketActions extracted from a (() => { useState })() IIFE
+// inside TicketCard's JSX. Hooks called inside IIFE callbacks in JSX throw
+// "Invalid hook call" — React rules require hooks at the top of a component.
+// Extracted as a named component so useState is legal here.
+function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remixing, accentBdr }) {
+  const [addLegsOpen, setAddLegsOpen] = useState(false);
+  const [selectedLegs, setSelectedLegs] = useState(new Set());
+
+  const toggleLegSelect = (id) => setSelectedLegs(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const confirmAddLegs = (candidates) => {
+    candidates.filter(({ f }) => selectedLegs.has(f.id))
+              .forEach(({ f, pick }) => onAddLegs.addLeg(f, pick));
+    setAddLegsOpen(false);
+    setSelectedLegs(new Set());
+  };
+
+  // Build add-legs candidates here so we only compute when panel is open
+  const candidates = addLegsOpen && onAddLegs ? (() => {
+    const ticketIds = new Set((ticket.legs||[]).map(l => l.fixtureId));
+    return (onAddLegs.fixtures || [])
+      .filter(f => {
+        if (ticketIds.has(f.id)) return false;
+        const st = (f.state||"").toLowerCase().replace(/[_\-\s]/g,"");
+        return !["finished","ft","fulltime","ended","complete","aet","postponed","ppd","cancelled","canceled"].includes(st);
+      })
+      .map(f => {
+        const anchor = f.theRead?.anchor;
+        if (!anchor || f.theRead?.isFallback) return null;
+        return { f, pick: anchor };
+      })
+      .filter(Boolean)
+      .sort((a,b) => b.pick.prob - a.pick.prob)
+      .slice(0, 20);
+  })() : [];
+
+  const noneSelected = selectedLegs.size === 0;
+
+  return (
+    <>
+      <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:addLegsOpen?8:12,paddingBottom:10,borderBottom:addLegsOpen?`1px solid ${accentBdr}`:undefined }}>
+        {onEditDraft && (
+          <button onClick={() => onEditDraft(ticket.legs||[])} className="gb-ghost"
+            style={{ padding:"5px 12px",fontSize:10,color:C.accent,borderColor:`${C.accent}40`,
+                     display:"flex",alignItems:"center",gap:5 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            Edit
+          </button>
+        )}
+        {onAddLegs && (
+          <button onClick={() => { setAddLegsOpen(v => !v); setSelectedLegs(new Set()); }} className="gb-ghost"
+            style={{ padding:"4px 10px",fontSize:9,color:addLegsOpen?C.green:C.gold,
+                     borderColor:`${addLegsOpen?C.green:C.gold}40`,
+                     display:"flex",alignItems:"center",gap:4 }}>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {addLegsOpen ? "Done" : "Add more legs"}
+          </button>
+        )}
+        {onRemix && (
+          <button onClick={remixing ? undefined : onRemix} className="gb-ghost"
+            style={{ padding:"5px 12px",fontSize:10,color:remixing?C.muted:C.radar,
+                     borderColor:`${C.radar}35`,opacity:remixing?0.6:1,
+                     cursor:remixing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5 }}>
+            {remixing
+              ? <span className="pu">Remixing…</span>
+              : <>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
+                    <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
+                  </svg>
+                  {`Remix${ticket._remixed?" ✓":""}`}
+                </>
+            }
+          </button>
+        )}
+        <div style={{ flex:1 }}/>
+        <button onClick={onRemove}
+          style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 2px",lineHeight:1 }}>✕</button>
+      </div>
+
+      {/* Add more legs — checkbox multi-select panel */}
+      {addLegsOpen && onAddLegs && (
+        <div style={{ marginBottom:12,padding:"10px 12px",background:`${C.gold}07`,
+                      border:`1px solid ${C.gold}25`,borderRadius:8 }}>
+          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
+            <div style={{ fontSize:8,fontWeight:800,color:C.gold,letterSpacing:".1em",textTransform:"uppercase" }}>
+              Select legs to add
+            </div>
+            {!noneSelected && (
+              <button onClick={() => confirmAddLegs(candidates)}
+                style={{ padding:"4px 14px",fontSize:9,fontWeight:800,background:C.gold,
+                         color:C.bg,border:"none",borderRadius:6,cursor:"pointer",fontFamily:C.font }}>
+                Add {selectedLegs.size} leg{selectedLegs.size !== 1 ? "s" : ""}
+              </button>
+            )}
+          </div>
+          {candidates.length === 0 ? (
+            <div style={{ fontSize:9,color:C.muted }}>No qualifying fixtures available to add.</div>
+          ) : (
+            <div style={{ display:"flex",flexDirection:"column",gap:4 }}>
+              {candidates.map(({ f, pick }) => {
+                const checked = selectedLegs.has(f.id);
+                return (
+                  <div key={f.id} onClick={() => toggleLegSelect(f.id)}
+                    style={{ display:"flex",alignItems:"center",gap:8,padding:"7px 10px",
+                             background: checked ? `${C.gold}12` : C.surface,
+                             border:`1px solid ${checked ? C.gold : C.border}`,
+                             borderRadius:6,cursor:"pointer",transition:"all .12s" }}>
+                    <div style={{ flexShrink:0,width:14,height:14,borderRadius:3,
+                                  border:`1.5px solid ${checked ? C.gold : C.faint}`,
+                                  background: checked ? C.gold : "transparent",
+                                  display:"flex",alignItems:"center",justifyContent:"center" }}>
+                      {checked && (
+                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={C.bg} strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      )}
+                    </div>
+                    <div style={{ flex:1,minWidth:0 }}>
+                      <div style={{ fontSize:9,fontWeight:700,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+                        {f.teams.home} vs {f.teams.away}
+                      </div>
+                      <div style={{ fontSize:8,color:pick.color||C.gold,marginTop:1 }}>
+                        {pick.pick} · {pick.odds ? `@${parseFloat(pick.odds).toFixed(2)}` : ""}
+                      </div>
+                    </div>
+                    <div style={{ fontSize:11,fontWeight:800,color:C.gold,flexShrink:0 }}>
+                      {Math.round(pick.prob)}%
+                    </div>
+                  </div>
+                );
+              })}
+              {!noneSelected && (
+                <button onClick={() => confirmAddLegs(candidates)}
+                  style={{ marginTop:4,padding:"7px",fontSize:10,fontWeight:800,background:C.gold,
+                           color:C.bg,border:"none",borderRadius:6,cursor:"pointer",fontFamily:C.font,width:"100%" }}>
+                  OK — Add {selectedLegs.size} leg{selectedLegs.size !== 1 ? "s" : ""}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -5942,11 +6267,6 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               ? <span style={{ fontSize:11,fontWeight:800,color:accentColor }}>{ticket.slotLabel}</span>
               : <span style={{ fontSize:11,fontWeight:800,color:accentColor }}>Ticket #{ticket.id}</span>;
           })()}
-          {ticket.edgeScore > 0 && (
-            <span className="grm-chip" style={{ color:C.green,borderColor:`${C.green}40`,background:C.greenDim }}>
-              EDGE {ticket.edgeScore.toFixed(1)}
-            </span>
-          )}
           {exhausted && (
             <span className="grm-chip" style={{ color:C.amber,borderColor:`${C.amber}40`,background:C.amberDim }}>
               ⚠ Exhausted
@@ -5972,121 +6292,17 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       </div>
 
       {/* ── Header row 2: actions ── */}
-      {!exhausted && (() => {
-        const [addLegsOpen, setAddLegsOpen] = React.useState(false);
-        return (
-          <>
-            <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:addLegsOpen?8:12,paddingBottom:10,borderBottom:addLegsOpen?`1px solid ${accentBdr}`:undefined }}>
-              {onEditDraft && (
-                <button onClick={() => onEditDraft(ticket.legs||[])} className="gb-ghost"
-                  style={{ padding:"5px 12px",fontSize:10,color:C.accent,borderColor:`${C.accent}40`,
-                           display:"flex",alignItems:"center",gap:5 }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                  Edit
-                </button>
-              )}
-              {onAddLegs && (
-                <button onClick={() => setAddLegsOpen(v => !v)} className="gb-ghost"
-                  style={{ padding:"5px 12px",fontSize:10,color:addLegsOpen?C.green:C.gold,
-                           borderColor:`${addLegsOpen?C.green:C.gold}40`,
-                           display:"flex",alignItems:"center",gap:5 }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  {addLegsOpen ? "Done" : "Add Legs"}
-                </button>
-              )}
-              {onRemix && (
-                <button onClick={remixing ? undefined : onRemix} className="gb-ghost"
-                  style={{ padding:"5px 12px",fontSize:10,color:remixing?C.muted:C.radar,
-                           borderColor:`${C.radar}35`,opacity:remixing?0.6:1,
-                           cursor:remixing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5 }}>
-                  {remixing
-                    ? <span className="pu">Remixing…</span>
-                    : <>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
-                          <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
-                        </svg>
-                        {`Remix${ticket._remixed?" ✓":""}`}
-                      </>
-                  }
-                </button>
-              )}
-              <div style={{ flex:1 }}/>
-              <button onClick={onRemove}
-                style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 2px",lineHeight:1 }}>✕</button>
-            </div>
-
-            {/* ── Add Legs inline picker ── */}
-            {/* Shows fixtures not already in ticket, ranked by confidence.
-                Tapping a row appends it as a new leg directly — no draft copy needed.
-                Edge cases handled: duplicate fixtures blocked, no live/FT games,
-                shows empty state if no qualifying fixtures remain. */}
-            {addLegsOpen && onAddLegs && (() => {
-              const ticketIds = new Set((ticket.legs||[]).map(l => l.fixtureId));
-              const candidates = onAddLegs.fixtures
-                .filter(f => {
-                  if (ticketIds.has(f.id)) return false; // already in ticket
-                  const st = (f.state||"").toLowerCase().replace(/[_\-\s]/g,"");
-                  if (["finished","ft","fulltime","ended","complete","aet","postponed","ppd","cancelled","canceled"].includes(st)) return false;
-                  return true;
-                })
-                .map(f => {
-                  // Use The Read anchor as the pick — highest signal
-                  const anchor = f.theRead?.anchor;
-                  if (!anchor || f.theRead?.isFallback) return null;
-                  return { f, pick: anchor };
-                })
-                .filter(Boolean)
-                .sort((a,b) => b.pick.prob - a.pick.prob)
-                .slice(0, 20);
-
-              return (
-                <div style={{ marginBottom:12, padding:"10px 12px", background:`${C.gold}07`,
-                              border:`1px solid ${C.gold}25`, borderRadius:8 }}>
-                  <div style={{ fontSize:8,fontWeight:800,color:C.gold,letterSpacing:".1em",
-                                textTransform:"uppercase",marginBottom:8 }}>
-                    Add a leg — tap to append
-                  </div>
-                  {candidates.length === 0 ? (
-                    <div style={{ fontSize:9,color:C.muted }}>No qualifying fixtures available to add.</div>
-                  ) : (
-                    <div style={{ display:"flex",flexDirection:"column",gap:5 }}>
-                      {candidates.map(({ f, pick }) => (
-                        <button key={f.id}
-                          onClick={() => { onAddLegs.addLeg(f, pick); setAddLegsOpen(false); }}
-                          style={{ display:"flex",justifyContent:"space-between",alignItems:"center",
-                                   padding:"7px 10px",background:C.surface,border:`1px solid ${C.border}`,
-                                   borderRadius:6,cursor:"pointer",fontFamily:C.font,textAlign:"left",
-                                   transition:"border-color .15s" }}
-                          onMouseEnter={e=>e.currentTarget.style.borderColor=C.gold}
-                          onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
-                          <div style={{ minWidth:0 }}>
-                            <div style={{ fontSize:9,fontWeight:700,color:C.text,overflow:"hidden",
-                                          textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-                              {f.teams.home} vs {f.teams.away}
-                            </div>
-                            <div style={{ fontSize:8,color:pick.color||C.gold,marginTop:1 }}>
-                              {pick.pick} · {pick.odds ? `@${parseFloat(pick.odds).toFixed(2)}` : ""}
-                            </div>
-                          </div>
-                          <div style={{ fontSize:11,fontWeight:800,color:C.gold,flexShrink:0,marginLeft:8 }}>
-                            {Math.round(pick.prob)}%
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-          </>
-        );
-      })()}
+      {!exhausted && (
+        <TicketActions
+          ticket={ticket}
+          onRemove={onRemove}
+          onEditDraft={onEditDraft}
+          onAddLegs={onAddLegs}
+          onRemix={onRemix}
+          remixing={remixing}
+          accentBdr={accentBdr}
+        />
+      )}
 
       {/* ── Exhausted state ── */}
       {isJarvis && exhausted && (
@@ -7078,6 +7294,39 @@ function PoolPerformanceTab({ serverUrl }) {
 }
 
 
+// C6-FIX (illegal hook): extracted from ParlayJarvisTab IIFE — hooks must live
+// at the top level of a component, not inside callbacks or IIFEs in JSX.
+function ParlayExplainer() {
+  const [open, setOpen] = useState(() => {
+    try { return !localStorage.getItem("grm_parley_explainer_v2"); } catch { return true; }
+  });
+  if (!open) return (
+    <button onClick={() => setOpen(true)} className="gb"
+      style={{ width:"100%",background:"transparent",border:`1px solid ${C.faint}`,
+               color:C.muted,padding:"5px 0",fontSize:8,marginBottom:10 }}>
+      ℹ How the Parley System works
+    </button>
+  );
+  return (
+    <div style={{ background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:10,
+                  padding:"12px 14px",marginBottom:14,fontSize:9,color:C.text,lineHeight:1.7 }}>
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
+        <span style={{ fontWeight:800,color:C.gold,fontSize:10 }}>How the Parley System works</span>
+        <button onClick={() => {
+          setOpen(false);
+          try { localStorage.setItem("grm_parley_explainer_v2","1"); } catch {}
+        }} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
+      </div>
+      <div style={{ display:"flex",flexDirection:"column",gap:7 }}>
+        <div><span style={{ color:C.gold,fontWeight:800 }}>Jarvis tab</span> — AI builds a ticket for you. Choose Safe, Value, or Longshot style. Hit Build, then <span style={{ fontWeight:700 }}>Remix ↺</span> to get a different set of picks from the same pool.</div>
+        <div><span style={{ color:C.gold,fontWeight:800 }}>Custom tab</span> — Build N non-overlapping tickets from all fixtures or the engine pool. Set your target odds and stake.</div>
+        <div><span style={{ color:C.gold,fontWeight:800 }}>Tapping a game in a built ticket</span> opens its Full Model page — this does <span style={{ fontWeight:700 }}>not</span> edit your ticket. To swap a leg, tap <span style={{ fontWeight:700 }}>↺ Swap</span> on that leg. To edit the whole ticket, tap <span style={{ fontWeight:700 }}>Edit</span> — this copies all legs to your draft for manual adjustment.</div>
+        <div><span style={{ color:C.amber,fontWeight:800 }}>⚠ Bookmaker cross-check</span> — Our booking code is automated. Always verify your selections in the bookmaker app before placing. Occasionally a game name may differ and a leg won't resolve correctly.</div>
+      </div>
+    </div>
+  );
+}
+
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "" }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
@@ -7095,7 +7344,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [savedCodes, setSavedCodes] = useState(() => {
     try { return JSON.parse(localStorage.getItem("grm_saved_codes_v15") || "{}"); } catch { return {}; }
   });
-  const [maxSameMarket, setMaxSameMarket] = useState(2);
+  const [maxSameMarket, setMaxSameMarket] = useState(null); // P8-FIX: null = no cap by default; user sets a cap if they want one
   // League filter for pool — user can scope builds to specific leagues
   // Uses the same Set-based multi-select as the Live Model league filter
   const [parlayLeagueFilter, setParlayLeagueFilter] = useState(null);
@@ -7581,36 +7830,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             <div className="gc" style={{ padding:16,marginBottom:16 }}>
 
               {/* ── Parley System explainer — shown once, dismissable ── */}
-              {(() => {
-                const [explainerOpen, setExplainerOpen] = React.useState(() => {
-                  try { return !localStorage.getItem("grm_parley_explainer_v2"); } catch { return true; }
-                });
-                if (!explainerOpen) return (
-                  <button onClick={() => setExplainerOpen(true)} className="gb"
-                    style={{ width:"100%",background:"transparent",border:`1px solid ${C.faint}`,
-                             color:C.muted,padding:"5px 0",fontSize:8,marginBottom:10 }}>
-                    ℹ How the Parley System works
-                  </button>
-                );
-                return (
-                  <div style={{ background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:10,
-                                padding:"12px 14px",marginBottom:14,fontSize:9,color:C.text,lineHeight:1.7 }}>
-                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-                      <span style={{ fontWeight:800,color:C.gold,fontSize:10 }}>How the Parley System works</span>
-                      <button onClick={() => {
-                        setExplainerOpen(false);
-                        try { localStorage.setItem("grm_parley_explainer_v2","1"); } catch {}
-                      }} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
-                    </div>
-                    <div style={{ display:"flex",flexDirection:"column",gap:7 }}>
-                      <div><span style={{ color:C.gold,fontWeight:800 }}>Jarvis tab</span> — AI builds a ticket for you. Choose Safe, Value, or Longshot style. Hit Build, then <span style={{ fontWeight:700 }}>Remix ↺</span> to get a different set of picks from the same pool.</div>
-                      <div><span style={{ color:C.gold,fontWeight:800 }}>Custom tab</span> — Build N non-overlapping tickets from all fixtures or the engine pool. Set your target odds and stake.</div>
-                      <div><span style={{ color:C.gold,fontWeight:800 }}>Tapping a game in a built ticket</span> opens its Full Model page — this does <span style={{ fontWeight:700 }}>not</span> edit your ticket. To swap a leg, tap <span style={{ fontWeight:700 }}>↺ Swap</span> on that leg. To edit the whole ticket, tap <span style={{ fontWeight:700 }}>Edit</span> — this copies all legs to your draft for manual adjustment.</div>
-                      <div><span style={{ color:C.amber,fontWeight:800 }}>⚠ Bookmaker cross-check</span> — Our booking code is automated. Always verify your selections in the bookmaker app before placing. Occasionally a game name may differ and a leg won't resolve correctly.</div>
-                    </div>
-                  </div>
-                );
-              })()}
+              <ParlayExplainer />
 
               {/* ── Tab strip: Jarvis | Custom ── */}
               <div style={{ display:"flex",marginBottom:16,background:C.bg,borderRadius:12,padding:3,border:`1px solid ${C.border}`,gap:3 }}>
@@ -8009,37 +8229,32 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             )}
             <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
               {(savedTickets||[]).map(t => (
-                <div key={t.code} style={{ background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px" }}>
-                  <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-                    <div>
+                <div key={t.code} style={{ background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 12px" }}>
+                  {/* Row 1: code + meta + ✕ */}
+                  <div style={{ display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:6 }}>
+                    <div style={{ minWidth:0 }}>
                       <span style={{ fontSize:11,fontWeight:800,color:C.radar,letterSpacing:".08em" }}>{t.code}</span>
-                      <span style={{ fontSize:8,color:C.text,marginLeft:8 }}>{t.date} · {t.legs?.length||0} legs · ×{t.totalOdds}</span>
+                      <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>{t.date} · {t.legs?.length||0} legs · ×{t.totalOdds}</div>
                     </div>
-                    <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
-                      <CopyCodeButton code={t.code} />
-                      <button onClick={() => {
-                        // Edit saved ticket as draft
-                        setDraftLegs(t.legs || []);
-                        setView("parlay");
-                      }} className="gb-ghost"
-                        style={{ padding:"3px 10px",fontSize:9,color:C.accent,borderColor:`${C.accent}40`,
-                                 display:"flex",alignItems:"center",gap:4 }}>
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                        </svg>
-                        Edit
-                      </button>
-                      <button onClick={() => {
-                        const reloaded = { ...t, id: Date.now(), source:"card_add", exhausted:false };
-                        setTickets(prev => [...prev, reloaded]);
-                        setView("parlay");
-                      }} className="gb-ghost" style={{ padding:"3px 10px",fontSize:9,color:C.gold,borderColor:`${C.gold}40` }}>
-                        Load
-                      </button>
-                      <button onClick={() => deleteSavedTicket(t.code)}
-                        style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,padding:0 }}>✕</button>
-                    </div>
+                    <button onClick={() => deleteSavedTicket(t.code)}
+                      style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,padding:"0 0 0 8px",lineHeight:1,flexShrink:0 }}>✕</button>
+                  </div>
+                  {/* Row 2: action buttons */}
+                  <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:8 }}>
+                    <CopyCodeButton code={t.code} />
+                    <button onClick={() => { setDraftLegs(t.legs||[]); setView("parlay"); }} className="gb-ghost"
+                      style={{ padding:"3px 10px",fontSize:9,color:C.accent,borderColor:`${C.accent}40`,
+                               display:"flex",alignItems:"center",gap:4 }}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                      </svg>
+                      Edit
+                    </button>
+                    <button onClick={() => { setTickets(prev => [...prev, { ...t, id:Date.now(), source:"card_add", exhausted:false }]); setView("parlay"); }}
+                      className="gb-ghost" style={{ padding:"3px 10px",fontSize:9,color:C.gold,borderColor:`${C.gold}40` }}>
+                      Load
+                    </button>
                   </div>
                   {t.stake > 0 && (
                     <div style={{ fontSize:9,color:C.text,marginBottom:6 }}>
@@ -8431,38 +8646,6 @@ function CustomTabBanner({ onDismiss }) {
 }
 
 // ── PARLAY BUTTON NUDGE ───────────────────────────────────────────────────
-// One-time tooltip above the floating Parley System button.
-// Shows after fixtures first load, auto-dismisses after 5s.
-// Flag: grm_parlay_nudge_seen
-function ParlayNudge({ onDismiss }) {
-  useEffect(() => {
-    const t = setTimeout(onDismiss, 5000);
-    return () => clearTimeout(t);
-  }, []);
-
-  return (
-    <div style={{ position:"fixed",bottom:100,right:16,zIndex:160,maxWidth:220,
-      background:C.modalBg,border:`1px solid ${C.edgeBorder}`,borderRadius:10,
-      padding:"10px 12px",boxShadow:`0 4px 20px rgba(0,0,0,0.5)`,
-      animation:"fadeUp .3s ease forwards" }}>
-      {/* Arrow pointing down to button */}
-      <div style={{ position:"absolute",bottom:-7,right:28,width:12,height:12,
-        background:C.modalBg,border:`1px solid ${C.edgeBorder}`,
-        transform:"rotate(45deg)",borderTop:"none",borderLeft:"none" }}/>
-      <div style={{ display:"flex",justifyContent:"space-between",
-        alignItems:"flex-start",gap:8,marginBottom:5 }}>
-        <span style={{ fontSize:9,fontWeight:800,color:C.edge,letterSpacing:".06em",
-          textTransform:"uppercase" }}>Parley System</span>
-        <button onClick={onDismiss} style={{ background:"none",border:"none",
-          color:C.text,cursor:"pointer",fontSize:11,padding:0,lineHeight:1,flexShrink:0 }}>✕</button>
-      </div>
-      <div style={{ fontSize:8,color:C.text,opacity:.7,lineHeight:1.55 }}>
-        Tap here for today's engine picks, ticket builder and performance history.
-      </div>
-    </div>
-  );
-}
-
 // SVG icons — inline, no dependency, consistent 18×18 @ strokeWidth 2.2
 const NAV_ICONS = {
   live: (
@@ -8632,6 +8815,150 @@ class FixtureErrorBoundary extends React.Component {
   }
 }
 
+// ── JARVIS FAB ────────────────────────────────────────────────────────────────
+// Draggable floating button. Position persisted to localStorage.
+// Touch + mouse drag with tap-vs-drag discrimination (< 6px movement = tap).
+// Snaps to nearest vertical edge on release to stay out of content's way.
+// Stays clear of bottom nav on mobile (min bottom = 76px + safe-area).
+
+const JARVIS_FAB_KEY = "grm_jarvis_fab_pos";
+
+function JarvisFAB({ C, isDesktop, onClick }) {
+  const SIZE = 52;
+  const NAV_H = 76; // bottom nav + safe area clearance
+
+  const loadPos = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(JARVIS_FAB_KEY) || "null");
+      if (saved && typeof saved.x === "number" && typeof saved.y === "number") return saved;
+    } catch {}
+    // Default: bottom-right, above nav
+    return {
+      x: window.innerWidth - SIZE - 16,
+      y: window.innerHeight - SIZE - NAV_H - 16,
+    };
+  };
+
+  const [pos, setPos]       = useState(loadPos);
+  const [dragging, setDragging] = useState(false);
+  const dragRef  = useRef(null); // { startX, startY, origX, origY, moved }
+  const btnRef   = useRef(null);
+
+  // Clamp position within viewport with margin
+  const clamp = (x, y) => {
+    const maxX = (window.innerWidth  || 375) - SIZE - 8;
+    const maxY = (window.innerHeight || 812) - SIZE - (isDesktop ? 8 : NAV_H + 8);
+    return {
+      x: Math.max(8, Math.min(x, maxX)),
+      y: Math.max(8, Math.min(y, maxY)),
+    };
+  };
+
+  const savePos = (p) => {
+    try { localStorage.setItem(JARVIS_FAB_KEY, JSON.stringify(p)); } catch {}
+  };
+
+  // Edge-snap: after drag ends, snap to left or right edge maintaining Y
+  const snapToEdge = (x, y) => {
+    const midX = (window.innerWidth || 375) / 2;
+    const snappedX = x < midX ? 16 : (window.innerWidth || 375) - SIZE - 16;
+    return { x: snappedX, y };
+  };
+
+  const onPointerDown = (e) => {
+    // Don't intercept right-click
+    if (e.button === 2) return;
+    e.preventDefault();
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origX:  pos.x,
+      origY:  pos.y,
+      moved:  false,
+    };
+    setDragging(true);
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - dragRef.current.startX;
+      const dy = ev.clientY - dragRef.current.startY;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) dragRef.current.moved = true;
+      const next = clamp(dragRef.current.origX + dx, dragRef.current.origY + dy);
+      setPos(next);
+    };
+
+    const onUp = (ev) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setDragging(false);
+      if (!dragRef.current.moved) {
+        // Pure tap — fire onClick
+        onClick?.();
+      } else {
+        // Snap to nearest edge
+        const snapped = snapToEdge(pos.x, pos.y);
+        setPos(snapped);
+        savePos(snapped);
+      }
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup",   onUp);
+  };
+
+  // Sync snap on window resize
+  useEffect(() => {
+    const onResize = () => {
+      setPos(p => {
+        const clamped = clamp(p.x, p.y);
+        const snapped = snapToEdge(clamped.x, clamped.y);
+        savePos(snapped);
+        return snapped;
+      });
+    };
+    window.addEventListener("resize", onResize, { passive: true });
+    return () => window.removeEventListener("resize", onResize);
+  }, [isDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <button
+      ref={btnRef}
+      onPointerDown={onPointerDown}
+      aria-label="Open Jarvis"
+      style={{
+        position: "fixed",
+        left: pos.x,
+        top:  pos.y,
+        zIndex: 500,
+        width: SIZE, height: SIZE,
+        borderRadius: "50%",
+        background: `${C.surface}f0`,
+        border: `1.5px solid ${C.accent}55`,
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        boxShadow: dragging
+          ? `0 0 0 6px ${C.accent}30, 0 8px 32px rgba(0,0,0,0.45)`
+          : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
+        color: C.accent,
+        cursor: dragging ? "grabbing" : "grab",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        transition: dragging ? "box-shadow .1s" : "box-shadow .2s, transform .2s",
+        transform: dragging ? "scale(1.08)" : "scale(1)",
+        WebkitTapHighlightColor: "transparent",
+        touchAction: "none", // prevents scroll hijack on touch
+        userSelect: "none",
+      }}
+    >
+      {/* Spark / AI chat icon */}
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
+        <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
+        <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
+      </svg>
+    </button>
+  );
+}
+
 export default function GRMPro() {
 
   // ── THEME ─────────────────────────────────────────────────────────────────
@@ -8676,7 +9003,7 @@ export default function GRMPro() {
 
   const [budget, setBudget]       = useState(100);
   const [budgetPct, setBudgetPct] = useState(100); // slider removed — always stake full budget
-  const [numParlays, setNumParlays] = useState(2);
+  const [numParlays, setNumParlays] = useState(1); // P9-FIX: default 1, user increments themselves
   const [targetOdds, setTargetOdds] = useState(5);
   const [marketFilter, setMarketFilter] = useState(["theRead"]);
   const toggleMarket = id => setMarketFilter(prev => prev.includes(id) ? (prev.length>1?prev.filter(x=>x!==id):prev) : [...prev, id]);
@@ -8694,6 +9021,55 @@ export default function GRMPro() {
   const lastProgressRef           = useRef({ pct: 0, ts: Date.now() }); // stuck detection
 
   const [parlayJarvisOpen, setParlayJarvisOpen] = useState(false);
+
+  // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
+  // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
+  // The bolt FAB is always visible so the user can open Jarvis from any Pro screen.
+  const [jarvisOpen, setJarvisOpen] = useState(false);
+
+  // onNavigatePro — called by ChatLayout to drive Pro's navigation from inside Jarvis.
+  // Closes the overlay only when Jarvis explicitly navigates away (e.g. Open in Live Model).
+  // Jarvis stays open for passive navigations like "Go to Rollover" so user can keep chatting.
+  const handleJarvisNavigate = useCallback((dest) => {
+    if (!dest) return;
+    const { tab: navTab, subTab, fixture, autoAnalyze, code, platform, keepOpen } = dest;
+
+    if (navTab === "rollover") {
+      setMainView("rollover");
+      setParlayJarvisOpen(false);
+      if (!keepOpen) setJarvisOpen(false);
+      return;
+    }
+    if (navTab === "live") {
+      setMainView("main");
+      setActiveTab("live");
+      if (subTab === "custom") setTab("custom");
+      else if (subTab === "engine") setTab("all");
+      setParlayJarvisOpen(false);
+      if (!keepOpen) setJarvisOpen(false);
+      return;
+    }
+    if (navTab === "code") {
+      setMainView("main");
+      setActiveTab("code");
+      setParlayJarvisOpen(false);
+      if (!keepOpen) setJarvisOpen(false);
+      return;
+    }
+    if (navTab === "parley" || dest.ticket) {
+      setParlayJarvisOpen(true);
+      if (!keepOpen) setJarvisOpen(false);
+      return;
+    }
+    if (fixture) {
+      // Open Full Model for a specific fixture — keep Jarvis open so user can keep chatting
+      try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {}
+      setFullModelReturnTab("live");
+      setMainFocusFixture(fixture);
+      setJarvisOpen(false);
+      return;
+    }
+  }, []);
 
   // Scroll-to-top FAB — appears after user scrolls past the header
   const [showScrollTop, setShowScrollTop] = useState(false);
@@ -8741,8 +9117,7 @@ export default function GRMPro() {
   const [showCustomBanner, setShowCustomBanner] = useState(() => {
     try { return !localStorage.getItem("grm_custom_onboarded_v1"); } catch { return false; }
   });
-  const [showParlayNudge, setShowParlayNudge] = useState(false);
-  const parlayNudgeShownRef = useRef(false);
+  const parlayNudgeShownRef = useRef(true); // P14: nudge removed — ref kept to avoid breaking existing trigger guards
 
   const toggleAdmin = () => {
     if (adminMode) {
@@ -8767,8 +9142,11 @@ export default function GRMPro() {
 
   // Stable callbacks for onFullModel — must be declared at hook level, never inside JSX.
   // Calling useCallback inside conditional renders violates Rules of Hooks.
-  const onFullModelFromParlay   = useCallback(f => { setFullModelReturnTab("parlay"); setMainFocusFixture(f); }, []);
-  const onFullModelFromRollover = useCallback(f => { setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
+  // C1-FIX: save scroll position before navigating to Full Model so Back returns
+  // the user to where they were. Previously only the grid/CustomListView paths
+  // saved grm_scroll — these two callbacks were missing it entirely.
+  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, []);
+  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
 
   // Add a pick from fixture card to draft legs
   const addLegToDraft = useCallback((fixture, pick) => {
@@ -8916,22 +9294,19 @@ export default function GRMPro() {
               if (!snap.ok) throw new Error(`Snapshot load failed: ${snap.status}`);
               const json = await snap.json();
               const data = Array.isArray(json.data) ? json.data : [];
+              const capturedDate = date; // hoist so startAutoRefresh and pool save share same value
               const _fd1 = applyFinishedStates(data); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
-              if (data.length && !parlayNudgeShownRef.current) {
-                try {
-                  if (!localStorage.getItem("grm_parlay_nudge_seen")) {
-                    parlayNudgeShownRef.current = true;
-                    setTimeout(() => setShowParlayNudge(true), 1200);
-                  }
-                } catch {}
-              }
+              // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
+              // existed in the sync 200 path. This caused results to never auto-inject
+              // after the first fetch (pipeline always returns 202 on a fresh date).
+              startAutoRefresh(capturedDate);
+
               if (json.legacySchema) setLegacySnapshot(true);
               setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures ready`);
               if (data.length) {
-                const capturedDate = date;
                 (async () => {
                   let rates = historicalRates;
-                  if (!rates || historicalRatesDateRef.current !== todayStr()) rates = await ensureHistoricalRates();
+                  if (!rates) rates = await ensureHistoricalRates();
                   const pool = buildUniversalPool(data, rates || {});
                   if (pool.length) savePoolToServer(pool, capturedDate);
                 })();
@@ -8959,14 +9334,7 @@ export default function GRMPro() {
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       const _fd2 = applyFinishedStates(data); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
       startAutoRefresh(date);
-      if (data.length && !parlayNudgeShownRef.current) {
-        try {
-          if (!localStorage.getItem("grm_parlay_nudge_seen")) {
-            parlayNudgeShownRef.current = true;
-            setTimeout(() => setShowParlayNudge(true), 1200);
-          }
-        } catch {}
-      }
+
       if (json.legacySchema) setLegacySnapshot(true);
       setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures ready`);
       if (data.length) {
@@ -9000,6 +9368,11 @@ export default function GRMPro() {
       startAutoRefresh(snapDate);
       if (json.legacySchema) setLegacySnapshot(true);
       setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures loaded`);
+
+      // C7-FIX: ensure historicalRates is loaded for past dates — Engine tab count
+      // was 0 on all past dates because buildUniversalPool received null rates.
+      // backtest-summary is date-agnostic so this is safe to call for any date.
+      if (!historicalRates) ensureHistoricalRates();
 
       // Auto-merge saved results for past dates — the results file already has
       // scores and outcomes from when the results loop ran that day.
@@ -9042,12 +9415,18 @@ export default function GRMPro() {
   }, []);
 
   const ensureHistoricalRates = async () => {
-    const today = todayStr();
-    if (historicalRates && historicalRatesDateRef.current === today) return historicalRates;
+    // C7-FIX: previous guard `historicalRatesDateRef.current === today` caused
+    // ensureHistoricalRates to return null for past dates — today's rates had
+    // been cached against today's date string, so any other date was a miss.
+    // backtest-summary is date-agnostic (it's the model's historical hit rates,
+    // not tied to today's fixtures), so we cache it once per session regardless
+    // of which date the user is viewing.
+    if (historicalRates) return historicalRates;
     try {
       const res = await fetch(`${SERVER}/api/backtest-summary`);
       const data = await res.json();
-      setHistoricalRates(data); historicalRatesDateRef.current = today;
+      setHistoricalRates(data);
+      historicalRatesDateRef.current = todayStr(); // mark as loaded
       return data;
     } catch { return null; }
   };
@@ -9152,27 +9531,37 @@ export default function GRMPro() {
       const data = await res.json();
 
       if (data.states?.length) {
-        // Server has live data — apply patches normally
+        // Server has live data — apply patches AND fill in time-based state for
+        // N6-FIX: fixtures not in patchMap were previously returned as-is,
+        // preserving the cached "notstarted"/"18:00" state even when the match
+        // had kicked off. Now we apply inferStateFromTime for every fixture
+        // the server didn't explicitly patch.
         const patchMap = new Map(data.states.map(s => [s.id, s]));
         setFixtures(prev => prev.map(f => {
           const p = patchMap.get(f.id);
-          if (!p) return f;
-          if (p.state === f.state && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
-          return {
-            ...f,
-            state:       p.state,
-            stateNorm:   p.stateNorm,
-            minute:      p.minute,
-            isPPD:       p.isPPD,
-            isCancelled: p.isCancelled,
-            scores: { ...(f.scores||{}), hGoals: p.hScore ?? f.scores?.hGoals, aGoals: p.aScore ?? f.scores?.aGoals },
-            hGoals: p.isDone ? (p.hScore ?? f.hGoals) : f.hGoals,
-            aGoals: p.isDone ? (p.aScore ?? f.aGoals) : f.aGoals,
-          };
+          if (p) {
+            // Server patch — trust it fully
+            if (p.state === f.state && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
+            return {
+              ...f,
+              state:       p.state,
+              stateNorm:   p.stateNorm,
+              minute:      p.minute,
+              isPPD:       p.isPPD,
+              isCancelled: p.isCancelled,
+              scores: { ...(f.scores||{}), hGoals: p.hScore ?? f.scores?.hGoals, aGoals: p.aScore ?? f.scores?.aGoals },
+              hGoals: p.isDone ? (p.hScore ?? f.hGoals) : f.hGoals,
+              aGoals: p.isDone ? (p.aScore ?? f.aGoals) : f.aGoals,
+            };
+          }
+          // Not in server's patch — apply time-based inference so kickoffs show LIVE
+          const inferred = inferStateFromTime(f);
+          if (!inferred || inferred.state === f.state) return f;
+          return { ...f, ...inferred };
         }));
         if (data.liveCount > 0) setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
       } else {
-        // Server has no data (backing off 403) — apply time-based fallback
+        // Server has no data (backing off 403) — apply time-based fallback to all
         setFixtures(prev => prev.map(f => {
           const inferred = inferStateFromTime(f);
           if (!inferred) return f;
@@ -9181,6 +9570,7 @@ export default function GRMPro() {
         }));
       }
     } catch {
+      // Network failure — still apply time-based fallback so UI stays honest
       setFixtures(prev => prev.map(f => {
         const inferred = inferStateFromTime(f);
         if (!inferred) return f;
@@ -9207,8 +9597,12 @@ export default function GRMPro() {
 
   useEffect(() => {
     if (!fixtures.length || activeTab !== "live") return;
+    // N6-FIX: fire immediately so cached fixtures get their live state updated
+    // without waiting for the first 60s tick. Previously a cached "notstarted"
+    // fixture would sit showing the kickoff time for up to 60s after mount.
     pollLiveStates(date);
-    liveTickerRef.current = setInterval(() => pollLiveStates(date), 60_000);
+    // 30s interval (was 60s) — improves responsiveness for live-match updates.
+    liveTickerRef.current = setInterval(() => pollLiveStates(date), 30_000);
     return () => { if (liveTickerRef.current) clearInterval(liveTickerRef.current); };
   }, [fixtures.length > 0, date, activeTab]);
 
@@ -9900,14 +10294,6 @@ export default function GRMPro() {
       {/* First-run onboarding overlay */}
       {showOnboarding && <FirstRunFlow onDone={() => setShowOnboarding(false)} />}
 
-      {/* Parlay button one-time nudge */}
-      {showParlayNudge && (
-        <ParlayNudge onDismiss={() => {
-          setShowParlayNudge(false);
-          try { localStorage.setItem("grm_parlay_nudge_seen","1"); } catch {}
-        }} />
-      )}
-
       {/* FullModelPage — opened from any FixtureCard "▼ Full Model" button */}
       {mainFocusFixture && (
         <FullModelPage
@@ -9993,7 +10379,7 @@ export default function GRMPro() {
       <BottomNav
         activeTab={mainView === "rollover" ? "rollover" : activeTab}
         setActiveTab={(tab) => {
-          setParlayJarvisOpen(false); // always close parley overlay on nav switch
+          setParlayJarvisOpen(false);
           if (tab === "rollover") {
             setMainView("rollover");
           } else {
@@ -10005,6 +10391,64 @@ export default function GRMPro() {
         draftCount={draftLegs.length}
         parleyOpen={parlayJarvisOpen}
       />
+
+      {/* ── JARVIS FAB — draggable, always visible on all tabs ────────────── */}
+      {/* Lives OUTSIDE the content shell so it renders on every tab.          */}
+      {/* Hidden only when Jarvis panel is open (has its own X button).        */}
+      {!jarvisOpen && <JarvisFAB C={C} isDesktop={isDesktop} onClick={() => setJarvisOpen(true)} />}
+
+      {/* ── JARVIS CHAT OVERLAY — portal to document.body ─────────────────── */}
+      {jarvisOpen && ReactDOM.createPortal(
+        <ChatLayout
+          isOpen={jarvisOpen}
+          onClose={() => setJarvisOpen(false)}
+          C={C}
+          fixtures={fixtures}
+          fixturesLoaded={fixtures.length > 0}
+          fetchingFixtures={loading}
+          onFetchFixtures={() => {
+            // Stay open — trigger fetch, gate will auto-clear when fixtures arrive
+            fetchData(false);
+          }}
+          fetchError={error}
+          savedTickets={tickets}
+          onSaveTicket={(ticket) => {
+            setTickets(prev => {
+              const exists = prev.findIndex(t => t.id === ticket.id);
+              const next = exists >= 0
+                ? prev.map((t, i) => i === exists ? ticket : t)
+                : [ticket, ...prev];
+              persistTickets(next);
+              return next;
+            });
+          }}
+          onDeleteTicket={(ticketId) => {
+            setTickets(prev => {
+              const next = prev.filter(t => t.id !== ticketId);
+              persistTickets(next);
+              return next;
+            });
+          }}
+          rolloverChain={null}
+          historicalRates={historicalRates}
+          onNavigatePro={handleJarvisNavigate}
+          onBookNow={(ticket, bookmaker) => {
+            setTickets(prev => {
+              const exists = prev.findIndex(t => t.id === ticket.id);
+              const updated = { ...ticket, bookmaker, bookedAt: Date.now() };
+              const next = exists >= 0
+                ? prev.map((t, i) => i === exists ? updated : t)
+                : [updated, ...prev];
+              persistTickets(next);
+              return next;
+            });
+          }}
+          defaultBookmaker="SB"
+        />,
+        document.body
+      )}
+
     </div>
   );
 }
+

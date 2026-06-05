@@ -482,8 +482,8 @@ export const THEME_MAP = { dark:THEME_DARK, claude:THEME_CLAUDE, nike:THEME_NIKE
 const LS_KEY = "grm_theme_v1";
 
 export function loadSavedTheme() {
-  try { return THEME_MAP[localStorage.getItem(LS_KEY)] || THEME_DARK; }
-  catch { return THEME_DARK; }
+  try { return THEME_MAP[localStorage.getItem(LS_KEY)] || THEME_GRM; }
+  catch { return THEME_GRM; }
 }
 
 export function saveTheme(id) {

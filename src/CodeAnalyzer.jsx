@@ -40,6 +40,38 @@ const BOOKIE_LINKS = {
 //  HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// N1-FIX: copyToClipboard — safe clipboard write with execCommand fallback.
+// navigator.clipboard.writeText() triggers an unexpected Android permission
+// dialog on some versions. execCommand('copy') is synchronous, needs no prompt,
+// and works reliably in all Android WebViews. Mirror of App.jsx helper.
+function copyToClipboard(text, onSuccess, onError) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => onSuccess?.(),
+      () => _execCommandCopy(text, onSuccess, onError)
+    );
+    return;
+  }
+  _execCommandCopy(text, onSuccess, onError);
+}
+
+function _execCommandCopy(text, onSuccess, onError) {
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    if (ok) onSuccess?.();
+    else onError?.();
+  } catch {
+    onError?.();
+  }
+}
+
 function impliedPct(odds) {
   const o = parseFloat(odds);
   if (!o || o <= 1) return null;
@@ -930,7 +962,7 @@ function RebuildBooking({ legs, C, SERVER, onSendToDraft }) {
 
   const copyCode = () => {
     if (result?.code) {
-      navigator.clipboard.writeText(result.code).then(() => {
+      copyToClipboard(result.code, () => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       });
@@ -940,16 +972,28 @@ function RebuildBooking({ legs, C, SERVER, onSendToDraft }) {
   const copyLink = () => {
     if (!result?.code) return;
     const link = BOOKIE_LINKS[bookmaker]?.shareLink(result.code) || result.code;
-    navigator.clipboard.writeText(link).then(() => {
+    copyToClipboard(link, () => {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     });
   };
 
+  // N2-FIX: use appLink (deep-link scheme) not shareLink (web URL).
+  // Fire via hidden <a> click — avoids Android "which app?" chooser dialog.
   const openInApp = () => {
     if (!result?.code) return;
-    const link = BOOKIE_LINKS[bookmaker]?.shareLink(result.code);
-    if (link) window.open(link, "_blank");
+    const deepLink = BOOKIE_LINKS[bookmaker]?.appLink?.(result.code);
+    if (!deepLink) return;
+    try {
+      const a = document.createElement("a");
+      a.href = deepLink;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch {
+      // Scheme not supported — fail silently
+    }
   };
 
   const cr = C.cardRadius || 16;
@@ -1609,7 +1653,7 @@ export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFu
 
   const copyJarvis = () => {
     if (!jarvis) return;
-    navigator.clipboard.writeText(jarvis).then(() => {
+    copyToClipboard(jarvis, () => {
       setJarvisCopied(true);
       setTimeout(() => setJarvisCopied(false), 1800);
     });
