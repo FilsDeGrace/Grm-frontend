@@ -1,13 +1,90 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Goal Range Model</title>
+
+    <!--
+      FIX 1 + 2: viewport meta with initial-scale and viewport-fit=cover.
+      Without this, Android Chrome renders at ~980px desktop width and scales
+      down — everything appears tiny. viewport-fit=cover prevents notch/
+      punch-hole overlap on modern phones.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
+    />
+
+    <title>GRM Pro</title>
+
+    <!--
+      FIX 7: Preconnect + font link in <head> instead of @import inside a
+      CSS-in-JS style tag. Loads the font faster on slow mobile connections
+      and is technically correct (browsers deprioritise @import inside
+      injected <style> elements).
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap"
+    />
+
+    <!--
+      FIX 6: theme-color — Chrome on Android colours the browser chrome
+      (address bar) to match your app. Falls back to a neutral dark that
+      suits all GRM themes; App.jsx can update it dynamically via
+      document.querySelector('meta[name="theme-color"]').content = newColour
+      when the user switches themes.
+    -->
+    <meta name="theme-color" content="#0d0d0d" />
+
+    <!-- PWA / home-screen meta -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="GRM Pro" />
+
+    <style>
+      /*
+        FIX 5: Dark background before React hydrates — prevents the white
+        flash while the JS bundle is parsing and the root div is empty.
+        Matches the darkest GRM theme so the flash is invisible.
+      */
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0d0d0d;
+        color: #f0f0f0;
+
+        /*
+          FIX 4: overscroll-behavior:none stops the browser pull-to-refresh
+          gesture from firing while users swipe through cards or lists.
+        */
+        overscroll-behavior: none;
+      }
+
+      /*
+        FIX 3: Disable long-press text selection on interactive elements.
+        Prevents the browser's selection magnifier from appearing when a
+        user holds a button or card — feels wrong in an app context.
+      */
+      button, a, [role="button"] {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      /* Prevent horizontal scroll bleed from any component overflow */
+      #root {
+        min-height: 100dvh;
+        overflow-x: hidden;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <script type="module" src="src/main.jsx"></script>
   </body>
 </html>
+
+
