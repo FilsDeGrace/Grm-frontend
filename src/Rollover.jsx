@@ -1955,7 +1955,7 @@ const TABS = [
 ];
 
 // ── MAIN EXPORT ───────────────────────────────────────────────────────────────
-export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, date, buildRolloverPick, buildUniversalPool, onFullModel }) {
+export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, date, buildRolloverPick, buildUniversalPool, onFullModel, onChainChange }) {
   const [page,       setPage]       = useState("dashboard");
   const [chain,      setChain]      = useState(null);
   const [history,    setHistory]    = useState([]);
@@ -1963,13 +1963,14 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
   const [offline,    setOffline]    = useState(false);
   const [pick,       setPick]       = useState(null);
   const [showWelcome, setShowWelcome] = useState(false);
-  // E6-FIX: surface engine pick registration failures instead of swallowing them silently.
-  // If the second fetch (/api/rollover/engine/pick) fails, autoScoreRolloverPick may never
-  // fire and the chain step never advances. We surface a non-blocking warning so the user
-  // knows the parley is locked but engine sync failed — and retry on next load.
   const [engineSyncError, setEngineSyncError] = useState(false);
-  const pendingOnboardRef = useRef(false); // blocks auto chain-init during onboarding
+  const pendingOnboardRef = useRef(false);
   const lockedDateRef = useRef(null);
+
+  // Notify App whenever chain changes so Jarvis always has the real chain
+  useEffect(() => {
+    onChainChange?.(chain);
+  }, [chain, onChainChange]);
 
   // Stable device UUID — generated once, persisted in localStorage
   const userId = useRef(getOrCreateUUID()).current;

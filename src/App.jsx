@@ -8215,6 +8215,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             buildRolloverPick={buildRolloverPick}
             buildUniversalPool={buildUniversalPool}
             onFullModel={onFullModelFromParlay}
+            onChainChange={handleChainChange}
           />
         )}
 
@@ -8883,6 +8884,9 @@ function JarvisFAB({ C, isDesktop, onClick }) {
       const dy = ev.clientY - dragRef.current.startY;
       if (Math.abs(dx) > 5 || Math.abs(dy) > 5) dragRef.current.moved = true;
       const next = clamp(dragRef.current.origX + dx, dragRef.current.origY + dy);
+      // Track final position in ref so onUp doesn't read stale closure
+      dragRef.current.lastX = next.x;
+      dragRef.current.lastY = next.y;
       setPos(next);
     };
 
@@ -8894,8 +8898,10 @@ function JarvisFAB({ C, isDesktop, onClick }) {
         // Pure tap — fire onClick
         onClick?.();
       } else {
-        // Snap to nearest edge
-        const snapped = snapToEdge(pos.x, pos.y);
+        // Read final position from ref — not from closed-over pos (which is stale)
+        const finalX  = dragRef.current.lastX ?? dragRef.current.origX;
+        const finalY  = dragRef.current.lastY ?? dragRef.current.origY;
+        const snapped = snapToEdge(finalX, finalY);
         setPos(snapped);
         savePos(snapped);
       }
@@ -9026,6 +9032,11 @@ export default function GRMPro() {
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
   // The bolt FAB is always visible so the user can open Jarvis from any Pro screen.
   const [jarvisOpen, setJarvisOpen] = useState(false);
+
+  // rolloverChain — lifted from RolloverSystem via onChainChange callback.
+  // This is the REAL chain object Jarvis reads. Never hardcoded null.
+  const [rolloverChain, setRolloverChain] = useState(null);
+  const handleChainChange = useCallback((chain) => setRolloverChain(chain), []);
 
   // onNavigatePro — called by ChatLayout to drive Pro's navigation from inside Jarvis.
   // Closes the overlay only when Jarvis explicitly navigates away (e.g. Open in Live Model).
@@ -10013,6 +10024,7 @@ export default function GRMPro() {
           buildRolloverPick={buildRolloverPick}
           buildUniversalPool={buildUniversalPool}
           onFullModel={onFullModelFromRollover}
+          onChainChange={handleChainChange}
         />
       )}
 
@@ -10429,8 +10441,10 @@ export default function GRMPro() {
               return next;
             });
           }}
-          rolloverChain={null}
+          rolloverChain={rolloverChain}
           historicalRates={historicalRates}
+          engineFixtureIds={useMemo(() => fixtures.filter(f => f.theRead?.anchor && !f.theRead?.isFallback).map(f => f.id), [fixtures])}
+          customFixtureIds={useMemo(() => fixtures.filter(f => f._custom).map(f => f.id), [fixtures])}
           onNavigatePro={handleJarvisNavigate}
           onBookNow={(ticket, bookmaker) => {
             setTickets(prev => {
@@ -10444,6 +10458,7 @@ export default function GRMPro() {
             });
           }}
           defaultBookmaker="SB"
+          geminiApiKey={window.__GRM_GEMINI_KEY || null}
         />,
         document.body
       )}

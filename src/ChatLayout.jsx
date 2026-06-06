@@ -1,9 +1,8 @@
 /**
  * ChatLayout.jsx — GRM Pro Jarvis Overlay
  * ─────────────────────────────────────────
- * Jarvis is a floating co-pilot panel that overlays Pro — not a separate screen.
- * Open/close via the persistent bolt FAB rendered by App.jsx.
- * No bottom nav. No layout switching. Jarvis stays available on every Pro tab.
+ * View layer only. All logic, pool building, and utilities
+ * are imported from jarvisStore.js — no forks, no duplication.
  *
  * Props (received from App.jsx):
  *   isOpen              — bool: panel visible?
@@ -17,69 +16,34 @@
  *   savedTickets        — array of saved parley ticket objects
  *   onSaveTicket        — fn(ticket): save a built ticket
  *   onDeleteTicket      — fn(ticketId): delete saved ticket
- *   rolloverChain       — object | null: active rollover chain state
+ *   rolloverChain       — object | null: REAL active rollover chain (wired from App)
+ *   engineFixtureIds    — array of engine-flagged fixture IDs
+ *   customFixtureIds    — array of user's custom list fixture IDs
  *   historicalRates     — object: backtest summary for pool scoring
  *   onNavigatePro       — fn(destination): navigate Pro to a specific place
- *                         destination: { tab?, subTab?, code?, fixture?, autoAnalyze? }
  *   onBookNow           — fn(ticket, bookmaker): trigger booking flow
  *   defaultBookmaker    — 'SB' | 'LL'
- *   geminiApiKey        — string | null: key for Gemini fallback on unknown intents
  */
 
 import React, {
-  useState, useEffect, useRef, useCallback, useMemo, useReducer
+  useState, useEffect, useRef, useCallback, useMemo,
 } from "react";
 
-// ── CONSTANTS ────────────────────────────────────────────────────────────────
+import {
+  INTENT, BUILD_STEP, MARKET_GROUPS, TOP_LEAGUES_RANK, TOP_COUNTRIES,
+  SB_LINK_RE, LL_LINK_RE,
+  classifyIntent,
+  buildParley, legsFromTargetOdds,
+  findFixture, getTopFixtures, filterFixturesByLeague, getLeagueCountries,
+  copyToClipboard, safeImpliedOdds, openBookingLink, makeDraftCode,
+} from "./jarvisStore.js";
 
-const CHAT_HISTORY_KEY   = "grm_chat_history";
-const BUILD_PREF_KEY     = "grm_chat_build_pref";
-const TIP_PREFIX         = "grm_tip_";
-const MAX_RENDERED_MSGS  = 30;
+// ── LOCAL CONSTANTS ───────────────────────────────────────────────────────────
 
-// Intent IDs
-const INTENT = {
-  ROLLOVER_STATUS:    "ROLLOVER_STATUS",
-  ROLLOVER_ANALYTICS: "ROLLOVER_ANALYTICS",
-  BUILD_PARLEY:       "BUILD_PARLEY",
-  MATCH_ANALYSIS:     "MATCH_ANALYSIS",
-  JARVIS_ANALYSIS:    "JARVIS_ANALYSIS",
-  FIXTURES_TODAY:     "FIXTURES_TODAY",
-  FIXTURES_FILTERED:  "FIXTURES_FILTERED",
-  CODE_ANALYZE:       "CODE_ANALYZE",
-  NAVIGATE_CUSTOM:    "NAVIGATE_CUSTOM",
-  NAVIGATE_ENGINE:    "NAVIGATE_ENGINE",
-  SAVED_PARLEYS:      "SAVED_PARLEYS",
-  STRATEGY:           "STRATEGY",
-  UNKNOWN:            "UNKNOWN",
-};
-
-// Build flow steps
-const BUILD_STEP = {
-  MODE:         "MODE",
-  POOL:         "POOL",
-  LEGS_TARGET:  "LEGS_TARGET",  // combined legs + target odds
-  MARKET:       "MARKET",
-  LEAGUES:      "LEAGUES",
-  CONFIRM:      "CONFIRM",
-};
-
-const LEG_OPTIONS = [4, 5, 6, 8, 10];
-
-const MARKET_GROUPS = [
-  { group: "RESULT",      items: [{ id:"1X2", label:"1X2 — Home/Draw/Away" }, { id:"DC", label:"Double Chance" }] },
-  { group: "GOALS",       items: [{ id:"over25", label:"Over 2.5", mapped:"Over 2.5" }, { id:"over15", label:"Over 1.5", mapped:"Over 1.5" }, { id:"over35", label:"Over 3.5", mapped:"Over 3.5" }, { id:"under25", label:"Under 2.5", mapped:"Under 2.5" }, { id:"under35", label:"Under 3.5", mapped:"Under 3.5" }] },
-  { group: "BOTH TEAMS",  items: [{ id:"bttsyes", label:"BTTS Yes" }, { id:"bttsno", label:"BTTS No" }] },
-  { group: "TEAM TOTALS", items: [{ id:"homeo05", label:"Home to Score (O0.5)" }, { id:"awayo05", label:"Away to Score (O0.5)" }] },
-  { group: "NOT MODELLED", items: [{ id:"corners", label:"Corners", untracked:true }, { id:"correct_score", label:"Correct Score", untracked:true }, { id:"cards", label:"Cards", untracked:true }], muted:true },
-];
-
-const TOP_LEAGUES_RANK = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Champions League", "UEFA"];
-const TOP_COUNTRIES    = ["England", "Spain", "Italy", "Germany", "France", "Portugal", "Netherlands"];
-
-const BOOKING_CODE_RE  = /\b[A-Z0-9]{6,12}\b/;
-const SB_LINK_RE       = /sportybet\.com/i;
-const LL_LINK_RE       = /luckysledger\.com|luckyledger\.com/i;
+const CHAT_HISTORY_KEY  = "grm_chat_history";
+const BUILD_PREF_KEY    = "grm_chat_build_pref";
+const TIP_PREFIX        = "grm_tip_";
+const MAX_RENDERED_MSGS = 30;
 
 // ── SVG ICONS ────────────────────────────────────────────────────────────────
 
@@ -171,9 +135,7 @@ const LoaderIcon = ({ size = 14 }) => (
   </svg>
 );
 
-// ── UTILITY HELPERS ──────────────────────────────────────────────────────────
-
-function genId() {
+// ── MESSAGE FACTORY ──────────────────────────────────────────────────────────function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
@@ -205,165 +167,8 @@ function suppressTip(tipId) {
   try { localStorage.setItem(`${TIP_PREFIX}${tipId}`, String(Date.now())); } catch {}
 }
 
-// Implied odds helper (mirrors App.jsx)
-function safeImpliedOdds(prob) {
-  if (!prob || prob <= 0 || prob > 100) return null;
-  const raw = 1 / ((prob / 100) * 0.95);
-  return isFinite(raw) && raw > 1 ? parseFloat(raw.toFixed(2)) : null;
-}
-
-// ── INTENT CLASSIFIER ────────────────────────────────────────────────────────
-
-function classifyIntent(text) {
-  const t = text.toLowerCase().trim();
-
-  // Code / link detection — check early, no ambiguity
-  if (SB_LINK_RE.test(t) || LL_LINK_RE.test(t)) return { intent: INTENT.CODE_ANALYZE, platform: SB_LINK_RE.test(t) ? "SB" : "LL", raw: text };
-  if (/analyze this|check this slip|analyze.*code|check.*code/i.test(t)) return { intent: INTENT.CODE_ANALYZE, raw: text };
-  // Standalone booking code pattern (all caps alphanumeric, 6–12 chars, nothing else significant around it)
-  const codeMatch = text.trim().match(/^([A-Z0-9]{6,12})$/);
-  if (codeMatch) return { intent: INTENT.CODE_ANALYZE, code: codeMatch[1], raw: text };
-
-  // Navigation
-  if (/go to custom|custom tab|custom list|open custom/i.test(t))   return { intent: INTENT.NAVIGATE_CUSTOM };
-  if (/engine picks|go to engine|engine tab|open engine/i.test(t))  return { intent: INTENT.NAVIGATE_ENGINE };
-
-  // Rollover
-  if (/analytics|rollover stats|rollover history|my performance|rollover chart/i.test(t)) return { intent: INTENT.ROLLOVER_ANALYTICS };
-  if (/rollover|today.s rollover|my chain|rollover pick|check my chain/i.test(t))          return { intent: INTENT.ROLLOVER_STATUS };
-
-  // Strategy
-  if (/my saved strategy|use strategy|saved filter|apply strategy/i.test(t)) return { intent: INTENT.STRATEGY };
-
-  // Saved parleys
-  if (/my parleys|saved parleys|show tickets|parley \d|ticket \d/i.test(t)) return { intent: INTENT.SAVED_PARLEYS };
-
-  // Build parley
-  if (/build|parley|make a ticket|create a slip|new ticket|make ticket/i.test(t)) return { intent: INTENT.BUILD_PARLEY };
-
-  // Fixtures (must come after build to avoid false match on "today's games" in build context)
-  const leagueMatch = t.match(/\b(premier league|la liga|serie a|bundesliga|ligue 1|championship|liga|eredivisie|mls|bundesliga|primera division|superliga)\b/i);
-  if (/today.s fixtures|today.s games|what.s playing|fixtures|games today|matches today/i.test(t) && !leagueMatch) return { intent: INTENT.FIXTURES_TODAY };
-  if (leagueMatch && /fixtures|games|matches/i.test(t)) return { intent: INTENT.FIXTURES_FILTERED, league: leagueMatch[1] };
-  if (/fixtures|games today|what.s on/i.test(t)) return { intent: INTENT.FIXTURES_TODAY };
-
-  // Match analysis
-  const matchVs = t.match(/(?:analysis of |analyse |analyze |model pick for |what.s.+pick for |how will )?(.+?)\s+(?:vs|versus|against|v\.?)\s+(.+?)(?:\??$| —)/i);
-  if (matchVs) {
-    const needsJarvis = /jarvis|research|injuries|squad news|news/i.test(t);
-    return {
-      intent: needsJarvis ? INTENT.JARVIS_ANALYSIS : INTENT.MATCH_ANALYSIS,
-      home: matchVs[1].trim(),
-      away: matchVs[2].trim(),
-    };
-  }
-
-  return { intent: INTENT.UNKNOWN };
-}
-
-// ── FIXTURE HELPERS ──────────────────────────────────────────────────────────
-
-function findFixture(fixtures, homeQuery, awayQuery) {
-  if (!fixtures?.length) return null;
-  const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const h = norm(homeQuery), a = norm(awayQuery);
-  return fixtures.find(f => {
-    const fh = norm(f.teams?.home), fa = norm(f.teams?.away);
-    return (fh.includes(h) || h.includes(fh.slice(0, 4))) &&
-           (fa.includes(a) || a.includes(fa.slice(0, 4)));
-  }) || null;
-}
-
-function getTopFixtures(fixtures, limit = 8) {
-  if (!fixtures?.length) return [];
-  const rank = f => {
-    const ln = (f.league || "").toLowerCase();
-    for (let i = 0; i < TOP_LEAGUES_RANK.length; i++) {
-      if (ln.includes(TOP_LEAGUES_RANK[i].toLowerCase())) return i;
-    }
-    return 99;
-  };
-  return [...fixtures]
-    .filter(f => f.state !== "finished" && f.state !== "ft")
-    .sort((a, b) => rank(a) - rank(b))
-    .slice(0, limit);
-}
-
-function filterFixturesByLeague(fixtures, leagueName) {
-  if (!fixtures?.length) return [];
-  const q = leagueName.toLowerCase();
-  return fixtures.filter(f => (f.league || "").toLowerCase().includes(q));
-}
-
-function getLeagueCountries(fixtures, leagueName) {
-  if (!fixtures?.length) return [];
-  const q = leagueName.toLowerCase();
-  const seen = new Map();
-  fixtures.forEach(f => {
-    if ((f.league || "").toLowerCase().includes(q)) {
-      const country = f.country || "Unknown";
-      if (!seen.has(country)) seen.set(country, f.league);
-    }
-  });
-  const result = [...seen.entries()].map(([country, league]) => ({ country, league }));
-  // Sort: top countries first
-  result.sort((a, b) => {
-    const ia = TOP_COUNTRIES.indexOf(a.country), ib = TOP_COUNTRIES.indexOf(b.country);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
-  return result;
-}
-
-// Build a parley pool (simplified version matching App.jsx pool builder logic)
-function buildChatPool(fixtures, marketFamily, historicalRates) {
-  if (!fixtures?.length) return [];
-  const pool = [];
-  for (const f of fixtures) {
-    if (f.state === "finished" || f.state === "ft") continue;
-    const m = f.markets;
-    if (!m) continue;
-    let pick = null;
-    const io = safeImpliedOdds;
-    const oi = (realOdds, prob) => {
-      if (realOdds && isFinite(realOdds) && realOdds > 1.01) return parseFloat(realOdds);
-      return io(prob) || 1.02;
-    };
-    if (marketFamily === "theRead" && f.theRead?.anchor && !f.theRead.isFallback) {
-      const a = f.theRead.anchor;
-      pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:a.pick, odds:oi(a.odds,a.prob), conf:a.prob, market:a.market, league:f.league };
-    } else if (marketFamily === "over25") {
-      const o = oi(f.odds?.over25odds, m.over25); if(o && m.over25) pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:"Over 2.5 Goals", odds:o, conf:m.over25, market:"Over 2.5", league:f.league };
-    } else if (marketFamily === "over15") {
-      const o = oi(f.odds?.over15odds, m.over15); if(o && m.over15) pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:"Over 1.5 Goals", odds:o, conf:m.over15, market:"Over 1.5", league:f.league };
-    } else if (marketFamily === "bttsyes") {
-      const o = oi(f.odds?.bttsYesOdds, m.bttsYes); if(o && m.bttsYes) pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:"BTTS Yes", odds:o, conf:m.bttsYes, market:"BTTS", league:f.league };
-    } else if (marketFamily === "1X2" || marketFamily === "homewin") {
-      const o = oi(f.odds?.o1, m.homeWin); if(o && m.homeWin) pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:`${f.teams.home} Win`, odds:o, conf:m.homeWin, market:"1X2", league:f.league };
-    } else if (marketFamily === "under25") {
-      const o = oi(f.odds?.under25odds, m.under25); if(o && m.under25) pick = { fixtureId:f.id, game:`${f.teams.home} vs ${f.teams.away}`, pick:"Under 2.5 Goals", odds:o, conf:m.under25, market:"Under 2.5", league:f.league };
-    }
-    if (pick && pick.conf > 0) pool.push(pick);
-  }
-  return pool.sort((a, b) => b.conf - a.conf);
-}
-
-function buildParleyFromPool(pool, legCount, leagueFilter) {
-  let filtered = pool;
-  if (leagueFilter && leagueFilter !== "all") {
-    const q = leagueFilter.toLowerCase();
-    filtered = pool.filter(p => (p.league || "").toLowerCase().includes(q));
-    if (filtered.length < legCount) filtered = pool; // fallback to full pool
-  }
-  const used = new Set();
-  const legs = [];
-  for (const entry of filtered) {
-    if (used.has(entry.fixtureId)) continue;
-    used.add(entry.fixtureId);
-    legs.push(entry);
-    if (legs.length >= legCount) break;
-  }
-  return legs;
-}
+// safeImpliedOdds, classifyIntent, buildPool, findFixture, etc.
+// are all imported from jarvisStore.js — no local forks.
 
 // ── MESSAGE FACTORY ──────────────────────────────────────────────────────────
 
@@ -393,20 +198,24 @@ export default function ChatLayout({
   savedTickets = [],
   onSaveTicket,
   onDeleteTicket,
-  rolloverChain = null,
+  rolloverChain = null,        // ← REAL chain wired from App via Rollover callback
+  engineFixtureIds = [],       // ← engine-flagged IDs for pool filtering
+  customFixtureIds = [],       // ← user's custom list IDs for pool filtering
   historicalRates = null,
   onNavigatePro,
   onBookNow,
   defaultBookmaker = "SB",
-  geminiApiKey = null,
 }) {
   // ── Message state
   const [messages, setMessages]         = useState(() => safeGet(CHAT_HISTORY_KEY, null));
   const [input, setInput]               = useState("");
   const [isTyping, setIsTyping]         = useState(false);
 
-  // ── Build flow state
-  const [buildFlow, setBuildFlow]       = useState(null);
+  // ── Build flow — session-level ref, not embedded in messages.
+  // activeBuildMsgId: only the message with this ID renders live build-step UI.
+  // All prior build-step messages become inert display cards.
+  const [buildFlow, setBuildFlow]               = useState(null);
+  const [activeBuildMsgId, setActiveBuildMsgId] = useState(null);
 
   // ── Bottom sheet / help
   const [bottomSheet, setBottomSheet]   = useState(null);
@@ -439,6 +248,21 @@ export default function ChatLayout({
     const toStore = messages.slice(-MAX_RENDERED_MSGS);
     safeSet(CHAT_HISTORY_KEY, toStore);
   }, [messages]);
+
+  // ── Body scroll lock — prevents Live Model list scrolling behind Jarvis panel
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = "hidden";
+      document.body.style.touchAction = "none";
+    } else {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+    };
+  }, [isOpen]);
 
   // ── Auto-scroll on new messages
   useEffect(() => {
@@ -509,10 +333,36 @@ export default function ChatLayout({
     }, 1200);
   }, [sessionTipShown, addJarvisMsg]);
 
-  // ── INTENT HANDLERS ─────────────────────────────────────────────────────────
+  // ── GREETING / HELP ────────────────────────────────────────────────────────
+
+  async function handleGreeting(polarity) {
+    await simulateTyping(300);
+    const isPositive = polarity === "positive";
+    const text = isPositive
+      ? "Any time! What would you like to do next?"
+      : "Hey! What can I help you with today?";
+    addJarvisMsg({ type: "TEXT", text }, [
+      { label: "Build a parley",   text: "Build me a parley"          },
+      { label: "Today's fixtures", text: "Today's fixtures"           },
+      { label: "My Rollover",      text: "Check my Rollover"          },
+    ]);
+  }
+
+  async function handleHelp() {
+    await simulateTyping(400);
+    addJarvisMsg({ type: "HELP_CARD" }, [
+      { label: "Build a parley",   text: "Build me a parley"          },
+      { label: "Today's fixtures", text: "Today's fixtures"           },
+      { label: "My Rollover",      text: "Check my Rollover"          },
+      { label: "Analyse a slip",   text: "Analyse a slip"             },
+    ]);
+  }
+
+  // ── ROLLOVER ─────────────────────────────────────────────────────────────────
 
   async function handleRolloverStatus() {
     await simulateTyping(600);
+    // rolloverChain is now wired from App via onChainChange — never null if active
     if (!rolloverChain) {
       addJarvisMsg({ type: "TEXT", text: "You don't have an active Rollover chain." }, [
         { label: "Start Rollover", action: "NAV_ROLLOVER" },
@@ -520,7 +370,7 @@ export default function ChatLayout({
       return;
     }
     const chain = rolloverChain;
-    const pick  = chain.pick || chain.todayPick || null;
+    const pick  = chain.todayPick || chain.pick || null;
     if (!pick) {
       addJarvisMsg({ type: "TEXT", text: "Today's pick hasn't been locked yet. Check back later or visit the Rollover tab." }, [
         { label: "Go to Rollover", action: "NAV_ROLLOVER" },
@@ -545,21 +395,47 @@ export default function ChatLayout({
     onNavigatePro?.({ tab: "rollover" });
   }
 
-  function startBuildFlow() {
-    const pref = getBuildPref();
-    if (pref) {
-      // Show pref popup briefly, then start from Step 2
-      setBuildFlow({ step: BUILD_STEP.POOL, mode: pref, prefPopupVisible: true });
-      setTimeout(() => setBuildFlow(prev => prev ? { ...prev, prefPopupVisible: false } : prev), 2500);
-    } else {
-      setBuildFlow({ step: BUILD_STEP.MODE });
+  function startBuildFlow(nlParams = null) {
+    // If NL params extracted (legs, market, targetOdds, league) — skip the
+    // entire flow and go straight to executeBuild.
+    if (nlParams && (nlParams.legs || nlParams.targetOdds || nlParams.market)) {
+      const flow = {
+        step:    BUILD_STEP.CONFIRM,
+        mode:    "jarvis",
+        pool:    "all",
+        legs:    nlParams.legs    || "auto",
+        targetOdds: nlParams.targetOdds || "auto",
+        market:  nlParams.market  || "theRead",
+        leagues: nlParams.league  || null,
+      };
+      setBuildFlow(flow);
+      const loadingMsg = makeLoadingMsg();
+      addMsg(loadingMsg);
+      setActiveBuildMsgId(null); // no interactive step — straight to result
+      executeBuild(flow, loadingMsg.id);
+      return;
     }
-    addJarvisMsg({ type: "BUILD_MODE_SELECT" });
+
+    const pref = getBuildPref();
+    // Use saved pref to skip MODE step, but still ask POOL
+    const newFlow = pref
+      ? { step: BUILD_STEP.POOL, mode: pref, prefPopupVisible: true }
+      : { step: BUILD_STEP.MODE };
+
+    setBuildFlow(newFlow);
+
+    const msg = makeJarvisMsg({ type: pref ? "BUILD_POOL_SELECT" : "BUILD_MODE_SELECT" });
+    addMsg(msg);
+    setActiveBuildMsgId(msg.id); // this message owns the active step UI
+
+    if (pref) {
+      setTimeout(() => setBuildFlow(prev => prev ? { ...prev, prefPopupVisible: false } : prev), 2500);
+    }
   }
 
-  async function handleBuildParley() {
+  async function handleBuildParley(nlParams = null) {
     await simulateTyping(400);
-    startBuildFlow();
+    startBuildFlow(nlParams);
   }
 
   async function handleMatchAnalysis(home, away, withJarvis = false) {
@@ -703,178 +579,181 @@ export default function ChatLayout({
   }
 
   async function handleUnknown(rawText) {
-    // First — show typing
     await simulateTyping(500);
 
-    // Try Gemini if key available
-    if (geminiApiKey) {
-      const loadingMsg = makeLoadingMsg();
-      addMsg(loadingMsg);
-      try {
-        const systemCtx = `You are Jarvis, the AI co-pilot inside GRM Pro — a football predictions and parley-building app.
-You can: build parleys, analyze fixtures, check rollover status, analyze booking slips (SportyBet/Lucky's Ledger), navigate to Custom/Engine/Rollover tabs, show today's fixtures, give match model picks.
-You cannot: place bets, access live odds, access external sites.
-Always reply concisely (2–3 sentences max). If the user's request matches something GRM can do, tell them exactly what to say. If it's completely off-topic, say so politely.`;
+    const loadingMsg = makeLoadingMsg();
+    addMsg(loadingMsg);
 
-        const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + geminiApiKey, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: systemCtx }] },
-            contents: [{ parts: [{ text: rawText }] }],
-            generationConfig: { maxOutputTokens: 120, temperature: 0.4 },
-          }),
-        });
-        const json = await res.json();
-        const reply = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (reply) {
+    try {
+      const res = await fetch("/api/jarvis-chat", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          message: rawText,
+          date:    new Date().toISOString().slice(0, 10),
+        }),
+      });
+
+      if (res.ok) {
+        const { reply } = await res.json();
+        if (reply?.trim()) {
           replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
-            { type: "TEXT", text: reply },
+            { type: "TEXT", text: reply.trim() },
             [
-              { label: "Build a parley",    text: "Build me a parley"        },
-              { label: "Today's fixtures",  text: "Today's fixtures"         },
-              { label: "My Rollover",       text: "What's my rollover status?" },
+              { label: "Build a parley",   text: "Build me a parley"          },
+              { label: "Today's fixtures", text: "Today's fixtures"           },
+              { label: "My Rollover",      text: "What's my rollover status?" },
             ]
           ));
           return;
         }
-      } catch {}
-      // Gemini failed — fall through to default
-      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
-        { type: "TEXT", text: "I'm not sure I got that. Here's what I can help with:" },
-        [
-          { label: "Build a parley",    text: "Build me a parley"          },
-          { label: "Today's fixtures",  text: "Today's fixtures"           },
-          { label: "My Rollover",       text: "What's my rollover status?" },
-          { label: "Analyse a slip",    text: "Analyse a slip"             },
-        ]
-      ));
-      return;
+      }
+    } catch {
+      // Network/server error — fall through to default
     }
 
-    // No Gemini key — context-aware default chips
     const chips = chatLastAction?.type === "PARLEY_BUILT"
       ? [
-          { label: "Remix",         text: "Remix"                          },
-          { label: "Add more legs", text: "Add more legs"                  },
-          { label: "New parley",    text: "Build me a new parley"          },
+          { label: "Remix",         text: "Remix"                 },
+          { label: "Add more legs", text: "Add more legs"         },
+          { label: "New parley",    text: "Build me a new parley" },
         ]
       : [
           { label: "Build a parley",   text: "Build me a parley"          },
           { label: "Check fixtures",   text: "Today's fixtures"           },
           { label: "My Rollover",      text: "What's my rollover status?" },
         ];
-    addJarvisMsg({ type: "TEXT", text: "I'm not sure I got that. Did you mean one of these?" }, chips);
+
+    replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+      { type: "TEXT", text: "I'm not sure I got that. Here's what I can help with:" },
+      chips
+    ));
   }
 
   // ── BUILD FLOW HANDLERS ─────────────────────────────────────────────────────
 
   function onBuildModeSelect(mode) {
     saveBuildPref(mode);
-    setBuildFlow(prev => ({ ...prev, mode, step: BUILD_STEP.POOL }));
-    addJarvisMsg({ type: "BUILD_POOL_SELECT" });
+    const newFlow = { ...buildFlow, mode, step: BUILD_STEP.POOL };
+    setBuildFlow(newFlow);
+    const msg = makeJarvisMsg({ type: "BUILD_POOL_SELECT" });
+    addMsg(msg);
+    setActiveBuildMsgId(msg.id);
   }
 
   function onBuildPoolSelect(pool) {
-    setBuildFlow(prev => ({ ...prev, pool, step: BUILD_STEP.LEGS_TARGET }));
-    addJarvisMsg({ type: "BUILD_LEGS_TARGET_SELECT" });
+    // "custom" pool → navigate to custom list first if no customFixtureIds loaded
+    if (pool === "custom" && !customFixtureIds?.length) {
+      addJarvisMsg({ type: "TEXT", text: "Opening your Custom List — add fixtures there, then come back to build." }, [
+        { label: "Open Custom List", action: "NAV_CUSTOM" },
+      ]);
+      setBuildFlow(null);
+      setActiveBuildMsgId(null);
+      return;
+    }
+    const newFlow = { ...buildFlow, pool, step: BUILD_STEP.LEGS_TARGET };
+    setBuildFlow(newFlow);
+    const msg = makeJarvisMsg({ type: "BUILD_LEGS_TARGET_SELECT" });
+    addMsg(msg);
+    setActiveBuildMsgId(msg.id);
   }
 
-  // legs + target odds combined — called when user picks from the inline widget
-  function onBuildLegsTargetSelect({ legs, targetOdds }) {
-    setBuildFlow(prev => ({ ...prev, legs, targetOdds, step: BUILD_STEP.MARKET }));
-    setBottomSheet("market");
+  // legs + target odds combined — market is NO LONGER mandatory.
+  // Jarvis defaults to theRead. User can specify market inline in their first message.
+  function onBuildLegsTargetSelect({ legs, targetOdds, market }) {
+    const confirmedFlow = {
+      ...buildFlow,
+      legs,
+      targetOdds,
+      market: market || "theRead",   // default: best-market (theRead)
+      leagues: null,                  // no league gate — user can specify inline
+      step: BUILD_STEP.CONFIRM,
+    };
+    setBuildFlow(confirmedFlow);
+    setActiveBuildMsgId(null);  // freeze the legs/target message
+    executeBuild(confirmedFlow);
   }
 
+  // Optional: user can still manually open market sheet via chip
   function onBuildMarketSelect(market) {
     setBottomSheet(null);
-    setBuildFlow(prev => ({ ...prev, market, step: BUILD_STEP.LEAGUES }));
-    // Open leagues sheet
-    setBottomSheet("leagues");
+    if (!buildFlow) return;
+    const updatedFlow = { ...buildFlow, market };
+    setBuildFlow(updatedFlow);
+    if (updatedFlow.legs || updatedFlow.targetOdds) {
+      executeBuild({ ...updatedFlow, step: BUILD_STEP.CONFIRM });
+    }
   }
 
   function onBuildLeaguesSelect(leagues) {
     setBottomSheet(null);
-    setBuildFlow(prev => {
-      const next = { ...prev, leagues, step: BUILD_STEP.CONFIRM };
-      // Trigger the actual build
-      executeBuild(next);
-      return next;
-    });
+    if (!buildFlow) return;
+    const updatedFlow = { ...buildFlow, leagues, step: BUILD_STEP.CONFIRM };
+    setBuildFlow(updatedFlow);
+    executeBuild(updatedFlow);
   }
 
-  async function executeBuild(flow) {
-    const loadingMsg = makeLoadingMsg();
-    addMsg(loadingMsg);
+  async function executeBuild(flow, existingLoadingId = null) {
+    // Use passed loadingMsgId (NL path) or create a new one (flow path)
+    let loadingId = existingLoadingId;
+    if (!loadingId) {
+      const loadingMsg = makeLoadingMsg();
+      addMsg(loadingMsg);
+      loadingId = loadingMsg.id;
+    }
     await new Promise(r => setTimeout(r, 1200));
 
     const { mode, pool, legs, targetOdds, market, leagues } = flow;
-    const marketFamily = market || "theRead";
-    const leagueFilter = (leagues === "all" || !leagues) ? null : leagues;
 
-    // Determine leg count:
-    // - If user specified legs directly → use it
-    // - If user set targetOdds only → let Jarvis pick leg count to hit that odds range
-    // - "auto" → Jarvis decides (default 6)
+    // Determine leg count
     let legCount;
     if (legs && legs !== "auto") {
       legCount = parseInt(legs, 10) || 6;
     } else if (targetOdds && targetOdds !== "auto") {
-      // Estimate legs needed: each leg averages ~1.5 odds → log1.5(targetOdds)
-      const target = parseFloat(targetOdds);
-      legCount = isFinite(target) && target > 1
-        ? Math.max(3, Math.min(12, Math.round(Math.log(target) / Math.log(1.5))))
-        : 6;
+      legCount = legsFromTargetOdds(targetOdds);
     } else {
-      legCount = 6; // Jarvis auto
+      legCount = 6;
     }
 
-    let builtLegs = [];
-    if (fixturesLoaded && fixtures.length) {
-      const builtPool = buildChatPool(fixtures, marketFamily, historicalRates);
-      builtLegs = buildParleyFromPool(builtPool, legCount, leagueFilter);
-    }
+    const result = fixturesLoaded && fixtures.length
+      ? buildParley({
+          fixtures,
+          marketFamily:     market || "theRead",
+          legCount,
+          leagueFilter:     (leagues === "all" || !leagues) ? null : leagues,
+          poolSource:       pool || "all",
+          engineIds:        engineFixtureIds,
+          customFixtureIds: customFixtureIds,
+        })
+      : null;
 
-    if (!builtLegs.length) {
-      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+    if (!result || !result.ticket.legs.length) {
+      replaceLoadingMsg(loadingId, makeJarvisMsg(
         { type: "TEXT", text: "Not enough qualifying games match those filters today. Try fewer legs or wider leagues." },
         [{ label: "Try again", text: "Build me a parley" }, { label: "Wider pool", text: "Build me a parley with all leagues" }]
       ));
       setBuildFlow(null);
+      setActiveBuildMsgId(null);
       return;
     }
 
-    if (builtLegs.length < legCount) {
-      // Partial pool
-    }
-
-    const totalOdds = builtLegs.reduce((acc, l) => acc * (l.odds || 1), 1);
-    const ticket = {
-      id:         Date.now(),
-      code:       "T" + Math.random().toString(36).slice(2, 6).toUpperCase(),
-      mode:       mode || "jarvis",
-      legs:       builtLegs,
-      totalOdds:  parseFloat(totalOdds.toFixed(2)),
-      createdAt:  Date.now(),
-      savedAt:    null,
-      bookedCode: null,
-    };
-
+    const { ticket, partial } = result;
     // Auto-save
     onSaveTicket?.(ticket);
 
     const finalMsg = makeJarvisMsg({
       type:    "TICKET_CARD",
       ticket,
-      partial: builtLegs.length < legCount,
+      partial,
     }, [
       { label: "Remix",         text: "Remix"          },
       { label: "Add more legs", text: "Add more legs"  },
       { label: "New",           text: "Build me a new parley" },
     ]);
 
-    replaceLoadingMsg(loadingMsg.id, finalMsg);
+    replaceLoadingMsg(loadingId, finalMsg);
     setBuildFlow(null);
+    setActiveBuildMsgId(null);
     setChatLastAction({ type: "PARLEY_BUILT", ticket });
 
     setSessionBuildCount(c => {
@@ -892,15 +771,32 @@ Always reply concisely (2–3 sentences max). If the user's request matches some
     addMsg(makeUserMsg("Remix"));
     addMsg(loadingMsg);
     await new Promise(r => setTimeout(r, 1000));
-    const pool  = buildChatPool(fixtures, ticket.legs[0]?.market?.toLowerCase().replace(/\s/g,"") || "theRead", historicalRates);
-    // Exclude already-used fixtures for variety
-    const usedIds = new Set(ticket.legs.map(l => l.fixtureId));
-    const fresh = pool.filter(p => !usedIds.has(p.fixtureId));
-    const legs  = buildParleyFromPool(fresh.length >= ticket.legs.length ? fresh : pool, ticket.legs.length, null);
-    const totalOdds = legs.reduce((acc, l) => acc * (l.odds || 1), 1);
-    const newTicket = { ...ticket, id: Date.now(), code: "T" + Math.random().toString(36).slice(2, 6).toUpperCase(), legs, totalOdds: parseFloat(totalOdds.toFixed(2)), createdAt: Date.now() };
+
+    const result = buildParley({
+      fixtures,
+      marketFamily:     ticket.marketFamily || ticket.legs[0]?.market?.toLowerCase().replace(/\s/g,"") || "theRead",
+      legCount:         ticket.legs.length,
+      leagueFilter:     ticket.leagueFilter || null,
+      poolSource:       ticket.poolSource   || "all",
+      engineIds:        engineFixtureIds,
+      customFixtureIds: customFixtureIds,
+      excludeIds:       ticket.legs.map(l => l.fixtureId), // favour fresh fixtures
+    });
+
+    if (!result) {
+      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+        { type:"TEXT", text:"Not enough fresh fixtures to remix. Try a new parley." },
+        [{ label:"New parley", text:"Build me a new parley" }]
+      ));
+      return;
+    }
+
+    const { ticket: newTicket } = result;
     onSaveTicket?.(newTicket);
-    replaceLoadingMsg(loadingMsg.id, makeJarvisMsg({ type: "TICKET_CARD", ticket: newTicket }, [{ label: "Remix again", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]));
+    replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+      { type: "TICKET_CARD", ticket: newTicket },
+      [{ label: "Remix again", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]
+    ));
     setChatLastAction({ type: "PARLEY_BUILT", ticket: newTicket });
   }
 
@@ -941,9 +837,12 @@ Always reply concisely (2–3 sentences max). If the user's request matches some
 
     const classified = classifyIntent(raw);
     switch (classified.intent) {
+      case INTENT.GREETING:           handleGreeting(classified.polarity); break;
+      case INTENT.HELP:               handleHelp(); break;
       case INTENT.ROLLOVER_STATUS:    handleRolloverStatus(); break;
       case INTENT.ROLLOVER_ANALYTICS: handleRolloverAnalytics(); break;
-      case INTENT.BUILD_PARLEY:       handleBuildParley(); break;
+      // BUILD_PARLEY may carry NL params (legs, market, targetOdds, league)
+      case INTENT.BUILD_PARLEY:       handleBuildParley(classified); break;
       case INTENT.MATCH_ANALYSIS:     handleMatchAnalysis(classified.home, classified.away, false); break;
       case INTENT.JARVIS_ANALYSIS:    handleMatchAnalysis(classified.home, classified.away, true); break;
       case INTENT.FIXTURES_TODAY:     handleFixturesToday(); break;
@@ -1012,6 +911,8 @@ Always reply concisely (2–3 sentences max). If the user's request matches some
       flex: 1, overflowY: "auto", padding: "12px 14px 8px",
       display: "flex", flexDirection: "column", gap: 10,
       scrollBehavior: "smooth",
+      overscrollBehavior: "contain",
+      WebkitOverflowScrolling: "touch",
     },
     // Jarvis bubble
     jBubble: {
@@ -1195,6 +1096,7 @@ Always reply concisely (2–3 sentences max). If the user's request matches some
           inputRef={inputRef}
           messagesEndRef={messagesEndRef}
           buildFlow={buildFlow}
+          activeBuildMsgId={activeBuildMsgId}
           onBuildModeSelect={onBuildModeSelect}
           onBuildPoolSelect={onBuildPoolSelect}
           onBuildLegsTargetSelect={onBuildLegsTargetSelect}
@@ -1280,7 +1182,8 @@ function ChatTab({
   C, S, messages, isTyping,
   fixturesLoaded, fetchingFixtures, fetchError, onFetchFixtures,
   input, setInput, onSend, inputRef, messagesEndRef,
-  buildFlow, onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
+  buildFlow, activeBuildMsgId,
+  onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro,
   defaultBookmaker, savedTickets, fixtures, chatEnabled,
 }) {
@@ -1335,6 +1238,7 @@ function ChatTab({
               C={C}
               S={S}
               buildFlow={buildFlow}
+              activeBuildMsgId={activeBuildMsgId}
               onBuildModeSelect={onBuildModeSelect}
               onBuildPoolSelect={onBuildPoolSelect}
               onBuildLegsTargetSelect={onBuildLegsTargetSelect}
@@ -1395,7 +1299,7 @@ function ChatTab({
 // ── MESSAGE ROW ──────────────────────────────────────────────────────────────
 
 function MessageRow({
-  msg, C, S, buildFlow,
+  msg, C, S, buildFlow, activeBuildMsgId,
   onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro,
   defaultBookmaker, savedTickets, fixtures,
@@ -1424,6 +1328,9 @@ function MessageRow({
   }
 
   const { content, chips } = msg;
+  // Only the message that owns the current active build step gets live controls.
+  // All prior build-step messages are rendered as inert (frozen) cards.
+  const isActiveBuildStep = activeBuildMsgId != null && msg.id === activeBuildMsgId;
 
   return (
     <div style={S.jBubble}>
@@ -1436,6 +1343,7 @@ function MessageRow({
         C={C}
         S={S}
         buildFlow={buildFlow}
+        isActiveBuildStep={isActiveBuildStep}
         onBuildModeSelect={onBuildModeSelect}
         onBuildPoolSelect={onBuildPoolSelect}
         onBuildLegsTargetSelect={onBuildLegsTargetSelect}
@@ -1471,7 +1379,8 @@ function MessageRow({
 
 function MessageContent({
   content, C, S,
-  buildFlow, onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
+  buildFlow, isActiveBuildStep,
+  onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro, defaultBookmaker,
   savedTickets, fixtures,
 }) {
@@ -1485,10 +1394,33 @@ function MessageContent({
       return (
         <div>
           <div style={textStyle}>
-            Welcome to GRM Pro Chat.<br/>
+            Welcome to GRM Pro.<br/>
             I'm Jarvis — your football co-pilot.<br/><br/>
             Here's what I can do:
           </div>
+        </div>
+      );
+
+    case "HELP_CARD":
+      return (
+        <div>
+          <div style={{ ...textStyle, marginBottom: 8 }}>Here's what I can help with:</div>
+          {[
+            ["🏗️", "Build a parley", "Say "build me a 5-leg BTTS parley" or just "build""],
+            ["📋", "Today's fixtures", "Top games with model picks and confidence"],
+            ["🔄", "Rollover status", "Your chain, today's pick, gate progress"],
+            ["🔍", "Slip analysis", "Paste a booking code or link to analyse it"],
+            ["🔎", "Match analysis", "Say "Arsenal vs Chelsea" for a model breakdown"],
+            ["🧭", "Navigate", ""Go to engine picks" or "open custom list""],
+          ].map(([icon, title, desc]) => (
+            <div key={title} style={{ display:"flex", gap:8, marginBottom:6 }}>
+              <span style={{ fontSize:13 }}>{icon}</span>
+              <div>
+                <div style={{ fontSize:11, fontWeight:700, color:C.text }}>{title}</div>
+                <div style={{ fontSize:10, color:C.muted, lineHeight:1.4 }}>{desc}</div>
+              </div>
+            </div>
+          ))}
         </div>
       );
 
@@ -1503,7 +1435,11 @@ function MessageContent({
     case "TIP":
       return <div className="grm-tip-bubble">{content.text}</div>;
 
+    // ── Build flow steps — only interactive if isActiveBuildStep
     case "BUILD_MODE_SELECT":
+      if (!isActiveBuildStep) {
+        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Build mode selected.</div>;
+      }
       return (
         <div>
           <div style={textStyle}>Which build mode?</div>
@@ -1515,6 +1451,9 @@ function MessageContent({
       );
 
     case "BUILD_POOL_SELECT":
+      if (!isActiveBuildStep) {
+        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Fixture pool selected.</div>;
+      }
       return (
         <div>
           <div style={textStyle}>Which fixtures should I pick from?</div>
@@ -1533,6 +1472,9 @@ function MessageContent({
       );
 
     case "BUILD_LEGS_TARGET_SELECT":
+      if (!isActiveBuildStep) {
+        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Legs and odds set.</div>;
+      }
       return <LegsTargetWidget C={C} S={S} onSelect={onBuildLegsTargetSelect} />;
 
     case "TICKET_CARD":
@@ -1586,7 +1528,7 @@ function ModeCard({ C, title, desc, active, onClick }) {
 
 // ── LEGS + TARGET ODDS WIDGET ─────────────────────────────────────────────────
 // Combined step: user picks legs count AND/OR target odds.
-// "Jarvis picks" option skips both — model auto-selects.
+// "Jarvis choice" option skips both — model auto-selects.
 // Resolves decision paralysis by making odds the primary anchor people recognise.
 
 function LegsTargetWidget({ C, S, onSelect }) {
@@ -1677,7 +1619,7 @@ function LegsTargetWidget({ C, S, onSelect }) {
           onClick={() => onSelect({ legs:"auto", targetOdds:"auto" })}
           title="Let Jarvis pick the optimal leg count"
         >
-          Jarvis picks
+          Jarvis choice
         </button>
       </div>
     </div>
@@ -1685,23 +1627,26 @@ function LegsTargetWidget({ C, S, onSelect }) {
 }
 
 function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBookmaker }) {
-  const [bookState, setBookState]       = useState("idle");
-  const [bookedCode, setBookedCode]     = useState(null);
+  const [bookState, setBookState]           = useState("idle");
+  const [bookedCode, setBookedCode]         = useState(null);
   const [bookedPlatform, setBookedPlatform] = useState(null);
+  const [bmSheetOpen, setBmSheetOpen]       = useState(false);
 
   if (!ticket) return null;
   const legs     = ticket.legs || [];
   const showLegs = legs.slice(0, 3);
   const extra    = legs.length - showLegs.length;
 
-  function handleBook(bm) {
-    const code = bm === "SB"
-      ? "SB" + Math.random().toString(36).slice(2, 6).toUpperCase()
-      : "LL" + Math.random().toString(36).slice(2, 6).toUpperCase();
+  function handleBookSelect(bm) {
+    setBmSheetOpen(false);
+    // Draft code until real bookmaker API is integrated
+    const code = makeDraftCode(bm);
     setBookedCode(code);
     setBookedPlatform(bm);
     setBookState("booked");
     onBookNow?.(ticket, bm);
+    // Open the share link immediately so user can complete booking on bookmaker side
+    openBookingLink(code, bm);
   }
 
   return (
@@ -1763,7 +1708,7 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
           <button
             className="grm-mini-btn-primary"
             style={{ flex:1,padding:"7px 0",fontSize:10 }}
-            onClick={() => setBookState("selecting")}
+            onClick={() => setBmSheetOpen(true)}
           >
             Book Now
           </button>
@@ -1777,18 +1722,138 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         </div>
       )}
 
-      {bookState === "selecting" && (
-        <div style={{ display:"flex",gap:6 }}>
-          <button className="grm-mini-btn-primary" style={{ flex:1,padding:"7px 0",fontSize:10 }} onClick={() => handleBook("SB")}>SportyBet</button>
-          <button className="grm-mini-btn"         style={{ flex:1,padding:"7px 0",fontSize:10 }} onClick={() => handleBook("LL")}>Lucky's Ledger</button>
-          <button className="grm-mini-btn"         style={{ padding:"7px 8px",fontSize:10 }}      onClick={() => setBookState("idle")}><XIcon size={11}/></button>
-        </div>
-      )}
-
       {bookState === "booked" && bookedCode && (
         <BookedRow C={C} code={bookedCode} platform={bookedPlatform} />
       )}
+
+      {/* Bookmaker slide-up sheet */}
+      {bmSheetOpen && (
+        <BookmakerSheet
+          C={C}
+          onSelect={handleBookSelect}
+          onClose={() => setBmSheetOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// ── BOOKMAKER SHEET ───────────────────────────────────────────────────────────
+// Slide-up selector. LL shown but disabled — experiencing downtime.
+// More bookmakers will be added here as they are integrated.
+
+const BOOKMAKERS = [
+  {
+    id:      "SB",
+    name:    "SportyBet",
+    active:  true,
+    sub:     null,
+    icon:    "SB",
+  },
+  {
+    id:      "LL",
+    name:    "Lucky's Ledger",
+    active:  false,
+    sub:     "Experiencing downtime",
+    icon:    "LL",
+  },
+];
+
+function BookmakerSheet({ C, onSelect, onClose }) {
+  return (
+    <>
+      {/* Scrim */}
+      <div
+        onClick={onClose}
+        style={{
+          position:"fixed", inset:0, zIndex:3000,
+          background:"rgba(0,0,0,0.45)",
+        }}
+      />
+      {/* Sheet */}
+      <div style={{
+        position:"fixed", left:0, right:0, bottom:0, zIndex:3001,
+        background: C.surface2 || C.surface || "#1a1a1a",
+        borderRadius:"16px 16px 0 0",
+        padding:"0 0 calc(env(safe-area-inset-bottom) + 16px) 0",
+        boxShadow:"0 -4px 32px rgba(0,0,0,0.5)",
+      }}>
+        {/* Handle */}
+        <div style={{ display:"flex",justifyContent:"center",padding:"10px 0 4px" }}>
+          <div style={{ width:36,height:4,borderRadius:2,background:C.border }} />
+        </div>
+
+        {/* Header */}
+        <div style={{
+          display:"flex",alignItems:"center",justifyContent:"space-between",
+          padding:"8px 18px 12px",
+        }}>
+          <span style={{ fontSize:11,fontWeight:800,letterSpacing:".12em",textTransform:"uppercase",color:C.text }}>
+            Select Bookmaker
+          </span>
+          <button
+            onClick={onClose}
+            style={{ background:"none",border:"none",color:C.muted,padding:4,cursor:"pointer",lineHeight:1 }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        {/* Bookmaker rows */}
+        {BOOKMAKERS.map(bm => (
+          <button
+            key={bm.id}
+            disabled={!bm.active}
+            onClick={() => bm.active && onSelect(bm.id)}
+            style={{
+              display:"flex", alignItems:"center", gap:14,
+              width:"100%", padding:"13px 18px",
+              background:"none", border:"none",
+              borderTop: `1px solid ${C.border}`,
+              cursor:   bm.active ? "pointer" : "not-allowed",
+              opacity:  bm.active ? 1 : 0.45,
+              textAlign:"left",
+            }}
+          >
+            {/* Icon badge */}
+            <div style={{
+              width:36, height:36, borderRadius:10,
+              background: bm.active ? (C.accentDim || C.accent + "22") : (C.border),
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:10, fontWeight:800, color: bm.active ? C.accent : C.muted,
+              letterSpacing:".04em", flexShrink:0,
+            }}>
+              {bm.icon}
+            </div>
+
+            {/* Name + sub */}
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:13, fontWeight:700, color: bm.active ? C.text : C.muted, letterSpacing:".01em" }}>
+                {bm.name}
+              </div>
+              {bm.sub && (
+                <div style={{ fontSize:10, color: C.amber || "#f5a623", marginTop:2 }}>
+                  {bm.sub}
+                </div>
+              )}
+            </div>
+
+            {/* Arrow (active only) */}
+            {bm.active && (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            )}
+          </button>
+        ))}
+
+        <div style={{ padding:"12px 18px 0", fontSize:10, color:C.muted }}>
+          More bookmakers coming soon.
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1796,24 +1861,19 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
 // Shows booking code + Copy Code + Copy Link. Compact, never wraps.
 
 function BookedRow({ C, code, platform }) {
-  const [codeCopied, setCodeCopied]   = useState(false);
-  const [linkCopied, setLinkCopied]   = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const bookingLink = platform === "LL"
-    ? `https://luckysledger.com/slip/${code}`
-    : `https://www.sportybet.com/betslip/share/?code=${code}`;
+    ? `https://luckysledger.com/sports?btBookingCode=${code}`
+    : `https://www.sportybet.com/ng/?shareCode=${code}`;
 
-  const copyCode = () => {
-    navigator.clipboard?.writeText(code).catch(() => {});
-    setCodeCopied(true);
-    setTimeout(() => setCodeCopied(false), 2000);
-  };
-
-  const copyLink = () => {
-    navigator.clipboard?.writeText(bookingLink).catch(() => {});
-    setLinkCopied(true);
-    setTimeout(() => setLinkCopied(false), 2000);
-  };
+  const doCopyCode = () => copyToClipboard(code,
+    () => { setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2000); }
+  );
+  const doCopyLink = () => copyToClipboard(bookingLink,
+    () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); }
+  );
 
   return (
     <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
@@ -1821,21 +1881,13 @@ function BookedRow({ C, code, platform }) {
       <span style={{ fontSize:11,color:"currentColor",fontWeight:700,letterSpacing:".06em",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
         {code}
       </span>
-      <button
-        className={`grm-mini-btn-copy${codeCopied ? " copied" : ""}`}
-        onClick={copyCode}
-      >
-        {/* Copy icon */}
+      <button className={`grm-mini-btn-copy${codeCopied ? " copied" : ""}`} onClick={doCopyCode}>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
         {codeCopied ? "Copied!" : "Code"}
       </button>
-      <button
-        className={`grm-mini-btn-copy${linkCopied ? " copied" : ""}`}
-        onClick={copyLink}
-      >
-        {/* Link icon */}
+      <button className={`grm-mini-btn-copy${linkCopied ? " copied" : ""}`} onClick={doCopyLink}>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
         </svg>
