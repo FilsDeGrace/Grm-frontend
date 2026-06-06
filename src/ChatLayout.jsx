@@ -1408,12 +1408,12 @@ function MessageContent({
         <div>
           <div style={{ ...textStyle, marginBottom: 8 }}>Here's what I can help with:</div>
           {[
-            ["🏗️", "Build a parley", "Say "build me a 5-leg BTTS parley" or just "build""],
+            ["🏗️", "Build a parley", 'Say "build me a 5-leg BTTS parley" or just "build"'],
             ["📋", "Today's fixtures", "Top games with model picks and confidence"],
             ["🔄", "Rollover status", "Your chain, today's pick, gate progress"],
             ["🔍", "Slip analysis", "Paste a booking code or link to analyse it"],
-            ["🔎", "Match analysis", "Say "Arsenal vs Chelsea" for a model breakdown"],
-            ["🧭", "Navigate", ""Go to engine picks" or "open custom list""],
+            ["🔎", "Match analysis", 'Say "Arsenal vs Chelsea" for a model breakdown'],
+            ["🧭", "Navigate", '"Go to engine picks" or "open custom list"'],
           ].map(([icon, title, desc]) => (
             <div key={title} style={{ display:"flex", gap:8, marginBottom:6 }}>
               <span style={{ fontSize:13 }}>{icon}</span>
