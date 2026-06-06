@@ -9653,6 +9653,18 @@ export default function GRMPro() {
 
   const engineFixtureIds = useMemo(() => new Set(enginePool.map(e => e.fixtureId)), [enginePool]);
 
+  // J1-FIX: These must live here (unconditional) — NOT inline in the jarvisOpen portal JSX.
+  // Calling useMemo() inside a conditional render violates Rules of Hooks and causes
+  // "Rendered more hooks than during the previous render" crash when the FAB is tapped.
+  const jarvisEngineFixtureIds = useMemo(
+    () => fixtures.filter(f => f.theRead?.anchor && !f.theRead?.isFallback).map(f => f.id),
+    [fixtures]
+  );
+  const jarvisCustomFixtureIds = useMemo(
+    () => fixtures.filter(f => f._custom).map(f => f.id),
+    [fixtures]
+  );
+
   const TABS = [
     { id:"all",    label:`All (${counts.total})` },
     { id:"engine", label:`The Engine (${enginePool.length})`, color:C.gold },
@@ -10443,8 +10455,8 @@ export default function GRMPro() {
           }}
           rolloverChain={rolloverChain}
           historicalRates={historicalRates}
-          engineFixtureIds={useMemo(() => fixtures.filter(f => f.theRead?.anchor && !f.theRead?.isFallback).map(f => f.id), [fixtures])}
-          customFixtureIds={useMemo(() => fixtures.filter(f => f._custom).map(f => f.id), [fixtures])}
+          engineFixtureIds={jarvisEngineFixtureIds}
+          customFixtureIds={jarvisCustomFixtureIds}
           onNavigatePro={handleJarvisNavigate}
           onBookNow={(ticket, bookmaker) => {
             setTickets(prev => {
