@@ -135,7 +135,9 @@ const LoaderIcon = ({ size = 14 }) => (
   </svg>
 );
 
-// ── MESSAGE FACTORY ──────────────────────────────────────────────────────────function genId() {
+// ── MESSAGE FACTORY ──────────────────────────────────────────────────────────
+
+function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
