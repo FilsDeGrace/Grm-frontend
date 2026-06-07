@@ -29,19 +29,22 @@ import React, {
   useState, useEffect, useRef, useCallback, useMemo,
 } from "react";
 
+import { SERVER } from "./config";
+
 import {
   INTENT, BUILD_STEP, MARKET_GROUPS, TOP_LEAGUES_RANK, TOP_COUNTRIES,
   SB_LINK_RE, LL_LINK_RE,
   classifyIntent,
   buildParley, legsFromTargetOdds,
   findFixture, getTopFixtures, filterFixturesByLeague, getLeagueCountries,
-  copyToClipboard, safeImpliedOdds, openBookingLink, makeDraftCode,
+  copyToClipboard, safeImpliedOdds,
 } from "./jarvisStore.js";
 
 // ── LOCAL CONSTANTS ───────────────────────────────────────────────────────────
 
 const CHAT_HISTORY_KEY  = "grm_chat_history";
 const BUILD_PREF_KEY    = "grm_chat_build_pref";
+const INPUT_DRAFT_KEY   = "grm_chat_input_draft";
 const TIP_PREFIX        = "grm_tip_";
 const MAX_RENDERED_MSGS = 30;
 
@@ -110,6 +113,12 @@ const TicketIcon = ({ size = 13 }) => (
 const XIcon = ({ size = 13 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+  </svg>
+);
+
+const TrashIcon = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
   </svg>
 );
 
@@ -207,10 +216,13 @@ export default function ChatLayout({
   onNavigatePro,
   onBookNow,
   defaultBookmaker = "SB",
+  geminiApiKey = null,        // passed from App but routed server-side; kept for future client use
 }) {
   // ── Message state
   const [messages, setMessages]         = useState(() => safeGet(CHAT_HISTORY_KEY, null));
-  const [input, setInput]               = useState("");
+  const [input, setInput] = useState(() => {
+    try { return sessionStorage.getItem(INPUT_DRAFT_KEY) || ""; } catch { return ""; }
+  });
   const [isTyping, setIsTyping]         = useState(false);
 
   // ── Build flow — session-level ref, not embedded in messages.
@@ -233,6 +245,9 @@ export default function ChatLayout({
   const messagesEndRef = useRef(null);
   const inputRef       = useRef(null);
 
+  // Gate: suspends chat until today's fixtures have been fetched at least once.
+  // If fetched but empty, chat is still enabled — Gemini can still answer
+  // natural questions; only build actions fail gracefully.
   const isGateOpen  = !fixturesLoaded;
   const chatEnabled = fixturesLoaded;
 
@@ -320,7 +335,7 @@ export default function ChatLayout({
     setIsTyping(false);
   }, []);
 
-  const getBuildPref = useCallback(() => safeLocalGet(BUILD_PREF_KEY, null), []);
+  // Build pref kept for future use but no longer auto-applies on generic prompts (CL7)
   const saveBuildPref = useCallback((mode) => safeLocalSet(BUILD_PREF_KEY, mode), []);
 
   // ── TIP ENGINE ──────────────────────────────────────────────────────────────
@@ -384,6 +399,7 @@ export default function ChatLayout({
       chain,
       pick,
       booked: chain.todayBooked || false,
+      totalFixtures: fixtures.length,
     }, [
       { label: "View Rollover", action: "NAV_ROLLOVER" },
     ]);
@@ -398,8 +414,18 @@ export default function ChatLayout({
   }
 
   function startBuildFlow(nlParams = null) {
-    // If NL params extracted (legs, market, targetOdds, league) — skip the
-    // entire flow and go straight to executeBuild.
+    // CL9: High-confidence simple request (e.g. "surest parlay") — skip all steps
+    if (nlParams?.autoJarvis) {
+      const flow = { step: BUILD_STEP.CONFIRM, mode: "jarvis", pool: "all", legs: 6, targetOdds: "auto", market: "theRead", leagues: null };
+      setBuildFlow(flow);
+      const loadingMsg = makeLoadingMsg();
+      addMsg(loadingMsg);
+      setActiveBuildMsgId(null);
+      executeBuild(flow, loadingMsg.id);
+      return;
+    }
+
+    // NL fast-path: legs/market/targetOdds extracted inline — skip flow
     if (nlParams && (nlParams.legs || nlParams.targetOdds || nlParams.market)) {
       const flow = {
         step:    BUILD_STEP.CONFIRM,
@@ -418,21 +444,12 @@ export default function ChatLayout({
       return;
     }
 
-    const pref = getBuildPref();
-    // Use saved pref to skip MODE step, but still ask POOL
-    const newFlow = pref
-      ? { step: BUILD_STEP.POOL, mode: pref, prefPopupVisible: true }
-      : { step: BUILD_STEP.MODE };
-
+    // CL7: Always show MODE step — no auto-preselect. User picks explicitly each time.
+    const newFlow = { step: BUILD_STEP.MODE };
     setBuildFlow(newFlow);
-
-    const msg = makeJarvisMsg({ type: pref ? "BUILD_POOL_SELECT" : "BUILD_MODE_SELECT" });
+    const msg = makeJarvisMsg({ type: "BUILD_MODE_SELECT" });
     addMsg(msg);
-    setActiveBuildMsgId(msg.id); // this message owns the active step UI
-
-    if (pref) {
-      setTimeout(() => setBuildFlow(prev => prev ? { ...prev, prefPopupVisible: false } : prev), 2500);
-    }
+    setActiveBuildMsgId(msg.id);
   }
 
   async function handleBuildParley(nlParams = null) {
@@ -460,7 +477,6 @@ export default function ChatLayout({
       withJarvis,
     }, [
       { label: "+ Add to parley", action: "ADD_LEG", fixture },
-      { label: "Open in Pro", action: "NAV_FULL_MODEL", fixture },
     ]);
     maybeShowTip("match_analysis_tip", "Tip: Add 'Jarvis research' to any match query and I'll check injuries and squad news.");
   }
@@ -532,10 +548,26 @@ export default function ChatLayout({
 
   async function handleNavigateCustom() {
     await simulateTyping(400);
-    addJarvisMsg({ type: "TEXT", text: "Opening Custom List…" }, [
+    addJarvisMsg({ type: "TEXT", text: "Opening Custom Strategy…" }, [
       { label: "Go to Custom", action: "NAV_CUSTOM" },
     ]);
     setTimeout(() => onNavigatePro?.({ layout: "pro", tab: "live", subTab: "custom" }), 800);
+  }
+
+  // CL6: Custom Strategy — show available strategy chips inline instead of just redirecting
+  async function handleNavigateCustomStrategy() {
+    await simulateTyping(400);
+    const savedStrategy = safeLocalGet("grm_saved_strategy", null);
+    addJarvisMsg({
+      type: "TEXT",
+      text: "Here are your strategy options. Pick one and I'll build from that pool:",
+    }, [
+      { label: "BTTS Strategy",       text: "Build me a parley using BTTS strategy"    },
+      { label: "Over 2.5 Strategy",   text: "Build me a parley using Over 2.5 strategy" },
+      { label: "Surest Games",        text: "Build me a parley using surest games"      },
+      ...(savedStrategy ? [{ label: `My Strategy: ${savedStrategy.label || "Custom"}`, text: "Build me a parley using my saved strategy" }] : []),
+      { label: "Open Custom Tab",     action: "NAV_CUSTOM" },
+    ]);
   }
 
   async function handleNavigateEngine() {
@@ -581,18 +613,34 @@ export default function ChatLayout({
   }
 
   async function handleUnknown(rawText) {
-    await simulateTyping(500);
-
+    // No simulateTyping here — loading bubble serves as the indicator
     const loadingMsg = makeLoadingMsg();
     addMsg(loadingMsg);
 
+    // Build last-6-turn history for Gemini context
+    const recentHistory = messages.slice(-6).map(m => ({
+      role: m.sender === "user" ? "user" : "jarvis",
+      text: typeof m.content === "string" ? m.content : m.content?.text || "",
+    })).filter(m => m.text);
+
+    // Top fixture context (conf + pick only — keep payload small)
+    const fixturePayload = (fixtures || []).slice(0, 12).map(f => ({
+      home: f.home || f.homeTeam || "",
+      away: f.away || f.awayTeam || "",
+      pick: f.modelPick || f.pick || "",
+      conf: f.confidence ?? f.conf ?? null,
+      odds: f.odds || null,
+    }));
+
     try {
-      const res = await fetch("/api/jarvis-chat", {
+      const res = await fetch(`${SERVER}/api/jarvis-chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          message: rawText,
-          date:    new Date().toISOString().slice(0, 10),
+          message:             rawText,
+          date:                new Date().toISOString().slice(0, 10),
+          fixtures:            fixturePayload,
+          conversationHistory: recentHistory,
         }),
       });
 
@@ -610,26 +658,13 @@ export default function ChatLayout({
           return;
         }
       }
-    } catch {
-      // Network/server error — fall through to default
+    } catch (err) {
+      console.error("[handleUnknown] network error:", err);
+      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+        { type: "TEXT", text: "Couldn't reach Jarvis right now — check your connection and try again." },
+        [{ label: "Try again", text: rawText }, { label: "Build a parley", text: "Build me a parley" }]
+      ));
     }
-
-    const chips = chatLastAction?.type === "PARLEY_BUILT"
-      ? [
-          { label: "Remix",         text: "Remix"                 },
-          { label: "Add more legs", text: "Add more legs"         },
-          { label: "New parley",    text: "Build me a new parley" },
-        ]
-      : [
-          { label: "Build a parley",   text: "Build me a parley"          },
-          { label: "Check fixtures",   text: "Today's fixtures"           },
-          { label: "My Rollover",      text: "What's my rollover status?" },
-        ];
-
-    replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
-      { type: "TEXT", text: "I'm not sure I got that. Here's what I can help with:" },
-      chips
-    ));
   }
 
   // ── BUILD FLOW HANDLERS ─────────────────────────────────────────────────────
@@ -696,14 +731,15 @@ export default function ChatLayout({
   }
 
   async function executeBuild(flow, existingLoadingId = null) {
-    // Use passed loadingMsgId (NL path) or create a new one (flow path)
     let loadingId = existingLoadingId;
     if (!loadingId) {
       const loadingMsg = makeLoadingMsg();
       addMsg(loadingMsg);
       loadingId = loadingMsg.id;
     }
-    await new Promise(r => setTimeout(r, 1200));
+
+    try {
+      await new Promise(r => setTimeout(r, 1200));
 
     const { mode, pool, legs, targetOdds, market, leagues } = flow;
 
@@ -763,6 +799,15 @@ export default function ChatLayout({
       if (next >= 3) maybeShowTip("remix_tip", "Tip: Say 'remix' to regenerate from the same pool without re-answering.");
       return next;
     });
+    } catch (err) {
+      console.error("[executeBuild] error:", err);
+      replaceLoadingMsg(loadingId, makeJarvisMsg(
+        { type: "TEXT", text: "Something went wrong building that parley. Try again or adjust your filters." },
+        [{ label: "Try again", text: "Build me a parley" }]
+      ));
+      setBuildFlow(null);
+      setActiveBuildMsgId(null);
+    }
   }
 
   // ── Remix / Add legs
@@ -831,6 +876,7 @@ export default function ChatLayout({
     if (isGateOpen) return;
 
     setInput("");
+    try { sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
     addMsg(makeUserMsg(raw));
     inputRef.current?.focus();
 
@@ -850,8 +896,9 @@ export default function ChatLayout({
       case INTENT.FIXTURES_TODAY:     handleFixturesToday(); break;
       case INTENT.FIXTURES_FILTERED:  handleFixturesFiltered(classified.league); break;
       case INTENT.CODE_ANALYZE:       handleCodeAnalyze(classified.platform, classified.code || raw); break;
-      case INTENT.NAVIGATE_CUSTOM:    handleNavigateCustom(); break;
-      case INTENT.NAVIGATE_ENGINE:    handleNavigateEngine(); break;
+      case INTENT.NAVIGATE_CUSTOM:          handleNavigateCustom(); break;
+      case INTENT.NAVIGATE_CUSTOM_STRATEGY: handleNavigateCustomStrategy(); break;
+      case INTENT.NAVIGATE_ENGINE:          handleNavigateEngine(); break;
       case INTENT.SAVED_PARLEYS:      handleSavedParleys(); break;
       case INTENT.STRATEGY:           handleStrategy(); break;
       default:                        handleUnknown(raw); break;
@@ -1071,6 +1118,29 @@ export default function ChatLayout({
             >
               <HelpIcon size={12} />
             </button>
+            {messages.length > 1 && (
+              <button
+                className="grm-help-btn"
+                style={S.helpBtn}
+                onClick={() => {
+                  if (window.confirm("Clear chat history?")) {
+                    setMessages([makeJarvisMsg({ type: "GREETING" }, GREETING_CHIPS)]);
+                    setInput("");
+                    setBuildFlow(null);
+                    setActiveBuildMsgId(null);
+                    setChatLastAction(null);
+                    try { 
+                      sessionStorage.removeItem(CHAT_HISTORY_KEY);
+                      sessionStorage.removeItem(INPUT_DRAFT_KEY);
+                    } catch {}
+                  }
+                }}
+                aria-label="Clear chat"
+                title="Clear chat"
+              >
+                <TrashIcon size={12} />
+              </button>
+            )}
             <button
               className="grm-close-btn"
               style={S.closeBtn}
@@ -1167,11 +1237,6 @@ export default function ChatLayout({
           </div>
         )}
 
-        {buildFlow?.prefPopupVisible && (
-          <div className="grm-pref-popup">
-            Building with: {buildFlow.mode === "jarvis" ? "Jarvis Parley" : "Custom Parley"} &nbsp;·&nbsp; Change in Settings
-          </div>
-        )}
 
       </div>
     </div>
@@ -1278,21 +1343,32 @@ function ChatTab({
           ref={inputRef}
           style={{ ...S.input, opacity: chatEnabled ? 1 : 0.45 }}
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={e => {
+            const v = e.target.value.slice(0, 800);
+            setInput(v);
+            try { sessionStorage.setItem(INPUT_DRAFT_KEY, v); } catch {}
+          }}
           onKeyDown={handleKey}
           placeholder={chatEnabled ? "Ask Jarvis anything…" : "Fetch fixtures to start…"}
           disabled={!chatEnabled}
           rows={1}
         />
-        <button
-          className="grm-send"
-          style={S.sendBtn}
-          onClick={() => onSend(input)}
-          disabled={!chatEnabled || !input.trim()}
-          aria-label="Send"
-        >
-          <SendIcon size={14} />
-        </button>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
+          {input.length > 400 && (
+            <span style={{ fontSize:9, color: input.length > 720 ? "#ef4444" : "#888", lineHeight:1 }}>
+              {800 - input.length}
+            </span>
+          )}
+          <button
+            className="grm-send"
+            style={S.sendBtn}
+            onClick={() => onSend(input)}
+            disabled={!chatEnabled || !input.trim()}
+            aria-label="Send"
+          >
+            <SendIcon size={14} />
+          </button>
+        </div>
       </div>
     </>
   );
@@ -1408,12 +1484,12 @@ function MessageContent({
         <div>
           <div style={{ ...textStyle, marginBottom: 8 }}>Here's what I can help with:</div>
           {[
-            ["🏗️", "Build a parley", 'Say "build me a 5-leg BTTS parley" or just "build"'],
+            ["🏗️", "Build a parley", "Say \"build me a 5-leg BTTS parley\" or just \"build\""],
             ["📋", "Today's fixtures", "Top games with model picks and confidence"],
             ["🔄", "Rollover status", "Your chain, today's pick, gate progress"],
             ["🔍", "Slip analysis", "Paste a booking code or link to analyse it"],
-            ["🔎", "Match analysis", 'Say "Arsenal vs Chelsea" for a model breakdown'],
-            ["🧭", "Navigate", '"Go to engine picks" or "open custom list"'],
+            ["🔎", "Match analysis", "Say \"Arsenal vs Chelsea\" for a model breakdown"],
+            ["🧭", "Custom Strategy", "\"Show my strategies\" or \"BTTS strategy parley\""],
           ].map(([icon, title, desc]) => (
             <div key={title} style={{ display:"flex", gap:8, marginBottom:6 }}>
               <span style={{ fontSize:13 }}>{icon}</span>
@@ -1483,7 +1559,7 @@ function MessageContent({
       return <TicketCard C={C} S={S} ticket={content.ticket} partial={content.partial} onBookNow={onBookNow} onNavigatePro={onNavigatePro} defaultBookmaker={defaultBookmaker} />;
 
     case "ROLLOVER_CARD":
-      return <RolloverCard C={C} S={S} chain={content.chain} pick={content.pick} booked={content.booked} />;
+      return <RolloverCard C={C} S={S} chain={content.chain} pick={content.pick} booked={content.booked} totalFixtures={content.totalFixtures || 0} onNavigatePro={onNavigatePro} />;
 
     case "MATCH_CARD":
       return <MatchCard C={C} S={S} fixture={content.fixture} withJarvis={content.withJarvis} onNavigatePro={onNavigatePro} />;
@@ -1629,27 +1705,10 @@ function LegsTargetWidget({ C, S, onSelect }) {
 }
 
 function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBookmaker }) {
-  const [bookState, setBookState]           = useState("idle");
-  const [bookedCode, setBookedCode]         = useState(null);
-  const [bookedPlatform, setBookedPlatform] = useState(null);
-  const [bmSheetOpen, setBmSheetOpen]       = useState(false);
-
   if (!ticket) return null;
   const legs     = ticket.legs || [];
   const showLegs = legs.slice(0, 3);
   const extra    = legs.length - showLegs.length;
-
-  function handleBookSelect(bm) {
-    setBmSheetOpen(false);
-    // Draft code until real bookmaker API is integrated
-    const code = makeDraftCode(bm);
-    setBookedCode(code);
-    setBookedPlatform(bm);
-    setBookState("booked");
-    onBookNow?.(ticket, bm);
-    // Open the share link immediately so user can complete booking on bookmaker side
-    openBookingLink(code, bm);
-  }
 
   return (
     <div style={S.miniCard}>
@@ -1704,206 +1763,36 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         ) : null;
       })()}
 
-      {/* Actions */}
-      {bookState === "idle" && (
-        <div style={{ display:"flex",gap:6 }}>
-          <button
-            className="grm-mini-btn-primary"
-            style={{ flex:1,padding:"7px 0",fontSize:10 }}
-            onClick={() => setBmSheetOpen(true)}
-          >
-            Book Now
-          </button>
-          <button
-            className="grm-mini-btn"
-            style={{ flex:1,padding:"7px 0",fontSize:10 }}
-            onClick={() => onNavigatePro?.({ layout:"pro",tab:"parley",ticket })}
-          >
-            View Full
-          </button>
-        </div>
-      )}
-
-      {bookState === "booked" && bookedCode && (
-        <BookedRow C={C} code={bookedCode} platform={bookedPlatform} />
-      )}
-
-      {/* Bookmaker slide-up sheet */}
-      {bmSheetOpen && (
-        <BookmakerSheet
-          C={C}
-          onSelect={handleBookSelect}
-          onClose={() => setBmSheetOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── BOOKMAKER SHEET ───────────────────────────────────────────────────────────
-// Slide-up selector. LL shown but disabled — experiencing downtime.
-// More bookmakers will be added here as they are integrated.
-
-const BOOKMAKERS = [
-  {
-    id:      "SB",
-    name:    "SportyBet",
-    active:  true,
-    sub:     null,
-    icon:    "SB",
-  },
-  {
-    id:      "LL",
-    name:    "Lucky's Ledger",
-    active:  false,
-    sub:     "Experiencing downtime",
-    icon:    "LL",
-  },
-];
-
-function BookmakerSheet({ C, onSelect, onClose }) {
-  return (
-    <>
-      {/* Scrim */}
-      <div
-        onClick={onClose}
-        style={{
-          position:"fixed", inset:0, zIndex:3000,
-          background:"rgba(0,0,0,0.45)",
-        }}
-      />
-      {/* Sheet */}
-      <div style={{
-        position:"fixed", left:0, right:0, bottom:0, zIndex:3001,
-        background: C.surface2 || C.surface || "#1a1a1a",
-        borderRadius:"16px 16px 0 0",
-        padding:"0 0 calc(env(safe-area-inset-bottom) + 16px) 0",
-        boxShadow:"0 -4px 32px rgba(0,0,0,0.5)",
-      }}>
-        {/* Handle */}
-        <div style={{ display:"flex",justifyContent:"center",padding:"10px 0 4px" }}>
-          <div style={{ width:36,height:4,borderRadius:2,background:C.border }} />
-        </div>
-
-        {/* Header */}
-        <div style={{
-          display:"flex",alignItems:"center",justifyContent:"space-between",
-          padding:"8px 18px 12px",
-        }}>
-          <span style={{ fontSize:11,fontWeight:800,letterSpacing:".12em",textTransform:"uppercase",color:C.text }}>
-            Select Bookmaker
-          </span>
-          <button
-            onClick={onClose}
-            style={{ background:"none",border:"none",color:C.muted,padding:4,cursor:"pointer",lineHeight:1 }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-
-        {/* Bookmaker rows */}
-        {BOOKMAKERS.map(bm => (
-          <button
-            key={bm.id}
-            disabled={!bm.active}
-            onClick={() => bm.active && onSelect(bm.id)}
-            style={{
-              display:"flex", alignItems:"center", gap:14,
-              width:"100%", padding:"13px 18px",
-              background:"none", border:"none",
-              borderTop: `1px solid ${C.border}`,
-              cursor:   bm.active ? "pointer" : "not-allowed",
-              opacity:  bm.active ? 1 : 0.45,
-              textAlign:"left",
-            }}
-          >
-            {/* Icon badge */}
-            <div style={{
-              width:36, height:36, borderRadius:10,
-              background: bm.active ? (C.accentDim || C.accent + "22") : (C.border),
-              display:"flex", alignItems:"center", justifyContent:"center",
-              fontSize:10, fontWeight:800, color: bm.active ? C.accent : C.muted,
-              letterSpacing:".04em", flexShrink:0,
-            }}>
-              {bm.icon}
-            </div>
-
-            {/* Name + sub */}
-            <div style={{ flex:1, minWidth:0 }}>
-              <div style={{ fontSize:13, fontWeight:700, color: bm.active ? C.text : C.muted, letterSpacing:".01em" }}>
-                {bm.name}
-              </div>
-              {bm.sub && (
-                <div style={{ fontSize:10, color: C.amber || "#f5a623", marginTop:2 }}>
-                  {bm.sub}
-                </div>
-              )}
-            </div>
-
-            {/* Arrow (active only) */}
-            {bm.active && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="9 18 15 12 9 6"/>
-              </svg>
-            )}
-          </button>
-        ))}
-
-        <div style={{ padding:"12px 18px 0", fontSize:10, color:C.muted }}>
-          More bookmakers coming soon.
-        </div>
+      {/* Actions — booking handled by App's TicketBookNowButton in Saved tab */}
+      <div style={{ display:"flex", gap:6 }}>
+        <button
+          className="grm-mini-btn-primary"
+          style={{ flex:1, padding:"7px 0", fontSize:10 }}
+          onClick={() => {
+            onBookNow?.(ticket, null); // save to tickets
+            onNavigatePro?.({ tab:"saved", ticketId: ticket.id });
+          }}
+        >
+          Book Now
+        </button>
+        <button
+          className="grm-mini-btn"
+          style={{ flex:1, padding:"7px 0", fontSize:10 }}
+          onClick={() => onNavigatePro?.({ layout:"pro", tab:"parley", ticket })}
+        >
+          View Full
+        </button>
       </div>
-    </>
-  );
-}
-
-// ── BOOKED ROW ────────────────────────────────────────────────────────────────
-// Shows booking code + Copy Code + Copy Link. Compact, never wraps.
-
-function BookedRow({ C, code, platform }) {
-  const [codeCopied, setCodeCopied] = useState(false);
-  const [linkCopied, setLinkCopied] = useState(false);
-
-  const bookingLink = platform === "LL"
-    ? `https://luckysledger.com/sports?btBookingCode=${code}`
-    : `https://www.sportybet.com/ng/?shareCode=${code}`;
-
-  const doCopyCode = () => copyToClipboard(code,
-    () => { setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2000); }
-  );
-  const doCopyLink = () => copyToClipboard(bookingLink,
-    () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2000); }
-  );
-
-  return (
-    <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-      <span className="grm-booked-badge">BOOKED</span>
-      <span style={{ fontSize:11,color:"currentColor",fontWeight:700,letterSpacing:".06em",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-        {code}
-      </span>
-      <button className={`grm-mini-btn-copy${codeCopied ? " copied" : ""}`} onClick={doCopyCode}>
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        {codeCopied ? "Copied!" : "Code"}
-      </button>
-      <button className={`grm-mini-btn-copy${linkCopied ? " copied" : ""}`} onClick={doCopyLink}>
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-        </svg>
-        {linkCopied ? "Copied!" : "Link"}
-      </button>
     </div>
   );
 }
 
-function RolloverCard({ C, S, chain, pick, booked }) {
+function RolloverCard({ C, S, chain, pick, booked, totalFixtures, onNavigatePro }) {
   if (!chain || !pick) return null;
   const step   = chain.step || chain.currentStep || 1;
   const target = chain.target || chain.maxSteps || 10;
   const pot    = chain.pot || chain.amount || 0;
+  const legs   = pick.legs || [];
 
   return (
     <div style={S.miniCard}>
@@ -1919,8 +1808,7 @@ function RolloverCard({ C, S, chain, pick, booked }) {
       )}
       <div style={{ borderTop:`1px solid ${C.border}`,paddingTop:8,marginBottom:8 }}>
         <div style={{ fontSize:9,color:C.muted,letterSpacing:".09em",textTransform:"uppercase",marginBottom:4 }}>Today's Pick</div>
-        {/* Multi-leg support */}
-        {pick.legs ? pick.legs.map((leg, i) => (
+        {legs.length > 0 ? legs.map((leg, i) => (
           <div key={i} style={{ marginBottom:4 }}>
             <div style={{ fontSize:12,color:C.text,fontWeight:700 }}>{leg.game}</div>
             <div style={{ display:"flex",gap:6,marginTop:2 }}>
@@ -1943,9 +1831,18 @@ function RolloverCard({ C, S, chain, pick, booked }) {
       {booked
         ? <span className="grm-booked-badge">Booked</span>
         : <div style={{ display:"flex",gap:6 }}>
-            <button className="grm-mini-btn-primary" style={{ flex:1,padding:"6px 0",fontSize:10 }}>Book Now</button>
+            <button className="grm-mini-btn-primary" style={{ flex:1,padding:"6px 0",fontSize:10 }}
+              onClick={() => onNavigatePro?.({ tab:"rollover" })}>
+              Book in Rollover
+            </button>
           </div>
       }
+      {/* CL3: X more games available hint */}
+      {totalFixtures > 0 && (
+        <div style={{ fontSize:9,color:C.muted,marginTop:8,lineHeight:1.4 }}>
+          {totalFixtures} games available today — check Live Model for more picks.
+        </div>
+      )}
     </div>
   );
 }
@@ -2132,7 +2029,7 @@ function HelpSheet({ C, onClose }) {
     { title: "MATCH",    items: ['"Analysis of Arsenal vs Chelsea"', '"Jarvis research Real vs Barca"'] },
     { title: "ROLLOVER", items: ['"What\'s today\'s rollover?"', '"My rollover analytics"'] },
     { title: "SLIP ANALYSIS", items: ["Paste any SB or LL code or link"] },
-    { title: "NAVIGATE", items: ['"Go to Custom"', '"Engine picks"', '"My saved strategy"'] },
+    { title: "NAVIGATE", items: ['"Go to Engine picks"', '"Show my strategies"', '"BTTS strategy parley"'] },
   ];
 
   return (

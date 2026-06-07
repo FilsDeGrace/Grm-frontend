@@ -1430,10 +1430,10 @@ function HistoryTab({ C, onReanalyze }) {
 //  MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFullModel }) {
+export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFullModel, initialCode = null, initialPlatform = null, autoAnalyze = false, onPayloadConsumed }) {
   const [subTab, setSubTab]         = useState("analyzer");
-  const [platform, setPlatform]     = useState("sb");
-  const [rawInput, setRawInput]     = useState("");
+  const [platform, setPlatform]     = useState(initialPlatform ? initialPlatform.toLowerCase() : "sb");
+  const [rawInput, setRawInput]     = useState(initialCode || "");
   const [stepsDone, setStepsDone]   = useState(0);
   const [activeStep, setActiveStep] = useState(0);
   const CA_RESULT_KEY  = "grm_ca_last_result_v1";
@@ -1488,6 +1488,18 @@ export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFu
 
   // Clear error when platform changes
   useEffect(() => { if (phase === "error") setPhase("idle"); }, [platform]);
+
+  // CL1: Auto-trigger analysis when Jarvis navigates here with a code payload
+  const autoAnalyzeRef = useRef(false);
+  useEffect(() => {
+    if (autoAnalyze && initialCode && !autoAnalyzeRef.current) {
+      autoAnalyzeRef.current = true;
+      onPayloadConsumed?.();
+      // Small delay so component fully mounts before firing
+      const t = setTimeout(() => analyze(initialPlatform?.toLowerCase() || null, initialCode), 300);
+      return () => clearTimeout(t);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const analyze = useCallback(async (overridePlatform, overrideCode) => {
     const parsed = parseInput(overrideCode || rawInput);

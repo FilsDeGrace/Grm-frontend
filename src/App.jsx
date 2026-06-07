@@ -8826,40 +8826,53 @@ const JARVIS_FAB_KEY = "grm_jarvis_fab_pos";
 
 function JarvisFAB({ C, isDesktop, onClick }) {
   const SIZE = 52;
-  const NAV_H = 76; // bottom nav + safe area clearance
+  const NAV_H = 76;
 
   const loadPos = () => {
     try {
       const saved = JSON.parse(localStorage.getItem(JARVIS_FAB_KEY) || "null");
       if (saved && typeof saved.x === "number" && typeof saved.y === "number") return saved;
     } catch {}
-    // Default: bottom-right, above nav
-    return {
-      x: window.innerWidth - SIZE - 16,
-      y: window.innerHeight - SIZE - NAV_H - 16,
-    };
+    return { x: window.innerWidth - SIZE - 16, y: window.innerHeight - SIZE - NAV_H - 16 };
   };
 
-  const [pos, setPos]       = useState(loadPos);
+  const [pos, setPos]           = useState(loadPos);
   const [dragging, setDragging] = useState(false);
-  const dragRef  = useRef(null); // { startX, startY, origX, origY, moved }
-  const btnRef   = useRef(null);
+  const [shaking, setShaking]   = useState(false);
+  const [tipVisible, setTipVisible] = useState(false);
+  const dragRef = useRef(null);
+  const btnRef  = useRef(null);
+  const shakeTimer  = useRef(null);
+  const tipTimer    = useRef(null);
 
-  // Clamp position within viewport with margin
+  // Shake + show tip every 30s while FAB is idle (not dragging, chat closed)
+  useEffect(() => {
+    const schedule = () => {
+      shakeTimer.current = setTimeout(() => {
+        setShaking(true);
+        setTipVisible(true);
+        setTimeout(() => setShaking(false), 600);
+        tipTimer.current = setTimeout(() => setTipVisible(false), 3500);
+        schedule();
+      }, 30000);
+    };
+    schedule();
+    return () => {
+      clearTimeout(shakeTimer.current);
+      clearTimeout(tipTimer.current);
+    };
+  }, []);
+
   const clamp = (x, y) => {
     const maxX = (window.innerWidth  || 375) - SIZE - 8;
     const maxY = (window.innerHeight || 812) - SIZE - (isDesktop ? 8 : NAV_H + 8);
-    return {
-      x: Math.max(8, Math.min(x, maxX)),
-      y: Math.max(8, Math.min(y, maxY)),
-    };
+    return { x: Math.max(8, Math.min(x, maxX)), y: Math.max(8, Math.min(y, maxY)) };
   };
 
   const savePos = (p) => {
     try { localStorage.setItem(JARVIS_FAB_KEY, JSON.stringify(p)); } catch {}
   };
 
-  // Edge-snap: after drag ends, snap to left or right edge maintaining Y
   const snapToEdge = (x, y) => {
     const midX = (window.innerWidth || 375) / 2;
     const snappedX = x < midX ? 16 : (window.innerWidth || 375) - SIZE - 16;
@@ -8867,38 +8880,31 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   };
 
   const onPointerDown = (e) => {
-    // Don't intercept right-click
     if (e.button === 2) return;
-    e.preventDefault();
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      origX:  pos.x,
-      origY:  pos.y,
-      moved:  false,
-    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y, moved: false };
     setDragging(true);
+    setTipVisible(false);
+  };
 
-    const onMove = (ev) => {
-      const dx = ev.clientX - dragRef.current.startX;
-      const dy = ev.clientY - dragRef.current.startY;
-      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) dragRef.current.moved = true;
-      const next = clamp(dragRef.current.origX + dx, dragRef.current.origY + dy);
-      // Track final position in ref so onUp doesn't read stale closure
-      dragRef.current.lastX = next.x;
-      dragRef.current.lastY = next.y;
-      setPos(next);
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragRef.current.moved = true;
+      const clamped = clamp(dragRef.current.origX + dx, dragRef.current.origY + dy);
+      dragRef.current.lastX = clamped.x;
+      dragRef.current.lastY = clamped.y;
+      btnRef.current.style.left = clamped.x + "px";
+      btnRef.current.style.top  = clamped.y + "px";
     };
-
-    const onUp = (ev) => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+    const onUp = (e) => {
       setDragging(false);
-      if (!dragRef.current.moved) {
-        // Pure tap — fire onClick
+      if (!dragRef.current?.moved) {
         onClick?.();
       } else {
-        // Read final position from ref — not from closed-over pos (which is stale)
         const finalX  = dragRef.current.lastX ?? dragRef.current.origX;
         const finalY  = dragRef.current.lastY ?? dragRef.current.origY;
         const snapped = snapToEdge(finalX, finalY);
@@ -8906,12 +8912,14 @@ function JarvisFAB({ C, isDesktop, onClick }) {
         savePos(snapped);
       }
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup",   onUp);
-  };
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup",   onUp);
+    };
+  }, [dragging]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync snap on window resize
   useEffect(() => {
     const onResize = () => {
       setPos(p => {
@@ -8925,43 +8933,86 @@ function JarvisFAB({ C, isDesktop, onClick }) {
     return () => window.removeEventListener("resize", onResize);
   }, [isDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Determine tooltip position (flip left if FAB is on right edge)
+  const isRightEdge = pos.x > (window.innerWidth || 375) / 2;
+
   return (
-    <button
-      ref={btnRef}
-      onPointerDown={onPointerDown}
-      aria-label="Open Jarvis"
-      style={{
-        position: "fixed",
-        left: pos.x,
-        top:  pos.y,
-        zIndex: 500,
-        width: SIZE, height: SIZE,
-        borderRadius: "50%",
-        background: `${C.surface}f0`,
-        border: `1.5px solid ${C.accent}55`,
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        boxShadow: dragging
-          ? `0 0 0 6px ${C.accent}30, 0 8px 32px rgba(0,0,0,0.45)`
-          : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
-        color: C.accent,
-        cursor: dragging ? "grabbing" : "grab",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        transition: dragging ? "box-shadow .1s" : "box-shadow .2s, transform .2s",
-        transform: dragging ? "scale(1.08)" : "scale(1)",
-        WebkitTapHighlightColor: "transparent",
-        touchAction: "none", // prevents scroll hijack on touch
-        userSelect: "none",
-      }}
-    >
-      {/* Spark / AI chat icon */}
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
-        <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
-        <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
-      </svg>
-    </button>
+    <div style={{ position:"fixed", left: pos.x, top: pos.y, zIndex: 500, userSelect:"none" }}>
+      {/* Co-pilot tooltip */}
+      {tipVisible && !dragging && (
+        <div style={{
+          position: "absolute",
+          bottom: SIZE + 8,
+          [isRightEdge ? "right" : "left"]: 0,
+          background: C.surface,
+          border: `1px solid ${C.accent}40`,
+          borderRadius: 10,
+          padding: "7px 11px",
+          fontSize: 11,
+          color: C.text,
+          whiteSpace: "nowrap",
+          boxShadow: `0 4px 16px rgba(0,0,0,0.25)`,
+          pointerEvents: "none",
+          animation: "grm-fade-in .2s ease",
+        }}>
+          ⚡ I'm your co-pilot
+          <div style={{
+            position:"absolute", bottom:-5,
+            [isRightEdge ? "right" : "left"]: 18,
+            width:10, height:10,
+            background: C.surface,
+            border: `1px solid ${C.accent}40`,
+            borderTop:"none", borderLeft:"none",
+            transform:"rotate(45deg)",
+            borderRadius:2,
+          }}/>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes grm-fab-shake {
+          0%,100%{transform:rotate(0deg) scale(1)}
+          15%{transform:rotate(-12deg) scale(1.05)}
+          30%{transform:rotate(10deg) scale(1.05)}
+          45%{transform:rotate(-8deg)}
+          60%{transform:rotate(6deg)}
+          75%{transform:rotate(-3deg)}
+        }
+        @keyframes grm-fade-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+      `}</style>
+
+      <button
+        ref={btnRef}
+        onPointerDown={onPointerDown}
+        aria-label="Open Jarvis"
+        style={{
+          width: SIZE, height: SIZE,
+          borderRadius: "50%",
+          background: `${C.surface}f0`,
+          border: `1.5px solid ${C.accent}55`,
+          backdropFilter: "blur(14px)",
+          WebkitBackdropFilter: "blur(14px)",
+          boxShadow: dragging
+            ? `0 0 0 6px ${C.accent}30, 0 8px 32px rgba(0,0,0,0.45)`
+            : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
+          color: C.accent,
+          cursor: dragging ? "grabbing" : "grab",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          transition: dragging ? "box-shadow .1s" : "box-shadow .2s, transform .2s",
+          transform: dragging ? "scale(1.08)" : "scale(1)",
+          animation: shaking ? "grm-fab-shake .6s ease" : "none",
+          WebkitTapHighlightColor: "transparent",
+          touchAction: "none",
+        }}
+      >
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
+          <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
+          <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+    </div>
   );
 }
 
@@ -9033,6 +9084,9 @@ export default function GRMPro() {
   // The bolt FAB is always visible so the user can open Jarvis from any Pro screen.
   const [jarvisOpen, setJarvisOpen] = useState(false);
 
+  // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
+  const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
+
   // rolloverChain — lifted from RolloverSystem via onChainChange callback.
   // This is the REAL chain object Jarvis reads. Never hardcoded null.
   const [rolloverChain, setRolloverChain] = useState(null);
@@ -9063,6 +9117,17 @@ export default function GRMPro() {
     if (navTab === "code") {
       setMainView("main");
       setActiveTab("code");
+      // CL1: store code payload so CodeAnalyzer can auto-trigger analysis
+      if (code || platform) {
+        setJarvisCodePayload({ code: code || null, platform: platform || null, autoAnalyze: !!autoAnalyze });
+      }
+      setParlayJarvisOpen(false);
+      if (!keepOpen) setJarvisOpen(false);
+      return;
+    }
+    if (navTab === "saved") {
+      setMainView("main");
+      setActiveTab("parley"); // Saved tickets live inside the parley tab
       setParlayJarvisOpen(false);
       if (!keepOpen) setJarvisOpen(false);
       return;
@@ -9988,6 +10053,10 @@ export default function GRMPro() {
       {activeTab === "code" && mainView === "main" && (
         <div style={{ padding:"16px 14px" }}>
           <CodeAnalyzer theme={theme} SERVER={SERVER}
+            initialCode={jarvisCodePayload?.code || null}
+            initialPlatform={jarvisCodePayload?.platform || null}
+            autoAnalyze={jarvisCodePayload?.autoAnalyze || false}
+            onPayloadConsumed={() => setJarvisCodePayload(null)}
             onOpenFullModel={(fixture) => {
               setMainFocusFixture(fixture);
               setFullModelReturnTab("code");

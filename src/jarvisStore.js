@@ -26,8 +26,9 @@ export const INTENT = {
   FIXTURES_TODAY:     "FIXTURES_TODAY",
   FIXTURES_FILTERED:  "FIXTURES_FILTERED",
   CODE_ANALYZE:       "CODE_ANALYZE",
-  NAVIGATE_CUSTOM:    "NAVIGATE_CUSTOM",
-  NAVIGATE_ENGINE:    "NAVIGATE_ENGINE",
+  NAVIGATE_CUSTOM:          "NAVIGATE_CUSTOM",
+  NAVIGATE_CUSTOM_STRATEGY: "NAVIGATE_CUSTOM_STRATEGY",
+  NAVIGATE_ENGINE:          "NAVIGATE_ENGINE",
   SAVED_PARLEYS:      "SAVED_PARLEYS",
   STRATEGY:           "STRATEGY",
   UNKNOWN:            "UNKNOWN",
@@ -176,8 +177,9 @@ export function classifyIntent(text) {
   if (codeMatch) return { intent: INTENT.CODE_ANALYZE, code: codeMatch[1], raw: text };
 
   // ── Navigation ───────────────────────────────────────────────────────────
-  if (/go to custom|custom tab|custom list|open custom/i.test(t))   return { intent: INTENT.NAVIGATE_CUSTOM };
-  if (/engine picks|go to engine|engine tab|open engine/i.test(t))  return { intent: INTENT.NAVIGATE_ENGINE };
+  if (/go to custom|custom tab|custom list|open custom/i.test(t))         return { intent: INTENT.NAVIGATE_CUSTOM };
+  if (/custom strategy|my strategies|use strategy|btts strategy|show strategies/i.test(t)) return { intent: INTENT.NAVIGATE_CUSTOM_STRATEGY };
+  if (/engine picks|go to engine|engine tab|open engine/i.test(t))        return { intent: INTENT.NAVIGATE_ENGINE };
 
   // ── Rollover ─────────────────────────────────────────────────────────────
   if (/analytics|rollover stats|rollover history|my performance|rollover chart/i.test(t)) return { intent: INTENT.ROLLOVER_ANALYTICS };
@@ -186,6 +188,15 @@ export function classifyIntent(text) {
   // ── Strategy / saved ─────────────────────────────────────────────────────
   if (/my saved strategy|use strategy|saved filter|apply strategy/i.test(t)) return { intent: INTENT.STRATEGY };
   if (/my parleys|saved parleys|show tickets|parley \d|ticket \d/i.test(t))  return { intent: INTENT.SAVED_PARLEYS };
+
+  // ── CL9: High-confidence simple requests — skip the flow entirely ───────────
+  // "surest parlay", "safest ticket", "give me your best picks", etc.
+  // These have clear intent: Jarvis picks, all fixtures, auto legs. No questions needed.
+  if (/\b(surest|safest|best|strongest|most confident|sure)\b.*(parlay|ticket|picks?|slip|bet)/i.test(t) ||
+      /\b(give me|build me|make me).*(surest|safest|best|sure).*(parlay|ticket|picks?)/i.test(t) ||
+      /\b(quick|fast|just build|just make).*(parlay|ticket|slip)/i.test(t)) {
+    return { intent: INTENT.BUILD_PARLEY, autoJarvis: true };
+  }
 
   // ── NL build patterns (one-shot: "8 odds ticket", "5 leg BTTS parley") ──
   // Parse inline legs and/or market from the message so Jarvis can build
@@ -205,14 +216,27 @@ export function classifyIntent(text) {
   if (/fixtures|games today|what.s on/i.test(t)) return { intent: INTENT.FIXTURES_TODAY };
 
   // ── Match analysis ────────────────────────────────────────────────────────
-  const matchVs = t.match(/(?:analysis of |analyse |analyze |model pick for |what.s.+pick for |how will )?(.+?)\s+(?:vs|versus|against|v\.?)\s+(.+?)(?:\??$| —)/i);
+  // Strip opinion/question prefixes first so "what do you think of X vs Y"
+  // extracts clean team names rather than contaminating `home`.
+  const strippedForMatch = t
+    .replace(/^(what do you think of|thoughts on|opinion on|tell me about|how about|analyse|analyze|analysis of|model pick for|how will|what.s.+pick for)\s+/i, "");
+  const matchVs = strippedForMatch.match(/^(.+?)\s+(?:vs\.?|versus|against|v\.?)\s+(.+?)(?:\??$| —)/i);
   if (matchVs) {
     const needsJarvis = /jarvis|research|injuries|squad news|news/i.test(t);
     return {
       intent: needsJarvis ? INTENT.JARVIS_ANALYSIS : INTENT.MATCH_ANALYSIS,
       home: matchVs[1].trim(),
       away: matchVs[2].trim(),
+      naturalQuery: t, // pass original for Gemini context
     };
+  }
+
+  // ── CL10: Natural football/betting questions — route to Gemini via UNKNOWN ─
+  // Broad natural language that doesn't fit a hardcoded pattern but is clearly
+  // football or betting related. Don't intercept — let Gemini handle them.
+  // (Returning UNKNOWN here is intentional — handleUnknown calls /api/jarvis-chat)
+  if (/\b(form|in form|good bet|safe bet|banker|confident|btts|over|under|goals|clean sheet|both teams|first half|anytime|goalscorer|draw|upset|favourite|underdog|injury|injuries|lineup|squad|suspended|missing|ban|red card)\b/i.test(t)) {
+    return { intent: INTENT.UNKNOWN };
   }
 
   return { intent: INTENT.UNKNOWN };
