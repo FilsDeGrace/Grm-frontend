@@ -8955,7 +8955,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           pointerEvents: "none",
           animation: "grm-fade-in .2s ease",
         }}>
-          ⚡ I'm your co-pilot
+          🌚 I'm your co-pilot
           <div style={{
             position:"absolute", bottom:-5,
             [isRightEdge ? "right" : "left"]: 18,
