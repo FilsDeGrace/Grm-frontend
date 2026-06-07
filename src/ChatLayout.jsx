@@ -42,6 +42,7 @@ import {
 
 // ── LOCAL CONSTANTS ───────────────────────────────────────────────────────────
 
+const CHAT_DATE_KEY     = "grm_chat_date";
 const CHAT_HISTORY_KEY  = "grm_chat_history";
 const BUILD_PREF_KEY    = "grm_chat_build_pref";
 const INPUT_DRAFT_KEY   = "grm_chat_input_draft";
@@ -252,18 +253,32 @@ export default function ChatLayout({
   const chatEnabled = fixturesLoaded;
 
   // ── Init messages from sessionStorage on mount
+  // Auto-clear if stored chat is from a previous calendar day
   useEffect(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const storedDate = (() => { try { return sessionStorage.getItem(CHAT_DATE_KEY); } catch { return null; } })();
+    if (storedDate && storedDate !== today) {
+      // New day — wipe history so Jarvis starts fresh
+      try { sessionStorage.removeItem(CHAT_HISTORY_KEY); sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
+      try { sessionStorage.setItem(CHAT_DATE_KEY, today); } catch {}
+      setMessages([]);
+      return;
+    }
+    if (!storedDate) {
+      try { sessionStorage.setItem(CHAT_DATE_KEY, today); } catch {}
+    }
     if (messages === null) {
       // Truly first open — show welcome on next render cycle
       setMessages([]);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Persist messages on change (last 30)
+  // ── Persist messages on change (last 30) + stamp date for next-day auto-clear
   useEffect(() => {
     if (messages === null) return;
     const toStore = messages.slice(-MAX_RENDERED_MSGS);
     safeSet(CHAT_HISTORY_KEY, toStore);
+    try { sessionStorage.setItem(CHAT_DATE_KEY, new Date().toISOString().slice(0, 10)); } catch {}
   }, [messages]);
 
   // ── Body scroll lock — prevents Live Model list scrolling behind Jarvis panel
@@ -295,9 +310,8 @@ export default function ChatLayout({
     // Show welcome
     const welcome = makeJarvisMsg({ type: "WELCOME" }, [
       { label: "Build me a parley", text: "Build me a parley" },
-      { label: "Today's fixtures",  text: "Today's fixtures"  },
-      { label: "Check my Rollover", text: "Check my Rollover" },
       { label: "Analyse a slip",    text: "Analyse a slip"    },
+      { label: "Check my Rollover", text: "Check my Rollover" },
     ]);
     setMessages([welcome]);
   }, [fixturesLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -360,7 +374,7 @@ export default function ChatLayout({
       : "Hey! What can I help you with today?";
     addJarvisMsg({ type: "TEXT", text }, [
       { label: "Build a parley",   text: "Build me a parley"          },
-      { label: "Today's fixtures", text: "Today's fixtures"           },
+      { label: "Analyse a slip",   text: "Analyse a slip"             },
       { label: "My Rollover",      text: "Check my Rollover"          },
     ]);
   }
@@ -369,9 +383,8 @@ export default function ChatLayout({
     await simulateTyping(400);
     addJarvisMsg({ type: "HELP_CARD" }, [
       { label: "Build a parley",   text: "Build me a parley"          },
-      { label: "Today's fixtures", text: "Today's fixtures"           },
-      { label: "My Rollover",      text: "Check my Rollover"          },
       { label: "Analyse a slip",   text: "Analyse a slip"             },
+      { label: "My Rollover",      text: "Check my Rollover"          },
     ]);
   }
 
@@ -414,6 +427,11 @@ export default function ChatLayout({
   }
 
   function startBuildFlow(nlParams = null) {
+    // Always purge stale build-step messages from previous flows before starting.
+    // This prevents "Build mode selected." / "Fixture pool selected." echo noise.
+    const BUILD_STEP_TYPES = new Set(["BUILD_MODE_SELECT", "BUILD_POOL_SELECT", "BUILD_LEGS_TARGET_SELECT"]);
+    setMessages(prev => (prev || []).filter(m => !BUILD_STEP_TYPES.has(m?.content?.type)));
+
     // CL9: High-confidence simple request (e.g. "surest parlay") — skip all steps
     if (nlParams?.autoJarvis) {
       const flow = { step: BUILD_STEP.CONFIRM, mode: "jarvis", pool: "all", legs: 6, targetOdds: "auto", market: "theRead", leagues: null };
@@ -531,19 +549,36 @@ export default function ChatLayout({
     addJarvisMsg({ type: "FIXTURES_CARD", fixtures: fx.slice(0, 10), label: leagueName });
   }
 
-  async function handleCodeAnalyze(platform, code) {
+  async function handleCodeAnalyze(platform, codeOrRaw) {
     await simulateTyping(500);
+
+    // Extract a clean code from the raw input if possible
+    const code = (codeOrRaw || "").trim().match(/\b([A-Za-z0-9]{4,12})\b/g)
+      ?.find(c => /[0-9]/.test(c)) || null;
+
+    // No code at all — user just said "analyze slip" with no code
+    if (!code && !platform) {
+      addJarvisMsg({
+        type: "TEXT",
+        text: "Paste your SportyBet booking code or slip link and I'll open it in Code Analyzer.",
+      }, []);
+      return;
+    }
+
+    // Have code, no platform — ask which (SB only active; LL paused)
     if (!platform) {
       addJarvisMsg({ type: "CODE_PLATFORM_SELECT", code }, []);
       return;
     }
-    addJarvisMsg({ type: "TEXT", text: "Opening Code Analyzer with your slip pre-loaded…" }, [
-      { label: "Go to Code Analyzer", action: "NAV_CODE", platform, code },
-    ]);
-    // Auto-fire after 1.5s
+
+    // Have both — navigate straight to CA with auto-analysis
+    addJarvisMsg({
+      type: "TEXT",
+      text: "Opening Code Analyzer…",
+    }, [{ label: "Go to Code Analyzer", action: "NAV_CODE", platform, code }]);
     setTimeout(() => {
       onNavigatePro?.({ layout: "pro", tab: "code", platform, code, autoAnalyze: true });
-    }, 1500);
+    }, 800);
   }
 
   async function handleNavigateCustom() {
@@ -618,24 +653,29 @@ export default function ChatLayout({
     addMsg(loadingMsg);
 
     // Build last-6-turn history for Gemini context
-    const recentHistory = messages.slice(-6).map(m => ({
-      role: m.sender === "user" ? "user" : "jarvis",
-      text: typeof m.content === "string" ? m.content : m.content?.text || "",
+    const recentHistory = (messages || []).slice(-6).map(m => ({
+      // FIX-8: use m.role (not m.sender — sender doesn't exist on message objects)
+      role: m.role === "user" ? "user" : "jarvis",
+      text: typeof m.content === "string" ? m.content : m.content?.text || m.text || "",
     })).filter(m => m.text);
 
     // Top fixture context (conf + pick only — keep payload small)
     const fixturePayload = (fixtures || []).slice(0, 12).map(f => ({
-      home: f.home || f.homeTeam || "",
-      away: f.away || f.awayTeam || "",
-      pick: f.modelPick || f.pick || "",
-      conf: f.confidence ?? f.conf ?? null,
-      odds: f.odds || null,
+      home: f.teams?.home || f.home || "",
+      away: f.teams?.away || f.away || "",
+      pick: f.theRead?.anchor?.pick || f.modelPick || "",
+      conf: f.theRead?.anchor?.prob ?? f.confidence ?? null,
     }));
+
+    // FIX-4: Hard 15s timeout — no more infinite bubbles if Termux is sleeping
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 15000);
 
     try {
       const res = await fetch(`${SERVER}/api/jarvis-chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
+        signal:  controller.signal,
         body:    JSON.stringify({
           message:             rawText,
           date:                new Date().toISOString().slice(0, 10),
@@ -644,24 +684,56 @@ export default function ChatLayout({
         }),
       });
 
+      clearTimeout(timeoutId);
+
       if (res.ok) {
         const { reply } = await res.json();
         if (reply?.trim()) {
+          // FIX-13: Context-aware chips — detect what the user was asking about
+          const isMatchQuery  = /vs\.?|versus|against|\bv\b/i.test(rawText);
+          const isSlipQuery   = /slip|code|book|analyz|analyse/i.test(rawText);
+          const isGoalsQuery  = /over|under|btts|goals/i.test(rawText);
+          let contextChips;
+          if (isMatchQuery) {
+            contextChips = [
+              { label: "Build parley with this",   text: "Build me a parley"     },
+              { label: "Analyse a slip",            text: "Analyse a slip"        },
+            ];
+          } else if (isSlipQuery) {
+            contextChips = [
+              { label: "Paste your code",           text: "Analyse a slip"        },
+              { label: "Build a new parley",         text: "Build me a parley"    },
+            ];
+          } else if (isGoalsQuery) {
+            contextChips = [
+              { label: "Build Over 2.5 parley",     text: "Build me a 6 leg over 2.5 parley" },
+              { label: "Build BTTS parley",          text: "Build me a BTTS parley"           },
+            ];
+          } else {
+            contextChips = [
+              { label: "Build a parley", text: "Build me a parley"          },
+              { label: "My Rollover",    text: "What's my rollover status?" },
+            ];
+          }
           replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
             { type: "TEXT", text: reply.trim() },
-            [
-              { label: "Build a parley",   text: "Build me a parley"          },
-              { label: "Today's fixtures", text: "Today's fixtures"           },
-              { label: "My Rollover",      text: "What's my rollover status?" },
-            ]
+            contextChips
           ));
           return;
         }
       }
-    } catch (err) {
-      console.error("[handleUnknown] network error:", err);
+      // Non-ok response
       replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
-        { type: "TEXT", text: "Couldn't reach Jarvis right now — check your connection and try again." },
+        { type: "TEXT", text: "Jarvis couldn't process that right now. Try again." },
+        [{ label: "Try again", text: rawText }, { label: "Build a parley", text: "Build me a parley" }]
+      ));
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const isTimeout = err.name === "AbortError";
+      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+        { type: "TEXT", text: isTimeout
+            ? "Jarvis took too long to respond — the server may be sleeping. Try again in a moment."
+            : "Couldn't reach Jarvis right now — check your connection and try again." },
         [{ label: "Try again", text: rawText }, { label: "Build a parley", text: "Build me a parley" }]
       ));
     }
@@ -1106,7 +1178,7 @@ export default function ChatLayout({
         {/* ── PANEL HEADER ── */}
         <div style={S.header}>
           <div style={S.headerTitle}>
-            <BoltIcon size={12} color={C.accent} />
+            <span style={{ fontSize:14, lineHeight:1 }}>🌚</span>
             Jarvis
           </div>
           <div style={{ display:"flex",alignItems:"center",gap:7 }}>
@@ -1323,7 +1395,7 @@ function ChatTab({
           {isTyping && (
             <div style={S.jBubble}>
               <div style={S.jLabel}>
-                <BoltIcon size={10} color={C.accent} /> Jarvis
+                🌚 Jarvis
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 3, padding: "2px 0" }}>
                 <div className="grm-dot-1" style={S.dot} />
@@ -1394,7 +1466,7 @@ function MessageRow({
     return (
       <div style={S.jBubble}>
         <div style={S.jLabel}>
-          <BoltIcon size={10} color={C.accent} /> Jarvis
+          🌚 Jarvis
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
           <div className="grm-dot-1" style={S.dot} />
@@ -1413,7 +1485,7 @@ function MessageRow({
   return (
     <div style={S.jBubble}>
       <div style={S.jLabel}>
-        <BoltIcon size={10} color={C.accent} /> Jarvis
+        🌚 Jarvis
       </div>
 
       <MessageContent
@@ -1556,6 +1628,11 @@ function MessageContent({
       return <LegsTargetWidget C={C} S={S} onSelect={onBuildLegsTargetSelect} />;
 
     case "TICKET_CARD":
+      // F8-SCAFFOLD: When the Jarvis Parlay script engine is ready, it will pre-build
+      // tickets at fetch time and push them here as TICKET_CARD messages automatically.
+      // ChatLayout is already wired to receive and render them — no changes needed here.
+      // The engine will call onSaveTicket(ticket) + addJarvisMsg({ type:"TICKET_CARD", ticket })
+      // from App.jsx after fetch. ChatLayout stays view-only.
       return <TicketCard C={C} S={S} ticket={content.ticket} partial={content.partial} onBookNow={onBookNow} onNavigatePro={onNavigatePro} defaultBookmaker={defaultBookmaker} />;
 
     case "ROLLOVER_CARD":
@@ -1570,11 +1647,11 @@ function MessageContent({
     case "CODE_PLATFORM_SELECT":
       return (
         <div>
-          <div style={textStyle}>Got a slip to analyze. Which platform?</div>
+          <div style={textStyle}>Which platform is this slip from?</div>
           <div style={S.chips}>
             <button className="grm-chip" style={S.chip} onClick={() => onChipAction({ action:"NAV_CODE", platform:"SB", code: content.code })}>SportyBet</button>
-            <button className="grm-chip" style={S.chip} onClick={() => onChipAction({ action:"NAV_CODE", platform:"LL", code: content.code })}>Lucky's Ledger</button>
           </div>
+          <div style={{ fontSize:9, color:C.muted, marginTop:6 }}>LuckyLedger is currently unavailable.</div>
         </div>
       );
 
@@ -1763,14 +1840,14 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         ) : null;
       })()}
 
-      {/* Actions — booking handled by App's TicketBookNowButton in Saved tab */}
+      {/* Actions — Book Now opens Parley system with ticket pre-loaded as built */}
       <div style={{ display:"flex", gap:6 }}>
         <button
           className="grm-mini-btn-primary"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
           onClick={() => {
-            onBookNow?.(ticket, null); // save to tickets
-            onNavigatePro?.({ tab:"saved", ticketId: ticket.id });
+            onBookNow?.(ticket, "SB"); // mark bookmaker intent
+            onNavigatePro?.({ tab:"parley", ticket, openAsBuilt: true });
           }}
         >
           Book Now
@@ -1778,7 +1855,7 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         <button
           className="grm-mini-btn"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
-          onClick={() => onNavigatePro?.({ layout:"pro", tab:"parley", ticket })}
+          onClick={() => onNavigatePro?.({ tab:"parley", ticket, openAsBuilt: true })}
         >
           View Full
         </button>
