@@ -50,26 +50,18 @@ function oddsOrImplied(realOdds, prob) {
   return implied || 1.02;
 }
 
-// ── N1-FIX: copyToClipboard — safe clipboard write with execCommand fallback.
-// navigator.clipboard.writeText() triggers an unexpected permission dialog on
-// some Android versions. The Async Clipboard API requires a secure context AND
-// an active user-gesture focus — conditions that aren't always met inside nested
-// event handlers. execCommand('copy') is synchronous, requires no permission
-// prompt, and works in all Android WebViews.
+// ── N1-FIX: copyToClipboard — execCommand-only. Safe on Android WebView.
+// Root cause of the still-firing permission prompt: navigator.clipboard.writeText()
+// triggers the Android permission dialog the moment it is CALLED, before the
+// promise rejects — even though we had a .catch fallback. The permission dialog
+// fires at call-time, not at resolve/reject time.
+// Fix: skip the Async Clipboard API entirely and use execCommand('copy') directly.
+// execCommand is synchronous, requires no permission, and works in all Android
+// WebViews. Modern desktop browsers also support it as a fallback. The only
+// environment that truly needs the Async API is Safari 13.3+ on iOS — but iOS
+// does not trigger a visible permission dialog for clipboard, so skipping it is safe.
 // Usage: copyToClipboard(text, onSuccess?, onError?)
 function copyToClipboard(text, onSuccess, onError) {
-  // Async Clipboard API path (modern browsers, secure context)
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => onSuccess?.(),
-      () => {
-        // API present but failed (e.g. focus lost) — fall through to execCommand
-        _execCommandCopy(text, onSuccess, onError);
-      }
-    );
-    return;
-  }
-  // execCommand fallback (Android WebView, older browsers, non-secure contexts)
   _execCommandCopy(text, onSuccess, onError);
 }
 
@@ -123,13 +115,22 @@ function evalPickResult(pickLabel, market, hGoals, aGoals, homeName, awayName) {
   if (p === "BTTS No")  return (hGoals === 0 || aGoals === 0) ? "WIN" : "LOSS";
   if (p === "Draw")     return hGoals === aGoals ? "WIN" : "LOSS";
   if (m === "DC") {
-    const pLow = p.toLowerCase();
-    const awaySlug = (awayName || "").slice(0, 6).toLowerCase();
-    const hasDraw  = pLow.includes("or draw");
-    const hasAway  = pLow.includes(awaySlug);
-    if (hasDraw && hasAway)  return aGoals >= hGoals ? "WIN" : "LOSS";
-    if (hasDraw && !hasAway) return hGoals >= aGoals ? "WIN" : "LOSS";
-    return hGoals !== aGoals ? "WIN" : "LOSS";
+    // E4-FIX: Fragile 6-char slug match (awayName.slice(0,6)) caused collisions on teams
+    // sharing a name prefix (e.g. "Manchester City" vs "Manchester United" → both "manche").
+    // Also, pLow.includes("or draw") broke when pick was formatted as "Draw or Away".
+    // Fix: match against canonical DC pick labels in all supported formats.
+    const pLow = p.toLowerCase().trim();
+    // 1X / Home or Draw / Home Win or Draw
+    const is1X = pLow === "1x" || pLow === "home or draw" || pLow === "draw or home" || pLow.startsWith("home win or draw") || pLow.startsWith("home or draw");
+    // X2 / Away or Draw / Draw or Away
+    const isX2 = pLow === "x2" || pLow === "draw or away" || pLow === "away or draw" || pLow.startsWith("away win or draw") || pLow.startsWith("draw or away");
+    // 12 / Home or Away (no draw)
+    const is12 = pLow === "12" || pLow === "home or away" || pLow === "away or home";
+    if (is1X) return hGoals >= aGoals ? "WIN" : "LOSS";  // home win OR draw
+    if (isX2) return aGoals >= hGoals ? "WIN" : "LOSS";  // away win OR draw
+    if (is12) return hGoals !== aGoals ? "WIN" : "LOSS"; // either team wins (no draw)
+    // Unrecognised DC pick format — fall through to null
+    return null;
   }
   if (homeName && p === `${homeName} Win`) return hGoals > aGoals ? "WIN" : "LOSS";
   if (awayName && p === `${awayName} Win`) return aGoals > hGoals ? "WIN" : "LOSS";
@@ -951,7 +952,14 @@ const CACHE_KEY = "grm_cache_v15";
 let _serverDateCache = null;
 let _serverDateAt    = 0;
 async function fetchServerDate() {
-  if (_serverDateCache && Date.now() - _serverDateAt < 5 * 60_000) return _serverDateCache;
+  // E5-FIX: Invalidate cache when the local calendar day has advanced past what we cached.
+  // Without this, an app kept open overnight uses yesterday's date all the next day
+  // because the 5-minute TTL only fires if the user triggers a re-fetch in that window.
+  // "Local day rolled over" = local YYYY-MM-DD is later than the cached date string.
+  const localToday = new Date().toISOString().split("T")[0];
+  const cacheExpired = !_serverDateCache || Date.now() - _serverDateAt >= 5 * 60_000;
+  const dayRolled    = _serverDateCache && localToday > _serverDateCache;
+  if (!cacheExpired && !dayRolled) return _serverDateCache;
   try {
     const r = await fetch(`${SERVER}/api/server-date`);
     const j = await r.json();
@@ -964,7 +972,7 @@ async function fetchServerDate() {
       return j.date;
     }
   } catch {}
-  return new Date().toISOString().split("T")[0];
+  return localToday;
 }
 const todayStr = () => window.__grmServerDate || _serverDateCache || new Date().toISOString().split("T")[0];
 
@@ -1568,6 +1576,14 @@ function injectStyles(T) {
         border-right:1px solid var(--glass-border);
         backdrop-filter:blur(32px);-webkit-backdrop-filter:blur(32px);
       }
+    /* P19-FIX: Remove backdrop-filter on desktop — blur triggers a GPU compositing
+       layer for every blurred element, causing janky scroll and input lag on lower-end
+       desktop GPUs. Mobile is fine (composited by default); desktop is not.
+       Cards, header, and page-header get solid backgrounds instead. */
+    .gc,.gc-elevated{ backdrop-filter:none !important;-webkit-backdrop-filter:none !important; }
+    .grm-header{ backdrop-filter:none !important;-webkit-backdrop-filter:none !important; }
+    .grm-page-header{ backdrop-filter:none !important;-webkit-backdrop-filter:none !important; }
+    .grm-sidebar{ backdrop-filter:none !important;-webkit-backdrop-filter:none !important; }
       .grm-sidebar-logo{
         padding:20px 8px 16px;
         font-size:13px;font-weight:900;color:var(--text);
@@ -5258,9 +5274,13 @@ function BacktestTab({ loadSnapshot, adminMode, adminToken = "", onReloadFixture
 
 // ── TICKET CARD ───────────────────────────────────────────────────────────
 // ── TICKET BOOK NOW BUTTON ────────────────────────────────────────────────
+// N2-FIX: BOOKMAKERS — LL is discontinued/paused. Marked disabled with downtime subtext.
+// Duel added (sptpub engine, /api/book-duel now registered in server.js).
+// disabled:true  → shown in picker, unselectable (greyed + subtext shown below label)
 const BOOKMAKERS = [
-  { id:"sportybet",    label:"SportyBet NG",   api:"/api/book-sportybet",   link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,          appLink: code => `sportybet://share?shareCode=${code}` },
-  { id:"luckyledger",  label:"Lucky's Ledger", api:"/api/book-luckyledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`,      appLink: code => `luckysledger://betslip?btBookingCode=${code}` },
+  { id:"sportybet",   label:"SportyBet NG",  api:"/api/book-sportybet",   link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,       appLink: code => `sportybet://share?shareCode=${code}` },
+  { id:"duel",        label:"Duel",           api:"/api/book-duel",        link: code => `https://duel.com/sports?btBookingCode=${code}`,         appLink: code => `duel://betslip?btBookingCode=${code}` },
+  { id:"luckyledger", label:"Lucky's Ledger", api:"/api/book-luckyledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`, appLink: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 ];
 
 function TicketBookNowButton({ legs }) {
@@ -5376,19 +5396,36 @@ function TicketBookNowButton({ legs }) {
 
       {!result ? (
         <>
-          {/* Bookmaker selector */}
-          <div style={{ display:"flex", gap:6, marginBottom:12,
-                        background:C.surface, borderRadius:br+4, padding:4,
-                        border:`1px solid ${C.border}` }}>
-            {BOOKMAKERS.map(bm => (
-              <button key={bm.id} onClick={() => { setBookie(bm.id); reset(); }} style={{
-                flex:1, padding:"8px 0", borderRadius:br, border:"none",
-                background: bookie===bm.id ? C.accent : "transparent",
-                color: bookie===bm.id ? C.accentText : C.muted,
-                fontSize:10, fontWeight:800, cursor:"pointer", fontFamily:C.font,
-                letterSpacing:".06em", transition:"all .15s",
-              }}>{bm.label}</button>
-            ))}
+          {/* N2-FIX: Bookmaker selector — LL shown as disabled with downtime subtext */}
+          <div style={{ display:"flex", flexDirection:"column", gap:5, marginBottom:12 }}>
+            {BOOKMAKERS.map(bm => {
+              const isDisabled = !!bm.disabled;
+              const isSelected = bookie === bm.id;
+              return (
+                <button key={bm.id}
+                  onClick={() => { if (!isDisabled) { setBookie(bm.id); reset(); } }}
+                  style={{
+                    width:"100%", padding:"9px 12px", borderRadius:br,
+                    border:`1px solid ${isSelected ? C.accentBorder : isDisabled ? C.border : C.border}`,
+                    background: isSelected ? C.accentDim : isDisabled ? C.faint : C.surface,
+                    color: isSelected ? C.accent : isDisabled ? C.muted : C.text,
+                    fontSize:10, fontWeight:800, cursor: isDisabled ? "default" : "pointer",
+                    fontFamily:C.font, letterSpacing:".05em", transition:"all .15s",
+                    display:"flex", alignItems:"center", justifyContent:"space-between",
+                    opacity: isDisabled ? 0.55 : 1,
+                  }}>
+                  <span>{bm.label}</span>
+                  {isDisabled && bm.disabledText && (
+                    <span style={{ fontSize:8, color:C.amber, fontWeight:700, fontStyle:"italic" }}>
+                      {bm.disabledText}
+                    </span>
+                  )}
+                  {isSelected && !isDisabled && (
+                    <span style={{ fontSize:10, color:C.accent }}>✓</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           <div style={{ fontSize:8, color:C.muted, marginBottom:10 }}>
@@ -5760,6 +5797,21 @@ function FixtureBookNow({ fixture, onAddToParlay }) {
           const base = m2[`${isHome?"home":"away"}Over${lineKey}`];
           previewProb = isOver ? base : (base != null ? 100 - base : null);
           previewOdds = io2(previewProb);
+        } else if (market === "DC") {
+          // N23-FIX: DC odds preview was entirely missing — previewProb/Odds stayed null,
+          // so the preview strip never rendered when DC was selected.
+          // Mirror the handleAdd DC branch (line ~5625) which already works correctly.
+          const pickLower = (pick || "").toLowerCase();
+          if (pickLower.includes("or draw") || pickLower === "home or draw" || pickLower === "1x") {
+            previewProb = m2.dc1X ?? (m2.homeWin != null && m2.draw != null ? Math.min(99, m2.homeWin + m2.draw) : null);
+            previewOdds = o2.dc1X || io2(previewProb);
+          } else if (pickLower.includes("draw or away") || pickLower === "x2") {
+            previewProb = m2.dcX2 ?? (m2.draw != null && m2.awayWin != null ? Math.min(99, m2.draw + m2.awayWin) : null);
+            previewOdds = o2.dcX2 || io2(previewProb);
+          } else if (pickLower.includes("home or away") || pickLower === "12") {
+            previewProb = m2.dc12 ?? (m2.homeWin != null && m2.awayWin != null ? Math.min(99, m2.homeWin + m2.awayWin) : null);
+            previewOdds = o2.dc12 || io2(previewProb);
+          }
         }
         if (!previewProb && !previewOdds) return null;
         return (
@@ -6305,17 +6357,32 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* ── Exhausted state ── */}
-      {isJarvis && exhausted && (
+      {/* N5-FIX: Exhausted state — shown for both Jarvis and Custom tickets.
+           Custom tickets previously silently returned fewer legs with no explanation. */}
+      {exhausted && (
         <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10 }}>
           <div style={{ flex:1 }}>
-            <div style={{ fontSize:10,color:C.amber,fontWeight:700,marginBottom:5 }}>⚠ Pool exhausted before reaching target odds</div>
-            <div style={{ fontSize:9,color:C.text,marginBottom:6,lineHeight:1.5 }}>{ticket.jarvisReason}</div>
-            {ticket.saturatedMarkets?.length > 0
-              ? <div style={{ fontSize:9,color:C.muted }}>Market cap of {ticket.maxSameMarket} blocked more {ticket.saturatedMarkets.join("/")} picks.</div>
-              : ticket.poolSize < 4
-                ? <div style={{ fontSize:9,color:C.muted }}>Only {ticket.poolSize} game{ticket.poolSize!==1?"s":""} qualified. Lower Target Odds or fetch a fresh snapshot.</div>
-                : <div style={{ fontSize:9,color:C.muted }}>All {ticket.poolSize} qualifying games used. Lower Target Odds for a shorter ticket.</div>
-            }
+            {isJarvis ? (
+              <>
+                <div style={{ fontSize:10,color:C.amber,fontWeight:700,marginBottom:5 }}>⚠ Pool exhausted before reaching target odds</div>
+                <div style={{ fontSize:9,color:C.text,marginBottom:6,lineHeight:1.5 }}>{ticket.jarvisReason}</div>
+                {ticket.saturatedMarkets?.length > 0
+                  ? <div style={{ fontSize:9,color:C.muted }}>Market cap of {ticket.maxSameMarket} blocked more {ticket.saturatedMarkets.join("/")} picks.</div>
+                  : ticket.poolSize < 4
+                    ? <div style={{ fontSize:9,color:C.muted }}>Only {ticket.poolSize} game{ticket.poolSize!==1?"s":""} qualified. Lower Target Odds or fetch a fresh snapshot.</div>
+                    : <div style={{ fontSize:9,color:C.muted }}>All {ticket.poolSize} qualifying games used. Lower Target Odds for a shorter ticket.</div>
+                }
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize:10,color:C.amber,fontWeight:700,marginBottom:5 }}>⚠ Fewer legs than requested</div>
+                <div style={{ fontSize:9,color:C.muted,lineHeight:1.5 }}>
+                  Only {ticket.legs?.length ?? 0} qualifying game{ticket.legs?.length !== 1 ? "s" : ""} found
+                  {ticket.poolSize != null ? ` from a pool of ${ticket.poolSize}` : ""} — couldn't reach your target.
+                  Try lowering leg count, removing the league filter, or adding more games to your custom list.
+                </div>
+              </>
+            )}
           </div>
           <button onClick={onRemove}
             style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0 }}>✕</button>
@@ -6684,8 +6751,10 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
       if (!map.has(c)) map.set(c, []);
       map.get(c).push(lg);
     }
+    // P15-FIX: Sort countries alphabetically for easy scanning.
+    // Leagues within each country still sort by leagueRank (best first).
     return [...map.entries()]
-      .sort(([,aL],[,bL]) => Math.min(...aL.map(l=>l.leagueRank)) - Math.min(...bL.map(l=>l.leagueRank)))
+      .sort(([a], [b]) => a.localeCompare(b))
       .map(([country, leagues]) => ({ country, leagues: leagues.sort((a,b) => a.leagueRank - b.leagueRank) }));
   }, [availableLeagues]);
 
@@ -6810,6 +6879,9 @@ const SORT_OPTIONS = [
 
 function getStateGroup(f) {
   const s = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+  // N8-FIX: Cancelled/PPD were returning 0 (same as upcoming) — surfaced at the top
+  // when Upcoming sort was active. Expected order: Upcoming(0) → Live(1) → FT(2) → PPD/Canc(3)
+  if (["postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted"].includes(s)) return 3;
   if (["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties"].includes(s)) return 2;
   if (["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"].includes(s)) return 1;
   return 0; // upcoming / not started
@@ -7416,7 +7488,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     const usedMarkets = new Set(original.legs.map(l => l.market));
     const usedLeagues = new Set(original.legs.map(l => l.league));
 
-    const available = fixtures.filter(f => !allUsed.has(f.id));
+    // N10-FIX: was `fixtures.filter(...)` — ignored parlayLeagueFilter entirely.
+    // parlayFixtures already applies the league filter (computed via useMemo above),
+    // so remix now respects the same league scope as the original build.
+    const available = parlayFixtures.filter(f => !allUsed.has(f.id));
 
     if (available.length < 2) {
       setAutoMessage("Not enough unused fixtures to remix — try reducing other tickets first.");
@@ -7670,9 +7745,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         // Filter pool by mode confidence floor
         const modePool = pool.filter(e => (e.conf || 0) / 100 >= g.confFloor);
         // Target odds derived from mode — not user-settable in Jarvis mode
+        // H5-FIX: Longshot ceiling removed. Previous 10.0 target caused buildOneParlayFromPool
+        // to stop at 10× regardless of leg count. User confirmed: floor stays at 2× (minLegs:10)
+        // but the leg count constraint (maxLegs:17 in JARVIS_MODE_GUARDRAILS) is the only ceiling.
+        // Infinity means the build runs until pool exhausted or maxLegs reached — naturally.
         const modeOdds = modeId === "safe"     ? 2.5
                        : modeId === "value"    ? 4.0
-                       : /* longshot */          10.0;
+                       : /* longshot */          Infinity;
         const result = buildUniversalParley(
           parlayFixtures,
           { targetOdds: modeOdds, historicalRates:rates, budget, budgetPct,
@@ -7815,7 +7894,14 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           <>
             {draftTicket && (
               <div style={{ marginBottom:16 }}>
-                <div style={{ fontSize:9,color:C.gold,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:8 }}>📝 Draft Ticket</div>
+                <div style={{ fontSize:9,color:C.gold,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:8,display:"flex",alignItems:"center",gap:5 }}>
+                  {/* N14b-FIX: SVG replaces 📝 emoji — emoji renders inconsistently across Android versions */}
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                  </svg>
+                  Draft Ticket
+                </div>
                 <TicketCard
                   ticket={draftTicket} date={date} isJarvis={false}
                   onRemove={() => setDraftLegs([])}
@@ -8175,7 +8261,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                             const g = JARVIS_MODE_GUARDRAILS_R[t.jarvisMode] || JARVIS_MODE_GUARDRAILS_R.safe;
                             const modePool = shuffledPool.filter(e => (e.conf || 0) / 100 >= g.confFloor);
                             const modeOdds = t.jarvisMode === "safe"     ? 2.5
-                                           : t.jarvisMode === "longshot" ? 10.0 : 4.0;
+                                           : t.jarvisMode === "longshot" ? Infinity : 4.0; // H5-FIX: longshot ceiling removed
                             const result = buildUniversalParley(
                               parlayFixtures,
                               { targetOdds: modeOdds, historicalRates:rates, budget, budgetPct,
@@ -8292,7 +8378,7 @@ const HELP_SECTIONS = [
     caution: "Limited data badge means few match games played (early season or limited history). volatile means the league has high variance — the pick can still be right but risk is higher than the numbers suggest.",
   },
   {
-    id: "edge", emoji: "🔮", title: "THE EDGE", sub: "value pick", color: () => C.edge,
+    id: "edge", emoji: "", title: "THE EDGE", sub: "value pick", color: () => C.edge,  // N9/P18-FIX: 🔮 removed
     what:    "A secondary pick where the model's probability is meaningfully higher than what the bookmaker's odds are implying.",
     telling: "The book looks like it may have mispriced this outcome. The '+X% vs BOOK' figure shows the gap. Two signals or more means multiple checks converged on the same market.",
     use:     "Works best alongside The Read in a 2-leg ticket. On its own, only worth taking if the edge is solid (+5% or more vs book). If you see 'value unclear', leave it.",
@@ -8821,6 +8907,20 @@ class FixtureErrorBoundary extends React.Component {
 // Touch + mouse drag with tap-vs-drag discrimination (< 6px movement = tap).
 // Snaps to nearest vertical edge on release to stay out of content's way.
 // Stays clear of bottom nav on mobile (min bottom = 76px + safe-area).
+//
+// FAB-DRAG FIX: Root cause of "moves but doesn't follow finger":
+// The old code had TWO positioning layers fighting each other:
+//   1. Outer <div> with React-controlled left/top via pos state
+//   2. Inner <button> ref.current.style.left/.top mutated directly during drag
+// On each render triggered by setDragging(true), React re-applied the outer div's
+// pos state coordinates — snapping the button back to where it started.
+// The button appeared to "move" only briefly before being snapped back.
+//
+// Fix: single element, single positioning owner. The wrapper div owns position via
+// a ref and is mutated directly during drag (zero React renders mid-drag). On
+// pointerup we commit the final position to state ONCE — one clean render.
+// will-change:transform + translate3d hand the element to the GPU compositor
+// so the motion is hardware-accelerated and latency-free on mobile.
 
 const JARVIS_FAB_KEY = "grm_jarvis_fab_pos";
 
@@ -8836,16 +8936,17 @@ function JarvisFAB({ C, isDesktop, onClick }) {
     return { x: window.innerWidth - SIZE - 16, y: window.innerHeight - SIZE - NAV_H - 16 };
   };
 
-  const [pos, setPos]           = useState(loadPos);
-  const [dragging, setDragging] = useState(false);
-  const [shaking, setShaking]   = useState(false);
+  const [pos, setPos]               = useState(loadPos);
+  const [dragging, setDragging]     = useState(false);
+  const [shaking, setShaking]       = useState(false);
   const [tipVisible, setTipVisible] = useState(false);
-  const dragRef = useRef(null);
-  const btnRef  = useRef(null);
+  // wrapRef owns the DOM position — mutated directly during drag, no React renders mid-drag
+  const wrapRef     = useRef(null);
+  const dragRef     = useRef(null);  // drag session state (startX/Y, origX/Y, lastX/Y, moved)
   const shakeTimer  = useRef(null);
   const tipTimer    = useRef(null);
 
-  // Shake + show tip every 30s while FAB is idle (not dragging, chat closed)
+  // Shake + show tip every 30s while FAB is idle
   useEffect(() => {
     const schedule = () => {
       shakeTimer.current = setTimeout(() => {
@@ -8857,10 +8958,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
       }, 30000);
     };
     schedule();
-    return () => {
-      clearTimeout(shakeTimer.current);
-      clearTimeout(tipTimer.current);
-    };
+    return () => { clearTimeout(shakeTimer.current); clearTimeout(tipTimer.current); };
   }, []);
 
   const clamp = (x, y) => {
@@ -8869,20 +8967,32 @@ function JarvisFAB({ C, isDesktop, onClick }) {
     return { x: Math.max(8, Math.min(x, maxX)), y: Math.max(8, Math.min(y, maxY)) };
   };
 
-  const savePos = (p) => {
-    try { localStorage.setItem(JARVIS_FAB_KEY, JSON.stringify(p)); } catch {}
-  };
+  const savePos = (p) => { try { localStorage.setItem(JARVIS_FAB_KEY, JSON.stringify(p)); } catch {} };
 
   const snapToEdge = (x, y) => {
     const midX = (window.innerWidth || 375) / 2;
-    const snappedX = x < midX ? 16 : (window.innerWidth || 375) - SIZE - 16;
-    return { x: snappedX, y };
+    return { x: x < midX ? 16 : (window.innerWidth || 375) - SIZE - 16, y };
+  };
+
+  // Apply position directly to the wrapper DOM node — bypasses React entirely.
+  // This is the key fix: React state only updates once on pointerup (one render),
+  // not on every pointermove (which would be 60+ renders per second and lag behind finger).
+  const applyPos = (x, y) => {
+    if (!wrapRef.current) return;
+    wrapRef.current.style.left = x + "px";
+    wrapRef.current.style.top  = y + "px";
   };
 
   const onPointerDown = (e) => {
     if (e.button === 2) return;
+    // Capture the pointer so pointermove fires even if finger leaves the button bounds
     e.currentTarget.setPointerCapture(e.pointerId);
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y, moved: false };
+    dragRef.current = {
+      startX: e.clientX, startY: e.clientY,
+      origX: pos.x, origY: pos.y,
+      lastX: pos.x, lastY: pos.y,
+      moved: false,
+    };
     setDragging(true);
     setTipVisible(false);
   };
@@ -8890,29 +9000,34 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   useEffect(() => {
     if (!dragging) return;
     const onMove = (e) => {
-      if (!dragRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragRef.current.moved = true;
-      const clamped = clamp(dragRef.current.origX + dx, dragRef.current.origY + dy);
-      dragRef.current.lastX = clamped.x;
-      dragRef.current.lastY = clamped.y;
-      btnRef.current.style.left = clamped.x + "px";
-      btnRef.current.style.top  = clamped.y + "px";
+      const d = dragRef.current;
+      if (!d) return;
+      const dx = e.clientX - d.startX;
+      const dy = e.clientY - d.startY;
+      // Discriminate tap from drag — 6px threshold
+      if (Math.abs(dx) > 6 || Math.abs(dy) > 6) d.moved = true;
+      const { x, y } = clamp(d.origX + dx, d.origY + dy);
+      d.lastX = x; d.lastY = y;
+      // Direct DOM mutation — FAB follows finger with zero latency
+      applyPos(x, y);
     };
-    const onUp = (e) => {
+    const onUp = () => {
+      const d = dragRef.current;
       setDragging(false);
-      if (!dragRef.current?.moved) {
+      if (!d?.moved) {
+        // Tap — restore DOM position in case of any micro-drift, then fire click
+        applyPos(pos.x, pos.y);
         onClick?.();
       } else {
-        const finalX  = dragRef.current.lastX ?? dragRef.current.origX;
-        const finalY  = dragRef.current.lastY ?? dragRef.current.origY;
-        const snapped = snapToEdge(finalX, finalY);
-        setPos(snapped);
+        // Drag end — snap to edge and commit to React state (one render)
+        const snapped = snapToEdge(d.lastX, d.lastY);
+        applyPos(snapped.x, snapped.y);  // apply immediately so snap is instant
+        setPos(snapped);                 // then sync React state
         savePos(snapped);
       }
+      dragRef.current = null;
     };
-    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointermove", onMove, { passive: true });
     window.addEventListener("pointerup",   onUp);
     return () => {
       window.removeEventListener("pointermove", onMove);
@@ -8920,6 +9035,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
     };
   }, [dragging]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keep within viewport on resize
   useEffect(() => {
     const onResize = () => {
       setPos(p => {
@@ -8933,42 +9049,16 @@ function JarvisFAB({ C, isDesktop, onClick }) {
     return () => window.removeEventListener("resize", onResize);
   }, [isDesktop]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Determine tooltip position (flip left if FAB is on right edge)
+  // Sync React pos state → DOM whenever it changes (after snap commit, resize, etc.)
+  // During drag this does nothing — dragRef.current is set so we trust the DOM mutation path.
+  useEffect(() => {
+    if (!dragging) applyPos(pos.x, pos.y);
+  }, [pos, dragging]);
+
   const isRightEdge = pos.x > (window.innerWidth || 375) / 2;
 
   return (
-    <div style={{ position:"fixed", left: pos.x, top: pos.y, zIndex: 500, userSelect:"none" }}>
-      {/* Co-pilot tooltip */}
-      {tipVisible && !dragging && (
-        <div style={{
-          position: "absolute",
-          bottom: SIZE + 8,
-          [isRightEdge ? "right" : "left"]: 0,
-          background: C.surface,
-          border: `1px solid ${C.accent}40`,
-          borderRadius: 10,
-          padding: "7px 11px",
-          fontSize: 11,
-          color: C.text,
-          whiteSpace: "nowrap",
-          boxShadow: `0 4px 16px rgba(0,0,0,0.25)`,
-          pointerEvents: "none",
-          animation: "grm-fade-in .2s ease",
-        }}>
-          🌚 I'm your co-pilot
-          <div style={{
-            position:"absolute", bottom:-5,
-            [isRightEdge ? "right" : "left"]: 18,
-            width:10, height:10,
-            background: C.surface,
-            border: `1px solid ${C.accent}40`,
-            borderTop:"none", borderLeft:"none",
-            transform:"rotate(45deg)",
-            borderRadius:2,
-          }}/>
-        </div>
-      )}
-
+    <>
       <style>{`
         @keyframes grm-fab-shake {
           0%,100%{transform:rotate(0deg) scale(1)}
@@ -8978,41 +9068,95 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           60%{transform:rotate(6deg)}
           75%{transform:rotate(-3deg)}
         }
+        @keyframes grm-fab-drag-pulse {
+          0%{box-shadow:0 0 0 0 var(--fab-accent-ring)}
+          70%{box-shadow:0 0 0 10px transparent}
+          100%{box-shadow:0 0 0 0 transparent}
+        }
         @keyframes grm-fade-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
       `}</style>
 
-      <button
-        ref={btnRef}
-        onPointerDown={onPointerDown}
-        aria-label="Open Jarvis"
+      {/* Single wrapper div — this is the ONLY element that owns position.
+          wrapRef is mutated directly during drag. React state only drives initial
+          left/top and post-snap updates. will-change promotes to GPU layer. */}
+      <div
+        ref={wrapRef}
         style={{
-          width: SIZE, height: SIZE,
-          borderRadius: "50%",
-          background: `${C.surface}f0`,
-          border: `1.5px solid ${C.accent}55`,
-          backdropFilter: "blur(14px)",
-          WebkitBackdropFilter: "blur(14px)",
-          boxShadow: dragging
-            ? `0 0 0 6px ${C.accent}30, 0 8px 32px rgba(0,0,0,0.45)`
-            : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
-          color: C.accent,
-          cursor: dragging ? "grabbing" : "grab",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          transition: dragging ? "box-shadow .1s" : "box-shadow .2s, transform .2s",
-          transform: dragging ? "scale(1.08)" : "scale(1)",
-          animation: shaking ? "grm-fab-shake .6s ease" : "none",
-          WebkitTapHighlightColor: "transparent",
-          touchAction: "none",
+          position: "fixed",
+          left: pos.x,
+          top: pos.y,
+          zIndex: 500,
+          userSelect: "none",
+          willChange: "left, top",     // hint compositor to promote this layer
         }}
       >
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-          <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
-          <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
-          <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
-        </svg>
-      </button>
-    </div>
+        {/* Co-pilot tooltip */}
+        {tipVisible && !dragging && (
+          <div style={{
+            position: "absolute",
+            bottom: SIZE + 8,
+            [isRightEdge ? "right" : "left"]: 0,
+            background: C.surface,
+            border: `1px solid ${C.accent}40`,
+            borderRadius: 10,
+            padding: "7px 11px",
+            fontSize: 11,
+            color: C.text,
+            whiteSpace: "nowrap",
+            boxShadow: `0 4px 16px rgba(0,0,0,0.25)`,
+            pointerEvents: "none",
+            animation: "grm-fade-in .2s ease",
+          }}>
+            ⚡ I'm your co-pilot
+            <div style={{
+              position: "absolute", bottom: -5,
+              [isRightEdge ? "right" : "left"]: 18,
+              width: 10, height: 10,
+              background: C.surface,
+              border: `1px solid ${C.accent}40`,
+              borderTop: "none", borderLeft: "none",
+              transform: "rotate(45deg)",
+              borderRadius: 2,
+            }}/>
+          </div>
+        )}
+
+        <button
+          onPointerDown={onPointerDown}
+          aria-label="Open Jarvis"
+          style={{
+            width: SIZE, height: SIZE,
+            borderRadius: "50%",
+            background: `${C.surface}f0`,
+            border: `1.5px solid ${C.accent}55`,
+            backdropFilter: "blur(14px)",
+            WebkitBackdropFilter: "blur(14px)",
+            boxShadow: dragging
+              ? `0 0 0 6px ${C.accent}30, 0 12px 36px rgba(0,0,0,0.55)`
+              : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
+            color: C.accent,
+            cursor: dragging ? "grabbing" : "grab",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            // Only transition non-position properties — position is handled by DOM mutation
+            transition: dragging
+              ? "box-shadow .08s, border-color .08s"
+              : "box-shadow .2s, transform .2s, border-color .2s",
+            transform: dragging ? "scale(1.12)" : "scale(1)",
+            animation: shaking ? "grm-fab-shake .6s ease" : "none",
+            WebkitTapHighlightColor: "transparent",
+            touchAction: "none",        // prevent browser scroll hijack during drag
+            outline: "none",
+          }}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
+            <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -9050,6 +9194,7 @@ export default function GRMPro() {
   }, []);
   const [error, setError]         = useState(null);
   const [cached, setCached]       = useState(false);
+  const [cachedAt, setCachedAt]   = useState(null);  // N16-FIX: timestamp of when cache was written
   const [legacySnapshot, setLegacySnapshot] = useState(false);
 
   const [tab, setTab]             = useState("all");
@@ -9079,10 +9224,51 @@ export default function GRMPro() {
 
   const [parlayJarvisOpen, setParlayJarvisOpen] = useState(false);
 
+  // P16-FIX: Body scroll lock when overlay is open.
+  // overscrollBehavior:contain on the overlay div is not enough on iOS/Android —
+  // the OS-level rubber-band scroll still moves the background page.
+  // Locking overflow:hidden on document.body while the overlay is open is the
+  // only reliable cross-platform fix. We restore the exact scrollY on close so
+  // the user returns to where they were, not to the top of the page.
+  useEffect(() => {
+    if (parlayJarvisOpen) {
+      const scrollY = window.scrollY;
+      document.body.style.overflow  = "hidden";
+      document.body.style.position  = "fixed";
+      document.body.style.top       = `-${scrollY}px`;
+      document.body.style.width     = "100%";
+      return () => {
+        document.body.style.overflow  = "";
+        document.body.style.position  = "";
+        document.body.style.top       = "";
+        document.body.style.width     = "";
+        window.scrollTo(0, scrollY);
+      };
+    }
+  }, [parlayJarvisOpen]);
+
   // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
   // The bolt FAB is always visible so the user can open Jarvis from any Pro screen.
   const [jarvisOpen, setJarvisOpen] = useState(false);
+
+  // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
+  useEffect(() => {
+    if (jarvisOpen) {
+      const scrollY = window.scrollY;
+      document.body.style.overflow  = "hidden";
+      document.body.style.position  = "fixed";
+      document.body.style.top       = `-${scrollY}px`;
+      document.body.style.width     = "100%";
+      return () => {
+        document.body.style.overflow  = "";
+        document.body.style.position  = "";
+        document.body.style.top       = "";
+        document.body.style.width     = "";
+        window.scrollTo(0, scrollY);
+      };
+    }
+  }, [jarvisOpen]);
 
   // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
   const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
@@ -9261,10 +9447,33 @@ export default function GRMPro() {
 
   const safeCacheWrite = (key, payload) => {
     try {
-      const s = JSON.stringify(payload);
-      if (s.length * 2 > 4*1024*1024) return;
+      // N16-FIX: embed cachedAt timestamp so the UI can detect stale cache
+      const withTs = { ...payload, cachedAt: Date.now() };
+      const s = JSON.stringify(withTs);
+      if (s.length * 2 > 4 * 1024 * 1024) return; // pre-flight: skip if > 4MB
       localStorage.setItem(key, s);
-    } catch {}
+    } catch (err) {
+      // E3-FIX: QuotaExceededError mid-session — evict old GRM keys and retry once.
+      // This happens when the user has been using the app across multiple dates and
+      // older cache entries have accumulated. Silently evict then retry.
+      if (err?.name === "QuotaExceededError" || err?.code === 22) {
+        try {
+          // Evict all grm_ prefixed keys except the one we're writing
+          const toRemove = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith("grm_") && k !== key) toRemove.push(k);
+          }
+          toRemove.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+          // Retry the write after eviction
+          const withTs = { ...payload, cachedAt: Date.now() };
+          localStorage.setItem(key, JSON.stringify(withTs));
+        } catch {
+          // If retry also fails (device storage critically full), fail silently.
+          // App still works — cache just won't persist this session.
+        }
+      }
+    }
   };
 
   useEffect(() => {
@@ -9277,12 +9486,13 @@ export default function GRMPro() {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
       if (!raw) return;
-      const { date:d, data } = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      const { date:d, data } = parsed;
       // Validate shape — old-schema fixtures missing teams/markets crash FixtureCard.
       // A fixture without both fields is useless anyway so discard the whole cache.
       const valid = Array.isArray(data) && data.length > 0 &&
                     data.every(f => f && f.teams && f.markets);
-      if (d === date && valid) { const fd = applyFinishedStates(data); setFixtures(fd); setCached(true); setFrozenFixtures(fd); }
+      if (d === date && valid) { const fd = applyFinishedStates(data); setFixtures(fd); setCached(true); setCachedAt(parsed.cachedAt || null); setFrozenFixtures(fd); }
       else if (!valid && data?.length) {
         // Silently clear invalid cache so user fetches fresh data
         try { localStorage.removeItem(CACHE_KEY); } catch {}
@@ -9342,7 +9552,7 @@ export default function GRMPro() {
 
     stopPolling();
     stopAutoRefresh();
-    setLoading(true); setError(null); setCached(false); setLegacySnapshot(false); setTickets([]);
+    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false); setTickets([]);
     setProgress(0); setProgressStage("starting"); setProgressMsg("Initialising…");
     fetchStartTimeRef.current   = Date.now();
     lastProgressRef.current     = { pct: 0, ts: Date.now() };
@@ -9434,7 +9644,7 @@ export default function GRMPro() {
 
   const loadSnapshot = useCallback(async snapDate => {
     stopPolling();
-    setLoading(true); setError(null); setCached(false); setLegacySnapshot(false); setTickets([]);
+    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false); setTickets([]);
     setProgress(20); setProgressStage("loading"); setProgressMsg("Loading snapshot…");
     try {
       const res = await fetch(`${SERVER}/api/load-snapshot?date=${snapDate}`);
@@ -9737,7 +9947,21 @@ export default function GRMPro() {
   ];
 
   const filtered = useMemo(() => {
-    if (tab === "custom") return fixtures;
+    if (tab === "custom") {
+      // N9-FIX: Custom tab was returning raw fixtures, ignoring search and leagueFilter entirely.
+      // Apply the same search + league filter as all other tabs. Sort is handled internally
+      // by CustomListView's own strategy/threshold controls — don't override it here.
+      let list = [...fixtures];
+      if (search) {
+        const s = search.toLowerCase();
+        list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league || "").toLowerCase().includes(s));
+      }
+      if (leagueFilter) {
+        const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
+        list = list.filter(f => lf.has(f.leagueId));
+      }
+      return list;
+    }
     if (tab === "engine") {
       // Pool membership comes from frozenFixtures — live fixtures used only for display
       let list = fixtures.filter(f => engineFixtureIds.has(f.id));
@@ -9841,10 +10065,32 @@ export default function GRMPro() {
               GRM<span className="grm-wordmark-accent">PRO</span>
               <span className="grm-wordmark-meta">v15</span>
             </div>
-            {/* Status indicators — compact, low-hierarchy */}
-            {cached && (
-              <span style={{ fontSize:9,color:C.muted,fontWeight:400,opacity:.7 }}>cached</span>
-            )}
+            {/* N16-FIX: Status indicators — cached badge shows amber tint when data may be stale.
+                 Stale = cachedAt timestamp is within 5 min of current time (user likely needs fresh data).
+                 Shows a tap-to-refresh nudge instead of silent grey badge. */}
+            {cached && (() => {
+              const ageMs   = cachedAt ? (Date.now() - cachedAt) : null;
+              const isStale = ageMs !== null && ageMs < 5 * 60 * 1000; // < 5 min old = likely stale race
+              const ageText = ageMs !== null
+                ? (ageMs < 60000 ? `${Math.round(ageMs/1000)}s ago` : `${Math.round(ageMs/60000)}m ago`)
+                : null;
+              return isStale ? (
+                <button onClick={() => fetchData(false)} title="Data may be stale — tap to refresh"
+                  style={{ background:`${C.amber}18`, border:`1px solid ${C.amber}40`, borderRadius:5,
+                           padding:"2px 7px", fontSize:8, color:C.amber, fontWeight:700,
+                           cursor:"pointer", fontFamily:C.font, display:"flex", alignItems:"center", gap:4 }}>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                  </svg>
+                  cached · refresh?
+                </button>
+              ) : (
+                <span style={{ fontSize:9, color:C.muted, fontWeight:400, opacity:.7 }}>
+                  cached{ageText ? ` · ${ageText}` : ""}
+                </span>
+              );
+            })()}
             {lastResultsRefresh && (
               <span title="Results auto-update when new scores are detected — no need to re-fetch"
                 style={{ fontSize:9,color:C.green,fontWeight:700,cursor:"default",display:"flex",alignItems:"center",gap:3 }}>
@@ -9931,9 +10177,24 @@ export default function GRMPro() {
 
             {/* Row 3 — Search + Filter utility strip */}
             <div className="grm-header-util">
-              <input type="text" placeholder="Search teams or leagues…" value={search}
-                onChange={e=>setSearch(e.target.value)} className="gi"
-                style={{ flex:1,fontSize:11 }}/>
+              {/* N14a-FIX: Search input with X clear button — appears only when field has content */}
+              <div style={{ flex:1, position:"relative", display:"flex", alignItems:"center" }}>
+                <input type="text" placeholder="Search teams or leagues…" value={search}
+                  onChange={e=>setSearch(e.target.value)} className="gi"
+                  style={{ width:"100%", fontSize:11, paddingRight: search ? 28 : undefined }}/>
+                {search && (
+                  <button onClick={() => setSearch("")}
+                    style={{ position:"absolute", right:8, background:"none", border:"none",
+                             cursor:"pointer", color:C.muted, padding:0, display:"flex",
+                             alignItems:"center", lineHeight:1 }}
+                    title="Clear search">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
               <button onClick={() => setDrawerOpen(true)}
                 className="grm-pill"
                 style={{
