@@ -432,9 +432,12 @@ function hasLiveLegs(legs = []) {
 }
 
 // ── BOOK MODAL ───────────────────────────────────────────────────────────────
+// N2-FIX: BOOKIE_META — LL discontinued/paused. Marked disabled with downtime subtext.
+// Duel added (sptpub engine, route now registered in server.js).
 const BOOKIE_META = {
-  sportybet:   { label:"SportyBet",      link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,                app: code => `sportybet://share?shareCode=${code}` },
-  luckyledger: { label:"Lucky's Ledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`,          app: code => `luckysledger://betslip?btBookingCode=${code}` },
+  sportybet:   { label:"SportyBet NG",   link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,              app: code => `sportybet://share?shareCode=${code}` },
+  duel:        { label:"Duel",           link: code => `https://duel.com/sports?btBookingCode=${code}`,                app: code => `duel://betslip?btBookingCode=${code}` },
+  luckyledger: { label:"Lucky's Ledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`,        app: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 };
 
 // Persist booking result to sessionStorage so it survives tab-switches.
@@ -500,28 +503,45 @@ function BookModal({ pick, C, SERVER, onClose, onBooked }) {
       persistBooking(enriched);      // persist so tab-switch doesn't lose it
       if (onBooked) onBooked(enriched);
     } catch(e) {
+      // N1/N20-FIX: translate raw error strings into user-friendly messages
       const msg = e.message || "";
       setErr(
-        msg.includes("Failed to fetch") || msg.includes("ERR_NAME_NOT_RESOLVED")
+        msg.includes("Failed to fetch") || msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("ERR_") || msg.includes("NetworkError")
           ? "Can't reach bookmaker — check your connection and try again."
-          : msg
+          : msg.includes("429") || msg.includes("already in progress")
+          ? "A booking is already in progress. Please wait a moment."
+          : msg || "Booking failed — please try again."
       );
     }
     finally { setBooking(false); }
   };
 
+  // N1-FIX: execCommand-only clipboard — navigator.clipboard.writeText triggers Android
+  // permission dialog at call-time (before promise resolves). execCommand is synchronous,
+  // requires no permission, and works in all Android WebViews.
+  const _copyText = (text, onOk) => {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+      document.body.appendChild(el);
+      el.focus(); el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+      onOk?.();
+    } catch {}
+  };
+
   const copyCode = () => {
     if (!done?.code) return;
-    navigator.clipboard.writeText(done.code)
-      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+    _copyText(done.code, () => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
   };
 
   const copyLink = () => {
     if (!done?.code) return;
     const bm = BOOKIE_META[done.bookieId];
     const link = bm?.link ? bm.link(done.code) : done.code;
-    navigator.clipboard.writeText(link)
-      .then(() => { setSharedOk(true); setTimeout(() => setSharedOk(false), 2000); });
+    _copyText(link, () => { setSharedOk(true); setTimeout(() => setSharedOk(false), 2000); });
   };
 
   const shareTicket = async () => {
@@ -659,21 +679,33 @@ function BookModal({ pick, C, SERVER, onClose, onBooked }) {
               </div>
             </div>
 
-            {/* Bookmaker selector */}
-            <div style={{ display:"flex", gap:8,
-                          background:C.surface, borderRadius:br+4, padding:4,
-                          border:`1px solid ${C.border}` }}>
-              {Object.entries(BOOKIE_META).map(([id,m]) => (
-                <button key={id} onClick={() => { setBookie(id); setErr(null); }}
-                        style={{ flex:1, padding:"9px 0", fontSize:10, fontWeight:800,
-                                 background:bookie===id?C.accent:"transparent",
-                                 color:bookie===id?C.accentText:C.muted,
-                                 border:"none", borderRadius:br,
-                                 cursor:"pointer", fontFamily:C.font,
-                                 transition:"all .15s" }}>
-                  {m.label}
-                </button>
-              ))}
+            {/* N2-FIX: Bookmaker selector — LL shown as disabled with downtime subtext */}
+            <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+              {Object.entries(BOOKIE_META).map(([id, m]) => {
+                const isDisabled = !!m.disabled;
+                const isSelected = bookie === id;
+                return (
+                  <button key={id}
+                    onClick={() => { if (!isDisabled) { setBookie(id); setErr(null); } }}
+                    style={{ width:"100%", padding:"9px 12px", fontSize:10, fontWeight:800,
+                             background: isSelected ? C.accentDim : isDisabled ? C.faint : C.surface,
+                             color: isSelected ? C.accent : isDisabled ? C.muted : C.text,
+                             border:`1px solid ${isSelected ? C.accentBorder : C.border}`,
+                             borderRadius:br, cursor: isDisabled ? "default" : "pointer",
+                             fontFamily:C.font, transition:"all .15s", opacity: isDisabled ? 0.55 : 1,
+                             display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                    <span>{m.label}</span>
+                    {isDisabled && m.disabledText && (
+                      <span style={{ fontSize:8, color:C.amber, fontWeight:700, fontStyle:"italic" }}>
+                        {m.disabledText}
+                      </span>
+                    )}
+                    {isSelected && !isDisabled && (
+                      <span style={{ fontSize:10, color:C.accent }}>✓</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Booking spinner or button */}

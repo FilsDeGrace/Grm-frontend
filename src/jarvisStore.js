@@ -80,17 +80,13 @@ export const BOOKIE_LINKS = {
 // ── UTILITY FUNCTIONS ────────────────────────────────────────────────────────
 
 /**
- * Safe clipboard write — async API with execCommand fallback.
- * Avoids the Android permission dialog that navigator.clipboard triggers.
+ * Safe clipboard write — execCommand only.
+ * N1-FIX: navigator.clipboard.writeText() fires the Android permission prompt
+ * at call-time (before the promise resolves/rejects), even with a .catch fallback.
+ * Skipping it entirely and using the synchronous execCommand path avoids this.
+ * execCommand requires no permission and works in all Android WebViews.
  */
 export function copyToClipboard(text, onSuccess, onError) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => onSuccess?.(),
-      () => _execCommandCopy(text, onSuccess, onError)
-    );
-    return;
-  }
   _execCommandCopy(text, onSuccess, onError);
 }
 
