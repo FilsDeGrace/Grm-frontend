@@ -80,17 +80,13 @@ export const BOOKIE_LINKS = {
 // ── UTILITY FUNCTIONS ────────────────────────────────────────────────────────
 
 /**
- * Safe clipboard write — async API with execCommand fallback.
- * Avoids the Android permission dialog that navigator.clipboard triggers.
+ * Safe clipboard write — execCommand only.
+ * N1-FIX: navigator.clipboard.writeText() fires the Android permission prompt
+ * at call-time (before the promise resolves/rejects), even with a .catch fallback.
+ * Skipping it entirely and using the synchronous execCommand path avoids this.
+ * execCommand requires no permission and works in all Android WebViews.
  */
 export function copyToClipboard(text, onSuccess, onError) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => onSuccess?.(),
-      () => _execCommandCopy(text, onSuccess, onError)
-    );
-    return;
-  }
   _execCommandCopy(text, onSuccess, onError);
 }
 
@@ -170,22 +166,20 @@ export function classifyIntent(text) {
   }
 
   // ── Code / link detection ────────────────────────────────────────────────
-  // FIX-6/11: Broad detection — handles all realistic user approaches:
+  // ── Code / link detection ────────────────────────────────────────────────
+  // Broad detection — handles all realistic user approaches:
   //   - Raw SB/LL links
   //   - "Analyze slip", "analyse slip", "check slip", "check this code", "what about this slip"
-  //   - Bare code (4-12 chars alphanumeric) — case-insensitive, min 4 chars
+  //   - Bare code (4-12 chars alphanumeric, case-insensitive, must contain a digit)
   //   - "Analyze [code]", "analyze slip [code]", "check [code]"
-  //   - Code pasted after a separate "Analyze" trigger message
   if (SB_LINK_RE.test(t)) return { intent: INTENT.CODE_ANALYZE, platform: "SB", raw: text };
   if (LL_LINK_RE.test(t)) return { intent: INTENT.CODE_ANALYZE, platform: "LL", raw: text };
-  // Explicit analyze/check phrases — may or may not include a code inline
   if (/analyz[es]?\s*(slip|this|my|a\s*slip|bet|ticket|code)?|check\s*(slip|this|my|a\s*slip|bet|ticket|code)|what.*(about|s)\s*(this|my)\s*(slip|code|ticket)|analyse\s*(slip|this|my|a\s*slip|bet|ticket|code)?/i.test(t)) {
-    // Try to extract an inline code from the same message
     const inlineCode = text.trim().match(/\b([A-Za-z0-9]{4,12})\b/g)
-      ?.find(c => c.length >= 4 && /[0-9]/.test(c)); // must have at least one digit to be a code
+      ?.find(c => c.length >= 4 && /[0-9]/.test(c));
     return { intent: INTENT.CODE_ANALYZE, code: inlineCode || null, raw: text };
   }
-  // Bare booking code — standalone message (case-insensitive, 4-12 chars, must have digit)
+  // Bare booking code — standalone message (4-12 chars, must have at least one digit)
   const bareCode = text.trim().match(/^([A-Za-z0-9]{4,12})$/);
   if (bareCode && /[0-9]/.test(bareCode[1])) {
     return { intent: INTENT.CODE_ANALYZE, code: bareCode[1].toUpperCase(), raw: text };
