@@ -1118,7 +1118,7 @@ export default function ChatLayout({
             >
               <HelpIcon size={12} />
             </button>
-            {messages.length > 1 && (
+            {(messages?.length ?? 0) > 1 && (
               <button
                 className="grm-help-btn"
                 style={S.helpBtn}
