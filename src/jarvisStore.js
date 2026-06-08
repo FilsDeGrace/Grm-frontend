@@ -18,7 +18,9 @@
 export const INTENT = {
   GREETING:           "GREETING",
   HELP:               "HELP",
-  ROLLOVER_STATUS:    "ROLLOVER_STATUS",
+  REMIX:              "REMIX",
+  ADD_MORE_LEGS:      "ADD_MORE_LEGS",
+  ODDS_CORRECTION:    "ODDS_CORRECTION",
   ROLLOVER_ANALYTICS: "ROLLOVER_ANALYTICS",
   BUILD_PARLEY:       "BUILD_PARLEY",
   MATCH_ANALYSIS:     "MATCH_ANALYSIS",
@@ -174,7 +176,13 @@ export function classifyIntent(text) {
   //   - "Analyze [code]", "analyze slip [code]", "check [code]"
   if (SB_LINK_RE.test(t)) return { intent: INTENT.CODE_ANALYZE, platform: "SB", raw: text };
   if (LL_LINK_RE.test(t)) return { intent: INTENT.CODE_ANALYZE, platform: "LL", raw: text };
-  if (/analyz[es]?\s*(slip|this|my|a\s*slip|bet|ticket|code)?|check\s*(slip|this|my|a\s*slip|bet|ticket|code)|what.*(about|s)\s*(this|my)\s*(slip|code|ticket)|analyse\s*(slip|this|my|a\s*slip|bet|ticket|code)?/i.test(t)) {
+  if (/analyz[es]?\s*(slip|this|my|a\s*slip|bet|ticket|code)?|what.*(about|s)\s*(this|my)\s*(slip|code|ticket)|analyse\s*(slip|this|my|a\s*slip|bet|ticket|code)?/i.test(t)) {
+    const inlineCode = text.trim().match(/\b([A-Za-z0-9]{4,12})\b/g)
+      ?.find(c => c.length >= 4 && /[0-9]/.test(c));
+    return { intent: INTENT.CODE_ANALYZE, code: inlineCode || null, raw: text };
+  }
+  // "check" only triggers CODE_ANALYZE when paired with slip/code/ticket keywords, not generic "check my rollover"
+  if (/check\s+(slip|this\s*slip|my\s*slip|a\s*slip|this\s*code|my\s*code|this\s*ticket|my\s*ticket|this\s*bet|my\s*bet)/i.test(t)) {
     const inlineCode = text.trim().match(/\b([A-Za-z0-9]{4,12})\b/g)
       ?.find(c => c.length >= 4 && /[0-9]/.test(c));
     return { intent: INTENT.CODE_ANALYZE, code: inlineCode || null, raw: text };
@@ -193,6 +201,12 @@ export function classifyIntent(text) {
   // ── Rollover ─────────────────────────────────────────────────────────────
   if (/analytics|rollover stats|rollover history|my performance|rollover chart/i.test(t)) return { intent: INTENT.ROLLOVER_ANALYTICS };
   if (/rollover|today.s rollover|my chain|rollover pick|check my chain/i.test(t))         return { intent: INTENT.ROLLOVER_STATUS };
+  // Remix / Add more legs — must be before generic build detection
+  if (/^(remix|remix again|regenerate|try again|another one|new version)$/i.test(t))       return { intent: INTENT.REMIX };
+  if (/add\s*(more\s*)?legs?|more\s*legs?|add\s*\d+\s*legs?/i.test(t))                    return { intent: INTENT.ADD_MORE_LEGS, raw: text };
+  // Odds correction — "I said 8 odds", "make it 10 odds", "no I want X odds", "change to X odds"
+  const oddsCorrection = t.match(/(?:i said|make it|no\s*(?:i want)?|change(?:\s*it)?\s*to|i\s*want)\s*(?:an?\s*)?(\d+(?:\.\d+)?)\s*(?:x|×|odds)/i);
+  if (oddsCorrection) return { intent: INTENT.ODDS_CORRECTION, targetOdds: oddsCorrection[1], raw: text };
 
   // ── Strategy / saved ─────────────────────────────────────────────────────
   if (/my saved strategy|use strategy|saved filter|apply strategy/i.test(t)) return { intent: INTENT.STRATEGY };

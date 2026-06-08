@@ -6,7 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const THEME_DARK = {
-  id: "dark", name: "GRM Dark", emoji: "🌙",
+  id: "dark", name: "Dark Mode", emoji: "🌙",
   desc: "Original — deep space, gold accents",
 
   // ── Surfaces ──────────────────────────────────────────────────────────────
@@ -145,71 +145,6 @@ export const THEME_CLAUDE = {
   scrollThumb: "#d4d1c7",
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const THEME_NIKE = {
-  id: "nike", name: "Nike Pitch", emoji: "⚫",
-  desc: "Monochrome, pill buttons, stadium energy",
-
-  bg:         "#E2E2E2",          // darker base — enough contrast for cards to stand out
-  surface:    "#D8D8D8",
-  surfaceHi:  "#CDCDCD",
-  cardBg:     "#EBEBEB",          // cards slightly lighter than bg so they lift
-  modalBg:    "#E2E2E2",
-  inputBg:    "#D8D8D8",
-
-  headerBg:   "rgba(226,226,226,0.97)",
-  headerBorder:"#AAAAAA",
-
-  border:     "#AAAAAA",          // strong visible borders
-  borderHi:   "#777777",
-
-  text:       "#0a0a0a",          // near-black — maximum contrast
-  muted:      "#383838",          // was #4a4a4c — now reads clearly on #E2E2E2 (7:1 contrast)
-  faint:      "#CDCDCD",
-  subtleBg:   "#D4D4D4",
-
-  accent:      "#0a0a0a",
-  accentDim:   "rgba(10,10,10,0.08)",
-  accentBorder:"rgba(10,10,10,0.30)",
-  accentText:  "#FFFFFF",
-  gold:        "#0a0a0a",
-  goldDim:     "rgba(10,10,10,0.08)",
-  goldBorder:  "rgba(10,10,10,0.28)",
-
-  // Market colours — all deepened for white-surface legibility
-  green:       "#004d2c",         // deeper green
-  greenDim:    "rgba(0,77,44,0.12)",
-  blue:        "#002bb3",
-  blueDim:     "rgba(0,43,179,0.10)",
-  purple:      "#4a00b8",
-  purpleDim:   "rgba(74,0,184,0.09)",
-  orange:      "#b83300",
-  orangeDim:   "rgba(184,51,0,0.09)",
-  radar:       "#005560",
-  radarDim:    "rgba(0,85,96,0.12)",
-  radarBorder: "rgba(0,85,96,0.32)",
-  edge:        "#25259a",
-  edgeDim:     "rgba(37,37,154,0.11)",
-  edgeBorder:  "rgba(37,37,154,0.30)",
-  red:         "#aa0003",
-  redDim:      "rgba(170,0,3,0.09)",
-  amber:       "#724800",         // darkened amber for readability
-  amberDim:    "rgba(114,72,0,0.10)",
-  dc:          "#8a004e",
-  dcDim:       "rgba(138,0,78,0.09)",
-  silver:      "#383838",
-  silverDim:   "rgba(56,56,56,0.10)",
-
-  track:       "#D0D0D0",
-  skeleton:    "#D8D8D8",
-  skeletonHi:  "#E5E5E5",
-
-  font:        '"Helvetica Neue","Helvetica","Arial",sans-serif',
-  btnRadius:   30,
-  cardRadius:  20,
-  scrollThumb: "#BBBBBB",
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -277,70 +212,6 @@ export const THEME_APPLE = {
   scrollThumb: "rgba(0,0,0,0.18)",
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const THEME_VODAFONE = {
-  id: "vodafone", name: "Vodafone Red", emoji: "🔴",
-  desc: "White editorial canvas, single brand red, charcoal institutions",
-
-  bg:         "#ebebeb",          // was #ffffff
-  surface:    "#e4e4e4",          // was #f2f2f2
-  surfaceHi:  "#eeeeee",          // was #ffffff
-  cardBg:     "#e8e8e8",          // was #ffffff — cards off-white not pure
-  modalBg:    "#e4e4e4",
-  inputBg:    "#eeeeee",
-
-  headerBg:   "rgba(235,235,235,0.97)",
-  headerBorder:"rgba(0,0,0,0.12)",
-
-  border:     "rgba(0,0,0,0.12)",
-  borderHi:   "rgba(0,0,0,0.22)",
-
-  text:       "#25282b",
-  muted:      "#545457",   // was #7e7e7e — 3.9:1 on #f2f2f2 faint → now ~6.1:1
-  faint:      "#f2f2f2",
-  subtleBg:   "#f2f2f2",
-
-  accent:      "#e60000",
-  accentDim:   "rgba(230,0,0,0.09)",
-  accentBorder:"rgba(230,0,0,0.30)",
-  accentText:  "#ffffff",
-  gold:        "#e60000",
-  goldDim:     "rgba(230,0,0,0.09)",
-  goldBorder:  "rgba(230,0,0,0.30)",
-
-  green:       "#1a6b41",
-  greenDim:    "rgba(26,107,65,0.10)",
-  blue:        "#3860be",
-  blueDim:     "rgba(56,96,190,0.10)",
-  purple:      "#6d28d9",
-  purpleDim:   "rgba(109,40,217,0.09)",
-  orange:      "#cc3d00",
-  orangeDim:   "rgba(204,61,0,0.08)",
-  radar:       "#006b75",
-  radarDim:    "rgba(0,107,117,0.10)",
-  radarBorder: "rgba(0,107,117,0.30)",
-  edge:        "#25282b",
-  edgeDim:     "rgba(37,40,43,0.08)",
-  edgeBorder:  "rgba(37,40,43,0.25)",
-  red:         "#e60000",
-  redDim:      "rgba(230,0,0,0.08)",
-  amber:       "#8a5700",
-  amberDim:    "rgba(138,87,0,0.08)",
-  dc:          "#ac1811",
-  dcDim:       "rgba(172,24,17,0.09)",
-  silver:      "#545457",   // matched to muted fix
-  silverDim:   "rgba(126,126,126,0.08)",
-
-  track:       "#f2f2f2",
-  skeleton:    "#e8e8e8",
-  skeletonHi:  "#f2f2f2",
-
-  font:        '"Vodafone","Helvetica Neue",Arial,sans-serif',
-  btnRadius:   2,
-  cardRadius:  6,
-  scrollThumb: "#bebebe",
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -476,8 +347,8 @@ export const THEME_GRM = {
 //  Registry & helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_NIKE, THEME_APPLE, THEME_VODAFONE, THEME_OPENCODE, THEME_GRM];
-export const THEME_MAP = { dark:THEME_DARK, claude:THEME_CLAUDE, nike:THEME_NIKE, apple:THEME_APPLE, vodafone:THEME_VODAFONE, opencode:THEME_OPENCODE, grm:THEME_GRM };
+export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_APPLE, THEME_OPENCODE, THEME_GRM];
+export const THEME_MAP = { dark:THEME_DARK, claude:THEME_CLAUDE, apple:THEME_APPLE, opencode:THEME_OPENCODE, grm:THEME_GRM };
 
 const LS_KEY = "grm_theme_v1";
 

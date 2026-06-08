@@ -1022,10 +1022,16 @@ function injectStyles(T) {
   if (old) old.remove();
 
   // ── Light/dark detection ──────────────────────────────────────────
+  // FIX: Old "#f..." prefix missed Claude (#eeeade), Apple (#e8e8ec). Use WCAG luminance.
   const bg = (T.bg || "").toLowerCase();
-  const isLight = bg.startsWith("#f") || bg === "#ffffff" || bg === "white"
-    || bg.startsWith("rgba(255") || bg === "#ffffff".toLowerCase()
-    || ["#f5f4ed","#f5f5f7","#ffffff","#fafafa","#f2f2f2"].some(c => bg.startsWith(c));
+  const _lum = (hex) => {
+    const h = hex.replace("#", "");
+    if (h.length < 6) return 0;
+    const r = parseInt(h.slice(0,2),16)/255, g = parseInt(h.slice(2,4),16)/255, b = parseInt(h.slice(4,6),16)/255;
+    const c = x => x <= 0.03928 ? x/12.92 : Math.pow((x+0.055)/1.055, 2.4);
+    return 0.2126*c(r) + 0.7152*c(g) + 0.0722*c(b);
+  };
+  const isLight = bg.startsWith("#") ? _lum(bg) > 0.35 : bg.startsWith("rgba(255") || bg === "white";
 
   // ── Nav/dock background — bypass color-mix() which silently fails on many
   //    Android WebViews when the source is an rgba() value, collapsing the
@@ -4273,18 +4279,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </button>
         {isOn && (
           <>
-            {/* Direction toggle — tap to switch ≥/≤. Extra hint on first render. */}
+            {/* P11-FIX: Direction toggle — full border + tinted bg so it reads as tappable */}
             <button onClick={() => setDir(id, currentDir === "gte" ? "lte" : "gte")}
                     title="Tap to switch between ≥ and ≤"
-                    style={{ padding:"3px 6px", background:`${col}10`,
-                             borderTop:`1px solid ${col}25`, borderBottom:`1px solid ${col}25`,
-                             border:"none", borderTop:`1px solid ${col}25`, borderBottom:`1px solid ${col}25`,
+                    style={{ padding:"4px 8px", background:`${col}18`,
+                             border:`1px solid ${col}40`,
                              color:col, cursor:"pointer", fontFamily:C.font,
                              fontSize:8, fontWeight:800, textAlign:"center", letterSpacing:".02em",
-                             display:"flex", alignItems:"center", justifyContent:"center", gap:3 }}>
-              <span style={{ fontSize:10 }}>{currentDir === "gte" ? "≥" : "≤"}</span>
-              <span>{currentDir === "gte" ? "more than" : "less than"}</span>
-              <span style={{ fontSize:7, opacity:.6, marginLeft:1 }}>↕</span>
+                             display:"flex", alignItems:"center", justifyContent:"center", gap:4,
+                             transition:"background .12s" }}>
+              <span style={{ fontSize:11, lineHeight:1 }}>{currentDir === "gte" ? "≥" : "≤"}</span>
+              <span style={{ opacity:.85 }}>{currentDir === "gte" ? "more than" : "less than"}</span>
+              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ opacity:.6, flexShrink:0 }}>
+                <polyline points="18 15 12 9 6 15"/>
+              </svg>
             </button>
             {/* Number input */}
             <input
@@ -6559,6 +6567,80 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
           )}
         </div>
       )}
+
+      {/* P11-FIX: Ask Jarvis — faint footer on every ticket. Infrastructure (/api/jarvis-analyse) is live. */}
+      {ticket.legs?.length > 0 && !exhausted && (
+        <_AskJarvisFooter ticket={ticket} SERVER={window.__GRM_SERVER__ || "http://localhost:3000"} />
+      )}
+    </div>
+  );
+}
+
+// ── P11: Ask Jarvis footer — self-contained, sits at bottom of every TicketCard ──
+function _AskJarvisFooter({ ticket, SERVER }) {
+  const [analysis,  setAnalysis]  = useState(null);
+  const [analysing, setAnalysing] = useState(false);
+  const [open,      setOpen]      = useState(false);
+
+  const run = async () => {
+    if (analysing) return;
+    setAnalysing(true); setOpen(true);
+    try {
+      const res  = await fetch(`${SERVER}/api/jarvis-analyse`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Analysis failed");
+      setAnalysis(data.analysis || data.message || "No analysis returned.");
+    } catch(e) {
+      const msg = (e.message || "").toLowerCase();
+      setAnalysis(msg.includes("429") || msg.includes("rate")
+        ? "Jarvis hit a rate limit — try again in a minute."
+        : "Jarvis is busy right now. Tap again to retry.");
+    }
+    setAnalysing(false);
+  };
+
+  return (
+    <div style={{ borderTop:`1px solid ${C.faint}`, marginTop:10, paddingTop:8 }}>
+      {!open ? (
+        <button onClick={run}
+          style={{ width:"100%", background:"transparent", border:`1px solid ${C.faint}`,
+                   borderRadius:8, padding:"6px 0", fontSize:9, fontWeight:700,
+                   color:C.muted, cursor:"pointer", fontFamily:C.font,
+                   display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                   transition:"border-color .15s, color .15s" }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor=`${C.edge}60`; e.currentTarget.style.color=C.edge; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor=C.faint; e.currentTarget.style.color=C.muted; }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          Ask Jarvis to explain picks
+        </button>
+      ) : (
+        <div style={{ background:`${C.edge}07`, border:`1px solid ${C.edge}25`, borderRadius:8, padding:"10px 12px" }}>
+          <div style={{ fontSize:8, fontWeight:800, color:C.edge, letterSpacing:".1em", textTransform:"uppercase", marginBottom:5 }}>
+            Jarvis Analysis
+          </div>
+          {analysing
+            ? <div style={{ fontSize:9,color:C.muted }}><span className="pu">Analysing…</span></div>
+            : <div style={{ fontSize:9,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap" }}>{analysis}</div>
+          }
+          {!analysing && (
+            <div style={{ display:"flex", gap:6, marginTop:8 }}>
+              <button onClick={run}
+                style={{ fontSize:8,padding:"3px 10px",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,borderRadius:5,cursor:"pointer",fontFamily:C.font }}>
+                ↺ Re-analyse
+              </button>
+              <button onClick={() => { setOpen(false); setAnalysis(null); }}
+                style={{ fontSize:8,padding:"3px 10px",background:"transparent",border:`1px solid ${C.faint}`,color:C.muted,borderRadius:5,cursor:"pointer",fontFamily:C.font }}>
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -7399,6 +7481,265 @@ function ParlayExplainer() {
   );
 }
 
+// ── JARVIS TA SLATE ──────────────────────────────────────────────────────────
+// Fetches today's pre-built strategies from the TA engine output (via server),
+// and renders them as tappable ticket cards. Replaces the old on-demand Jarvis builder.
+//
+// Data flow:
+//   ticket-analyst.mjs --export  →  data/engine_parlays/YYYY-MM-DD_parlays.json
+//   server GET /api/engine-parlays/today  →  { strategies: [...] }
+//   JarvisTASlate renders each strategy as a card
+//   onUseTicket(strategy)  →  ParlayJarvisTab adds to tickets state
+//
+// Each strategy card shows:
+//   • Combined odds (e.g. "2.76×") — the only "label" users need
+//   • Parlay probability % (from TA parlayProb)
+//   • Leg count and markets summary
+//   • DA historical HR if available
+//   • Legs list (game, pick, odds)
+//   • "Use This Ticket" CTA
+// C is passed as a prop — useTheme() does not exist as a standalone hook in this codebase
+function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
+  const [status, setStatus]   = useState("idle");  // idle | loading | ready | empty | error
+  const [strategies, setStrategies] = useState([]);
+  const [expanded, setExpanded]     = useState(null); // strategy id currently expanded
+  const [usedIds, setUsedIds]       = useState(new Set()); // tracks which strategies user added
+  const [fetchedDate, setFetchedDate] = useState(null);
+
+  // Fetch on mount and whenever date changes
+  useEffect(() => {
+    if (!date) return;
+    // Don't re-fetch if we already have data for this date
+    if (fetchedDate === date && strategies.length) return;
+
+    let cancelled = false;
+    setStatus("loading");
+
+    fetch(`${SERVER}/api/engine-parlays/today`)
+      .then(r => {
+        if (!r.ok) throw new Error(`Server ${r.status}`);
+        return r.json();
+      })
+      .then(data => {
+        if (cancelled) return;
+        const strats = Array.isArray(data.strategies) ? data.strategies : [];
+        setStrategies(strats);
+        setStatus(strats.length ? "ready" : "empty");
+        setFetchedDate(date);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.warn("[JarvisTASlate] fetch error:", err.message);
+        setStatus("error");
+      });
+
+    return () => { cancelled = true; };
+  }, [date, SERVER]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Retry on demand
+  const handleRetry = () => {
+    setFetchedDate(null);
+    setStrategies([]);
+    setStatus("idle");
+  };
+
+  // ── Loading ──────────────────────────────────────────────────────────────────
+  if (status === "loading" || status === "idle") {
+    return (
+      <div style={{ padding:"32px 0",textAlign:"center" }}>
+        <div style={{ fontSize:9,color:C.muted,letterSpacing:".1em" }}>
+          <span className="pu">Loading today's picks…</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Error ────────────────────────────────────────────────────────────────────
+  if (status === "error") {
+    return (
+      <div style={{ padding:"24px 0",textAlign:"center" }}>
+        <div style={{ fontSize:10,color:C.red,marginBottom:10,fontWeight:700 }}>
+          Could not load today's picks
+        </div>
+        <div style={{ fontSize:8,color:C.muted,marginBottom:14,lineHeight:1.6 }}>
+          Make sure the server is running and TA has exported for today.
+        </div>
+        <button onClick={handleRetry} className="gb"
+          style={{ fontSize:9,padding:"7px 18px",border:`1px solid ${C.border}`,color:C.text }}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  // ── Empty ────────────────────────────────────────────────────────────────────
+  if (status === "empty" || !strategies.length) {
+    return (
+      <div style={{ padding:"24px 0",textAlign:"center" }}>
+        <div style={{ fontSize:10,color:C.muted,marginBottom:8,fontWeight:700 }}>
+          No pre-built tickets for today
+        </div>
+        <div style={{ fontSize:8,color:C.muted,lineHeight:1.6,marginBottom:14 }}>
+          Run <span style={{ fontFamily:"monospace",background:C.faint,padding:"1px 5px",borderRadius:3 }}>
+          node ticket-analyst.mjs --export</span> to generate today's picks.
+        </div>
+        <button onClick={handleRetry} className="gb"
+          style={{ fontSize:9,padding:"7px 18px",border:`1px solid ${C.border}`,color:C.text }}>
+          Check Again
+        </button>
+      </div>
+    );
+  }
+
+  // ── Ready — render strategy cards ────────────────────────────────────────────
+  const markets = (strat) => {
+    const mkts = [...new Set((strat.legs || []).map(l => l.market).filter(Boolean))];
+    if (!mkts.length) return "—";
+    if (mkts.length === 1) return mkts[0];
+    return mkts.length <= 2 ? mkts.join(" · ") : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
+  };
+
+  return (
+    <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+      {/* Subtitle */}
+      <div style={{ fontSize:8,color:C.muted,letterSpacing:".08em",marginBottom:2 }}>
+        {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap to expand
+      </div>
+
+      {strategies.map((strat, idx) => {
+        const isOpen  = expanded === strat.id;
+        const isUsed  = usedIds.has(strat.id);
+        const odds    = strat.combinedOdds;
+        const pct     = strat.parlayPct;
+        const legCount = (strat.legs || []).length;
+        const hrLabel = strat.learnedHR ? `${strat.learnedHR}% DA` : null;
+        const saLabel = strat.saPositive > 0 ? `${strat.saPositive} SA` : null;
+        const hasMeta = hrLabel || saLabel;
+
+        return (
+          <div key={strat.id}
+            style={{
+              background: C.surface,
+              border: `1px solid ${isOpen ? C.accent : C.border}`,
+              borderRadius: 12,
+              overflow: "hidden",
+              transition: "border-color .15s",
+            }}>
+
+            {/* ── Card header (always visible) ── */}
+            <div
+              onClick={() => setExpanded(isOpen ? null : strat.id)}
+              style={{ padding:"12px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10 }}>
+
+              {/* Index badge */}
+              <div style={{
+                width:26,height:26,borderRadius:"50%",flexShrink:0,
+                background: isUsed ? C.green : C.accent,
+                display:"flex",alignItems:"center",justifyContent:"center",
+              }}>
+                {isUsed
+                  ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  : <span style={{ fontSize:9,fontWeight:800,color:C.accentText }}>{idx+1}</span>}
+              </div>
+
+              {/* Main info */}
+              <div style={{ flex:1,minWidth:0 }}>
+                {/* Odds — the primary label */}
+                <div style={{ fontSize:14,fontWeight:800,color:C.text,lineHeight:1 }}>
+                  {odds ? `${odds}×` : "—"}
+                  <span style={{ fontSize:9,fontWeight:500,color:C.muted,marginLeft:6 }}>
+                    {pct != null ? `${pct}% parlay` : ""}
+                  </span>
+                </div>
+                {/* Leg count + markets */}
+                <div style={{ fontSize:8,color:C.muted,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
+                  {legCount} leg{legCount!==1?"s":""} · {markets(strat)}
+                </div>
+              </div>
+
+              {/* DA/SA tags + chevron */}
+              <div style={{ display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0 }}>
+                {hasMeta && (
+                  <div style={{ display:"flex",gap:4 }}>
+                    {hrLabel && (
+                      <span style={{ fontSize:7,fontWeight:700,color:C.green,background:`${C.green}18`,
+                                     borderRadius:4,padding:"1px 5px" }}>{hrLabel}</span>
+                    )}
+                    {saLabel && (
+                      <span style={{ fontSize:7,fontWeight:700,color:C.edge,background:`${C.edge}18`,
+                                     borderRadius:4,padding:"1px 5px" }}>{saLabel}</span>
+                    )}
+                  </div>
+                )}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
+                  strokeLinecap="round" strokeLinejoin="round"
+                  style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)",transition:"transform .2s" }}>
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </div>
+            </div>
+
+            {/* ── Expanded legs + CTA ── */}
+            {isOpen && (
+              <div style={{ borderTop:`1px solid ${C.border}`,padding:"10px 14px 14px" }}>
+                {/* Tier note */}
+                {strat.note && (
+                  <div style={{ fontSize:8,color:C.muted,marginBottom:8,fontStyle:"italic" }}>
+                    {strat.note}
+                  </div>
+                )}
+
+                {/* Legs */}
+                <div style={{ display:"flex",flexDirection:"column",gap:5,marginBottom:12 }}>
+                  {(strat.legs || []).map((leg, li) => (
+                    <div key={li} style={{
+                      display:"flex",justifyContent:"space-between",alignItems:"center",
+                      padding:"6px 9px",background:C.bg,borderRadius:7,
+                      border:`1px solid ${C.border}`,
+                    }}>
+                      <div style={{ minWidth:0,flex:1 }}>
+                        <div style={{ fontSize:9,color:C.text,fontWeight:700,
+                                      whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
+                          {leg.game || `${leg.home} vs ${leg.away}`}
+                        </div>
+                        <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>
+                          {leg.market}{leg.league ? ` · ${leg.league}` : ""}
+                        </div>
+                      </div>
+                      <div style={{ textAlign:"right",flexShrink:0,marginLeft:8 }}>
+                        {leg.odds ? (
+                          <span style={{ fontSize:10,fontWeight:800,color:C.gold }}>{leg.odds}×</span>
+                        ) : (
+                          <span style={{ fontSize:9,color:C.muted }}>
+                            {leg.conf ? `${leg.conf}%` : "—"}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Use This Ticket CTA */}
+                <button
+                  onClick={() => {
+                    onUseTicket(strat);
+                    setUsedIds(prev => new Set([...prev, strat.id]));
+                    // Scroll to ticket list — close the card
+                    setExpanded(null);
+                  }}
+                  className="gb-primary"
+                  style={{ width:"100%",padding:"11px 0",fontSize:11,fontWeight:800 }}>
+                  {isUsed ? "↺ Re-add Ticket" : "Use This Ticket"}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
@@ -7445,7 +7786,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [activeTicketId, setActiveTicketId] = useState(null);
 
   // When Jarvis sends a pre-built ticket via "Book Now" / "View Full",
-  // save it and open it immediately as active — user sees Book Now right away.
+  // save it and open it in the Builder tab as the active ticket — one tap to Book Now.
   useEffect(() => {
     if (!jarvisBuiltTicket) return;
     const exists = savedTickets.find(t => t.id === jarvisBuiltTicket.id);
@@ -7456,7 +7797,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       persistTickets(updated);
     }
     setActiveTicketId(jarvisBuiltTicket.id);
-    setView("saved");
+    setView("parley"); // open Builder tab, not Saved — ticket detail opens from activeTicketId
     onJarvisBuiltTicketConsumed?.();
   }, [jarvisBuiltTicket]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -7893,9 +8234,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             { id:"saved",  label:`Saved${savedTickets.length>0?` (${savedTickets.length})`:""}`,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
           ].map(t => (
+            // P12-FIX: inactive pill needs explicit border — transparent border was invisible
             <button key={t.id} onClick={() => setView(t.id)}
               className={`grm-pill${view===t.id?" active":""}`}
-              style={{ display:"flex",alignItems:"center",gap:5 }}>
+              style={{ display:"flex", alignItems:"center", gap:5,
+                       border: view===t.id ? undefined : `1px solid ${C.border}`,
+                       color:  view===t.id ? undefined : C.text }}>
               <span style={{ color: view===t.id ? "var(--accent)" : "var(--muted)" }}>{t.icon}</span>
               {t.label}
             </button>
@@ -7962,69 +8306,48 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 ))}
               </div>
 
-              {/* ── JARVIS TAB ── */}
+              {/* ── JARVIS TAB — TA Pre-built Slate ── */}
               {builderMode === "jarvis" && (
-                <>
-                  {/* Mode pills — Safe / Value / Longshot (multi-select) */}
-                  <div style={{ marginBottom:14 }}>
-                    <div style={{ fontSize:8,color:C.muted,fontWeight:700,letterSpacing:".1em",textTransform:"uppercase",marginBottom:7 }}>Ticket Style</div>
-                    <div style={{ display:"flex",gap:6 }}>
-                      {[
-                        { id:"safe",     label:"Safe",     color:C.green,  desc:"2–5 legs · high confidence", legs:[2,5] },
-                        { id:"value",    label:"Value",    color:C.gold,   desc:"5–10 legs · confidence + odds edge", legs:[5,10] },
-                        { id:"longshot", label:"Longshot", color:C.red,    desc:"10–17 legs · max risk/reward", legs:[10,17] },
-                      ].map(pill => {
-                        const active = jarvisModes.has(pill.id);
-                        return (
-                          <button key={pill.id}
-                            onClick={() => {
-                              setJarvisModes(prev => {
-                                const next = new Set(prev);
-                                active ? next.delete(pill.id) : next.add(pill.id);
-                                return next.size === 0 ? prev : next; // prevent empty selection
-                              });
-                            }}
-                            style={{
-                              flex:1,padding:"8px 4px",borderRadius:10,
-                              border:`1.5px solid ${active ? pill.color : C.border}`,
-                              background: active ? `${pill.color}15` : "transparent",
-                              color: active ? pill.color : C.muted,
-                              fontSize:10,fontWeight:800,cursor:"pointer",fontFamily:C.font,
-                              display:"flex",flexDirection:"column",alignItems:"center",gap:3,
-                              transition:"all .15s",
-                            }}>
-                            <span>{pill.label}</span>
-                            <span style={{ fontSize:7,opacity:.7,fontWeight:500,lineHeight:1.3,textAlign:"center" }}>{pill.desc}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {jarvisModes.size > 1 && (
-                      <div style={{ fontSize:8,color:C.muted,marginTop:5,lineHeight:1.4 }}>
-                        Multi-mode: Jarvis builds one ticket per style. Shared legs are labelled and can be replaced individually.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Stake only — target odds is derived from mode, not user-set */}
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
-                    <div>
-                      <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Stake ($)</div>
-                      <input type="number" value={budget} onChange={e=>setBudget(+e.target.value)} onFocus={e=>e.target.select()} className="gi"/>
-                    </div>
-                    <div style={{ display:"flex",flexDirection:"column",justifyContent:"center",
-                                  background:C.faint,borderRadius:8,padding:"8px 12px",border:`1px solid ${C.border}` }}>
-                      <div style={{ fontSize:7,color:C.muted,textTransform:"uppercase",letterSpacing:".1em",marginBottom:3 }}>Min Odds</div>
-                      <div style={{ fontSize:11,fontWeight:800,color:C.gold }}>
-                        {[...jarvisModes].map(m => ({safe:"≥2.0",value:"≥3.5",longshot:"≥8.0"}[m]||"≥2.0")).join(" · ")}
-                      </div>
-                      <div style={{ fontSize:7,color:C.muted,marginTop:2 }}>Set by style</div>
-                    </div>
-                  </div>
-                </>
+                <JarvisTASlate
+                  date={date}
+                  SERVER={SERVER}
+                  C={C}
+                  onUseTicket={(strategy) => {
+                    // Convert TA strategy into a ticket object compatible with TicketCard
+                    const legs = (strategy.legs || []).map(l => ({
+                      fixtureId: l.fixtureId,
+                      game:      l.game || `${l.home || "?"} vs ${l.away || "?"}`,
+                      home:      l.home,
+                      away:      l.away,
+                      pick:      l.market,
+                      market:    l.market,
+                      league:    l.league || null,
+                      odds:      l.odds ? parseFloat(l.odds) : null,
+                      conf:      l.conf ? parseFloat(l.conf) : null,
+                    }));
+                    const totalOdds = parseFloat(
+                      legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2)
+                    );
+                    const newTicket = {
+                      id:          Date.now() + Math.random(),
+                      legs,
+                      totalOdds,
+                      isAuto:      true,
+                      slotLabel:   strategy.label,
+                      slotId:      strategy.id,
+                      jarvisMode:  "jarvis",
+                      _taStrategy: strategy.id,
+                    };
+                    // Replace any existing ticket from same strategy, else append
+                    setTickets(prev => [
+                      ...prev.filter(t => t._taStrategy !== strategy.id),
+                      newTicket,
+                    ]);
+                  }}
+                />
               )}
 
-              {/* ── CUSTOM TAB ── */}
+              {/* ── CUSTOM TAB controls — unchanged ── */}
               {builderMode === "custom" && (
                 <>
                   {/* Pool selector */}
@@ -8095,106 +8418,50 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       )}
                     </div>
                   </div>
+
+                  {/* League filter — Custom tab only */}
+                  {parlayAvailableLeagues.length > 1 && (
+                    <div style={{ marginBottom:12 }}>
+                      <LeagueFilter
+                        availableLeagues={parlayAvailableLeagues}
+                        leagueFilter={parlayLeagueFilter}
+                        setLeagueFilter={setParlayLeagueFilter}
+                      />
+                      {parlayLeagueFilter && (() => {
+                        const activeSet = parlayLeagueFilter instanceof Set ? parlayLeagueFilter : new Set([parlayLeagueFilter]);
+                        const poolCount = fixtures.filter(f => activeSet.has(f.leagueId||f.league)).length;
+                        return (
+                          <div style={{ marginTop:5,fontSize:8,
+                            color:poolCount===0?C.red:poolCount<5?C.amber:C.green }}>
+                            {poolCount===0?"No fixtures in selected leagues"
+                              :poolCount<5?`Only ${poolCount} fixture${poolCount!==1?"s":""} — pool may be thin`
+                              :`${poolCount} fixtures available`}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
+                    style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
+                             opacity:building||!fixtures.length?.5:1 }}>
+                    {building?"BUILDING…":`BUILD ${numParlays} TICKET${numParlays>1?"S":""}`}
+                  </button>
+                  {building && (
+                    <div style={{ textAlign:"center",marginTop:5 }}>
+                      <span className="pu" style={{ fontSize:8,color:C.muted }}>
+                        {`Scanning ${fixtures.length} fixture${fixtures.length!==1?"s":""} · building ${numParlays} non-overlapping ticket${numParlays>1?"s":""}…`}
+                      </span>
+                    </div>
+                  )}
+                  {autoMessage && (
+                    <div style={{ background:`${C.edge}08`,border:`1px solid ${C.edge}30`,borderRadius:8,padding:"10px 14px",fontSize:9,color:C.edge,marginTop:10 }}>
+                      {autoMessage}
+                    </div>
+                  )}
                 </>
               )}
-
-              {/* Research Mode toggle — Jarvis tab only */}
-              {builderMode === "jarvis" && <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",
-                            padding:"10px 14px",marginBottom:10,borderRadius:8,
-                            background: jarvisResearch ? `${C.gold}12` : C.surface,
-                            border:`1px solid ${jarvisResearch ? `${C.gold}40` : C.border}`,
-                            cursor:"pointer" }}
-                   onClick={() => setJarvisResearch(v => !v)}>
-                <div>
-                  <div style={{ fontSize:9,fontWeight:800,color:jarvisResearch?C.gold:C.text, display:"flex", alignItems:"center", gap:6 }}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color:jarvisResearch?C.gold:C.muted }}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                    Jarvis Research Mode
-                  </div>
-                  <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>
-                    {jarvisResearch
-                      ? "Jarvis will search injuries, form & standings before picking — takes ~10s"
-                      : "Off — instant build. Toggle on to let Jarvis research candidates first"}
-                  </div>
-                </div>
-                <div style={{ width:36,height:20,borderRadius:10,background:jarvisResearch?C.gold:C.border,
-                              position:"relative",transition:"background .2s",flexShrink:0 }}>
-                  <div style={{ position:"absolute",top:2,left:jarvisResearch?18:2,width:16,height:16,
-                                borderRadius:"50%",background:"#fff",transition:"left .2s",
-                                boxShadow:"0 1px 3px rgba(0,0,0,.3)" }} />
-                </div>
-              </div>}
-
-              {/* ── League Filter — uses same LeagueFilter component as Live Model ── */}
-              {parlayAvailableLeagues.length > 1 && (
-                <div style={{ marginBottom:12 }}>
-                  <LeagueFilter
-                    availableLeagues={parlayAvailableLeagues}
-                    leagueFilter={parlayLeagueFilter}
-                    setLeagueFilter={setParlayLeagueFilter}
-                  />
-                  {/* Pool size indicator */}
-                  {parlayLeagueFilter && (() => {
-                    const activeSet = parlayLeagueFilter instanceof Set ? parlayLeagueFilter : new Set([parlayLeagueFilter]);
-                    const poolCount = fixtures.filter(f => activeSet.has(f.leagueId||f.league)).length;
-                    return (
-                      <div style={{ marginTop:5, fontSize:8,
-                        color: poolCount===0 ? C.red : poolCount<5 ? C.amber : C.green }}>
-                        {poolCount===0 ? "No fixtures in selected leagues"
-                          : poolCount<5 ? `Only ${poolCount} fixture${poolCount!==1?"s":""} — pool may be thin`
-                          : `${poolCount} fixtures available`}
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
-
-              <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
-                style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
-                         opacity: building || !fixtures.length ? .5 : 1 }}>
-                {building
-                  ? (jarvisResearch ? "🔬 RESEARCHING…" : "BUILDING…")
-                  : builderMode === "jarvis"
-                    ? `BUILD ${[...jarvisModes].map(m=>m.toUpperCase()).join(" + ")} TICKET${jarvisModes.size>1?"S":""}`
-                    : `BUILD ${numParlays} TICKET${numParlays>1?"S":""}`}
-              </button>
-              {building && (
-                <div style={{ textAlign:"center",marginTop:5 }}>
-                  <span className="pu" style={{ fontSize:8,color:C.muted }}>
-                    {jarvisResearch
-                      ? "Jarvis is searching injuries, form, standings for top candidates…"
-                      : builderMode === "jarvis"
-                        ? `Scanning ${fixtures.length} fixture${fixtures.length!==1?"s":""} · scoring qualifying picks for ${[...jarvisModes].join(", ")} mode…`
-                        : `Scanning ${fixtures.length} fixture${fixtures.length!==1?"s":""} · building ${numParlays} non-overlapping ticket${numParlays>1?"s":""}…`}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Auto mode — engine message + Gemini analysis */}
-            {builderMode === "jarvis" && autoMessage && (
-              <div style={{ background:`${C.edge}08`,border:`1px solid ${C.edge}30`,borderRadius:8,padding:"10px 14px",fontSize:9,color:C.edge,marginBottom:12 }}>
-                {autoMessage}
-              </div>
-            )}
-            {builderMode === "jarvis" && tickets.some(t=>t.isAuto) && (
-              <div style={{ marginBottom:12 }}>
-                {!autoAnalysis ? (
-                  <button onClick={handleAutoAnalyse} disabled={analysing} className="gb"
-                    style={{ width:"100%",background:analysing?C.faint:`${C.edge}18`,color:analysing?C.muted:C.edge,border:`1px solid ${C.edge}40`,padding:"8px 0",fontSize:10,fontWeight:700 }}>
-                    {analysing ? <span className="pu">Jarvis analysing…</span> : "Ask Jarvis to Explain Picks"}
-                  </button>
-                ) : (
-                  <div style={{ background:`${C.edge}08`,border:`1px solid ${C.edge}30`,borderRadius:8,padding:"12px 14px" }}>
-                    <div style={{ fontSize:8,fontWeight:800,color:C.edge,letterSpacing:".1em",textTransform:"uppercase",marginBottom:6 }}>Jarvis Analysis</div>
-                    <div style={{ fontSize:9,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap" }}>{autoAnalysis}</div>
-                    <button onClick={()=>setAutoAnalysis(null)} className="gb"
-                      style={{ marginTop:8,background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"3px 10px",fontSize:8 }}>
-                      ↺ Re-analyse
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
+            </div>{/* end gc div */}
 
             {tickets.length > 0 && (
               <>
@@ -9746,6 +10013,20 @@ export default function GRMPro() {
 
   const mergeResultsIntoFixtures = useCallback((freshData) => {
     if (!Array.isArray(freshData) || !freshData.length) return;
+
+    // Live states the live-poller owns — results file must never overwrite these.
+    // The results file only knows finished outcomes; it has no in-progress data.
+    // Overwriting a live state with a blank/stale state from the results file was
+    // the root cause of: FT badge missing, LIVE badge missing, every game looking
+    // "normal", FT/PPD/SUSP guards never firing, upcoming filter doing nothing.
+    const LIVE_STATES = new Set([
+      "inprogress","live","1h","firsthalf","ht","halftime",
+      "2h","secondhalf","et","extratime","pen","penalties","pause","break",
+    ]);
+    const FT_STATES = new Set([
+      "finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties",
+    ]);
+
     setFixtures(prev => {
       if (!prev.length) return prev;
       const freshMap = new Map(freshData.map(f => [f.id, f]));
@@ -9753,18 +10034,44 @@ export default function GRMPro() {
       const next = prev.map(f => {
         const fresh = freshMap.get(f.id);
         if (!fresh) return f;
+
+        const curState = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+
+        // If the live poller has already set this fixture to a live state,
+        // results data must not touch state or finished — only update outcomes.
+        if (LIVE_STATES.has(curState)) {
+          const outcomeChanged = fresh.result !== f.result || fresh.readResult !== f.readResult || fresh.edgeResult !== f.edgeResult;
+          if (!outcomeChanged) return f;
+          changed = true;
+          return { ...f, result: fresh.result, readResult: fresh.readResult, edgeResult: fresh.edgeResult };
+        }
+
+        // For already-finished fixtures (set by live poller), trust live poller's
+        // state but allow scores/outcomes to update from results file.
+        if (FT_STATES.has(curState)) {
+          const scoresChanged = fresh.hGoals !== f.hGoals || fresh.aGoals !== f.aGoals
+            || fresh.result !== f.result || fresh.readResult !== f.readResult || fresh.edgeResult !== f.edgeResult;
+          if (!scoresChanged) return f;
+          changed = true;
+          return { ...f, hGoals: fresh.hGoals, aGoals: fresh.aGoals, result: fresh.result, readResult: fresh.readResult, edgeResult: fresh.edgeResult, strategyResults: fresh.strategyResults };
+        }
+
+        // Fixture is notstarted/upcoming — results file saying finished=true is
+        // authoritative (server wrote the outcome). Apply full update.
+        if (!fresh.finished) return f; // results file has no outcome yet — skip
         const scoreChanged = fresh.hGoals !== f.hGoals || fresh.aGoals !== f.aGoals || fresh.state !== f.state;
-        if (!scoreChanged) return f;
+        if (!scoreChanged && fresh.result === f.result) return f;
         changed = true;
         return {
           ...f,
-          hGoals:      fresh.hGoals,
-          aGoals:      fresh.aGoals,
-          state:       fresh.state,
-          finished:    fresh.finished,
-          result:      fresh.result,
-          readResult:  fresh.readResult,
-          edgeResult:  fresh.edgeResult,
+          hGoals:          fresh.hGoals,
+          aGoals:          fresh.aGoals,
+          state:           "finished", // only set finished, never a blank/stale state
+          finished:        true,
+          result:          fresh.result,
+          readResult:      fresh.readResult,
+          edgeResult:      fresh.edgeResult,
+          strategyResults: fresh.strategyResults,
         };
       });
       return changed ? next : prev;
@@ -9969,9 +10276,10 @@ export default function GRMPro() {
 
   const filtered = useMemo(() => {
     if (tab === "custom") {
-      // N9-FIX: Custom tab was returning raw fixtures, ignoring search and leagueFilter entirely.
-      // Apply the same search + league filter as all other tabs. Sort is handled internally
-      // by CustomListView's own strategy/threshold controls — don't override it here.
+      // N9-FIX: search + leagueFilter applied.
+      // FIX2: strong_first / strong_only from sortActive now also applied here.
+      // CustomListView receives a pre-filtered list; its internal strategy controls
+      // operate on whatever survives these global filters.
       let list = [...fixtures];
       if (search) {
         const s = search.toLowerCase();
@@ -9981,6 +10289,12 @@ export default function GRMPro() {
         const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
         list = list.filter(f => lf.has(f.leagueId));
       }
+      if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
+      if (sortActive.has("strong_first")) list = [...list].sort((a, b) => {
+        const aS = (a.theRead?.anchor?.strong && !a.markets?._lowConfidence) ? 1 : 0;
+        const bS = (b.theRead?.anchor?.strong && !b.markets?._lowConfidence) ? 1 : 0;
+        return bS - aS;
+      });
       return list;
     }
     if (tab === "engine") {
@@ -9998,10 +10312,9 @@ export default function GRMPro() {
       if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
       if (sortActive.has("hq_data"))    list = list.filter(f => (f.markets?._calibrationWeight ?? 0) >= 50);
       if (sortActive.has("ltd_data"))   list = list.filter(f => (f.markets?._calibrationWeight ?? 100) < 25);
-      if (sortActive.has("upcoming"))   list = list.filter(f => {
-        const s = (f.state||"").toLowerCase().replace(/[\s_\-]/g,"");
-        return s===""||s==="notstarted"||s==="scheduled"||s==="prematch";
-      });
+      // FIX: "upcoming" must SORT only — never filter. The hard .filter() was removing
+      // FT/live/PPD fixtures entirely, wiping their state badges and disabling all guards
+      // (isFinished/isPPD), so every game showed "Add to ticket". getStateGroup handles order.
       return list.sort((a, b) => {
         if (sortActive.has("conf")) {
           const ca = a.theRead?.anchor?.prob ?? 0, cb = b.theRead?.anchor?.prob ?? 0;
@@ -10317,8 +10630,19 @@ export default function GRMPro() {
                   {adminMode ? "Lock Admin" : "Admin"}
                 </button>
                 <button onClick={() => { setHelpOpen(true); setDrawerOpen(false); }} className="gb"
-                  style={{ background:"transparent",border:`1px solid ${C.faint}`,color:C.text,padding:"7px 12px",fontSize:9 }}>
-                  Learn how it works
+                  style={{ background:C.accentDim, border:`1px solid ${C.accentBorder}`, color:C.accent,
+                           padding:"9px 12px", fontSize:9, fontWeight:700,
+                           display:"flex", alignItems:"center", gap:8, width:"100%", borderRadius:C.btnRadius }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+                  </svg>
+                  <span style={{ flex:1, textAlign:"left" }}>
+                    Learn how it works
+                    <span style={{ display:"block", fontSize:8, fontWeight:500, opacity:.7, marginTop:1 }}>Tap to open guide</span>
+                  </span>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0, opacity:.5 }}>
+                    <polyline points="9 18 15 12 9 6"/>
+                  </svg>
                 </button>
               </div>
             </div>
@@ -10498,7 +10822,7 @@ export default function GRMPro() {
                     }} />
                   )}
                   <CustomListView
-                    fixtures={fixtures} search={search}
+                    fixtures={filtered} search={search}
                     draftLegs={draftLegs} onAddToParlay={addLegToDraft}
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
                     onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}

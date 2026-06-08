@@ -252,13 +252,11 @@ export default function ChatLayout({
   const isGateOpen  = !fixturesLoaded;
   const chatEnabled = fixturesLoaded;
 
-  // ── Init messages from sessionStorage on mount
-  // Auto-clear if stored chat is from a previous calendar day
+  // ── Init messages from sessionStorage on mount — auto-clear on new calendar day
   useEffect(() => {
     const today = new Date().toISOString().slice(0, 10);
     const storedDate = (() => { try { return sessionStorage.getItem(CHAT_DATE_KEY); } catch { return null; } })();
     if (storedDate && storedDate !== today) {
-      // New day — wipe history so Jarvis starts fresh
       try { sessionStorage.removeItem(CHAT_HISTORY_KEY); sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
       try { sessionStorage.setItem(CHAT_DATE_KEY, today); } catch {}
       setMessages([]);
@@ -267,10 +265,7 @@ export default function ChatLayout({
     if (!storedDate) {
       try { sessionStorage.setItem(CHAT_DATE_KEY, today); } catch {}
     }
-    if (messages === null) {
-      // Truly first open — show welcome on next render cycle
-      setMessages([]);
-    }
+    if (messages === null) setMessages([]);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Persist messages on change (last 30) + stamp date for next-day auto-clear
@@ -385,6 +380,7 @@ export default function ChatLayout({
       { label: "Build a parley",   text: "Build me a parley"          },
       { label: "Analyse a slip",   text: "Analyse a slip"             },
       { label: "My Rollover",      text: "Check my Rollover"          },
+      { label: "Analyse a slip",   text: "Analyse a slip"             },
     ]);
   }
 
@@ -427,11 +423,9 @@ export default function ChatLayout({
   }
 
   function startBuildFlow(nlParams = null) {
-    // Always purge stale build-step messages from previous flows before starting.
-    // This prevents "Build mode selected." / "Fixture pool selected." echo noise.
+    // Purge stale build-step messages from previous flows — prevents echo noise
     const BUILD_STEP_TYPES = new Set(["BUILD_MODE_SELECT", "BUILD_POOL_SELECT", "BUILD_LEGS_TARGET_SELECT"]);
     setMessages(prev => (prev || []).filter(m => !BUILD_STEP_TYPES.has(m?.content?.type)));
-
     // CL9: High-confidence simple request (e.g. "surest parlay") — skip all steps
     if (nlParams?.autoJarvis) {
       const flow = { step: BUILD_STEP.CONFIRM, mode: "jarvis", pool: "all", legs: 6, targetOdds: "auto", market: "theRead", leagues: null };
@@ -462,8 +456,10 @@ export default function ChatLayout({
       return;
     }
 
-    // CL7: Always show MODE step — no auto-preselect. User picks explicitly each time.
-    const newFlow = { step: BUILD_STEP.MODE };
+    // CL7-UPDATE: MODE step removed — App's Parley tab now handles Jarvis vs Custom
+    // via its own tab strip. CL only controls pool source + legs/odds.
+    // Default mode to "jarvis" and jump straight to POOL selection.
+    const newFlow = { step: BUILD_STEP.POOL, mode: "jarvis" };
     setBuildFlow(newFlow);
     const msg = makeJarvisMsg({ type: "BUILD_MODE_SELECT" });
     addMsg(msg);
@@ -549,36 +545,19 @@ export default function ChatLayout({
     addJarvisMsg({ type: "FIXTURES_CARD", fixtures: fx.slice(0, 10), label: leagueName });
   }
 
-  async function handleCodeAnalyze(platform, codeOrRaw) {
+  async function handleCodeAnalyze(platform, code) {
     await simulateTyping(500);
-
-    // Extract a clean code from the raw input if possible
-    const code = (codeOrRaw || "").trim().match(/\b([A-Za-z0-9]{4,12})\b/g)
-      ?.find(c => /[0-9]/.test(c)) || null;
-
-    // No code at all — user just said "analyze slip" with no code
-    if (!code && !platform) {
-      addJarvisMsg({
-        type: "TEXT",
-        text: "Paste your SportyBet booking code or slip link and I'll open it in Code Analyzer.",
-      }, []);
-      return;
-    }
-
-    // Have code, no platform — ask which (SB only active; LL paused)
     if (!platform) {
       addJarvisMsg({ type: "CODE_PLATFORM_SELECT", code }, []);
       return;
     }
-
-    // Have both — navigate straight to CA with auto-analysis
-    addJarvisMsg({
-      type: "TEXT",
-      text: "Opening Code Analyzer…",
-    }, [{ label: "Go to Code Analyzer", action: "NAV_CODE", platform, code }]);
+    addJarvisMsg({ type: "TEXT", text: "Opening Code Analyzer with your slip pre-loaded…" }, [
+      { label: "Go to Code Analyzer", action: "NAV_CODE", platform, code },
+    ]);
+    // Auto-fire after 1.5s
     setTimeout(() => {
       onNavigatePro?.({ layout: "pro", tab: "code", platform, code, autoAnalyze: true });
-    }, 800);
+    }, 1500);
   }
 
   async function handleNavigateCustom() {
@@ -648,18 +627,14 @@ export default function ChatLayout({
   }
 
   async function handleUnknown(rawText) {
-    // No simulateTyping here — loading bubble serves as the indicator
     const loadingMsg = makeLoadingMsg();
     addMsg(loadingMsg);
 
-    // Build last-6-turn history for Gemini context
     const recentHistory = (messages || []).slice(-6).map(m => ({
-      // FIX-8: use m.role (not m.sender — sender doesn't exist on message objects)
       role: m.role === "user" ? "user" : "jarvis",
       text: typeof m.content === "string" ? m.content : m.content?.text || m.text || "",
     })).filter(m => m.text);
 
-    // Top fixture context (conf + pick only — keep payload small)
     const fixturePayload = (fixtures || []).slice(0, 12).map(f => ({
       home: f.teams?.home || f.home || "",
       away: f.teams?.away || f.away || "",
@@ -667,7 +642,7 @@ export default function ChatLayout({
       conf: f.theRead?.anchor?.prob ?? f.confidence ?? null,
     }));
 
-    // FIX-4: Hard 15s timeout — no more infinite bubbles if Termux is sleeping
+    // 15s hard timeout — no more infinite bubbles if Termux is sleeping
     const controller = new AbortController();
     const timeoutId  = setTimeout(() => controller.abort(), 15000);
 
@@ -689,40 +664,17 @@ export default function ChatLayout({
       if (res.ok) {
         const { reply } = await res.json();
         if (reply?.trim()) {
-          // FIX-13: Context-aware chips — detect what the user was asking about
-          const isMatchQuery  = /vs\.?|versus|against|\bv\b/i.test(rawText);
-          const isSlipQuery   = /slip|code|book|analyz|analyse/i.test(rawText);
-          const isGoalsQuery  = /over|under|btts|goals/i.test(rawText);
-          let contextChips;
-          if (isMatchQuery) {
-            contextChips = [
-              { label: "Build parley with this",   text: "Build me a parley"     },
-              { label: "Analyse a slip",            text: "Analyse a slip"        },
-            ];
-          } else if (isSlipQuery) {
-            contextChips = [
-              { label: "Paste your code",           text: "Analyse a slip"        },
-              { label: "Build a new parley",         text: "Build me a parley"    },
-            ];
-          } else if (isGoalsQuery) {
-            contextChips = [
-              { label: "Build Over 2.5 parley",     text: "Build me a 6 leg over 2.5 parley" },
-              { label: "Build BTTS parley",          text: "Build me a BTTS parley"           },
-            ];
-          } else {
-            contextChips = [
-              { label: "Build a parley", text: "Build me a parley"          },
-              { label: "My Rollover",    text: "What's my rollover status?" },
-            ];
-          }
-          replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
-            { type: "TEXT", text: reply.trim() },
-            contextChips
-          ));
+          const isMatchQuery = /vs\.?|versus|v/i.test(rawText);
+          const isSlipQuery  = /slip|code|book|analyz|analyse/i.test(rawText);
+          const contextChips = isMatchQuery
+            ? [{ label: "Build parley with this", text: "Build me a parley" }, { label: "Analyse a slip", text: "Analyse a slip" }]
+            : isSlipQuery
+            ? [{ label: "Paste your code", text: "Analyse a slip" }, { label: "Build a new parley", text: "Build me a parley" }]
+            : [{ label: "Build a parley", text: "Build me a parley" }, { label: "My Rollover", text: "What's my rollover status?" }];
+          replaceLoadingMsg(loadingMsg.id, makeJarvisMsg({ type: "TEXT", text: reply.trim() }, contextChips));
           return;
         }
       }
-      // Non-ok response
       replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
         { type: "TEXT", text: "Jarvis couldn't process that right now. Try again." },
         [{ label: "Try again", text: rawText }, { label: "Build a parley", text: "Build me a parley" }]
@@ -753,8 +705,8 @@ export default function ChatLayout({
   function onBuildPoolSelect(pool) {
     // "custom" pool → navigate to custom list first if no customFixtureIds loaded
     if (pool === "custom" && !customFixtureIds?.length) {
-      addJarvisMsg({ type: "TEXT", text: "Opening your Custom List — add fixtures there, then come back to build." }, [
-        { label: "Open Custom List", action: "NAV_CUSTOM" },
+      addJarvisMsg({ type: "TEXT", text: "Opening your Custom Strategy — add fixtures there, then come back to build." }, [
+        { label: "Open Custom Strategy", action: "NAV_CUSTOM" },
       ]);
       setBuildFlow(null);
       setActiveBuildMsgId(null);
@@ -851,10 +803,18 @@ export default function ChatLayout({
     // Auto-save
     onSaveTicket?.(ticket);
 
+    // FIX-E: Warn if built odds fall significantly short of target
+    const builtOdds   = parseFloat(ticket.totalOdds) || 0;
+    const targetNum   = targetOdds && targetOdds !== "auto" ? parseFloat(targetOdds) : null;
+    const oddGapNote  = targetNum && builtOdds < targetNum * 0.7
+      ? ` (best I could reach with today's fixtures — couldn't hit ×${targetNum})`
+      : "";
+
     const finalMsg = makeJarvisMsg({
       type:    "TICKET_CARD",
       ticket,
       partial,
+      noteText: oddGapNote || undefined,
     }, [
       { label: "Remix",         text: "Remix"          },
       { label: "Add more legs", text: "Add more legs"  },
@@ -919,7 +879,67 @@ export default function ChatLayout({
     setChatLastAction({ type: "PARLEY_BUILT", ticket: newTicket });
   }
 
-  // ── CHIP ACTION HANDLER ─────────────────────────────────────────────────────
+  async function handleOddsCorrection(targetOdds) {
+    const target = parseFloat(targetOdds);
+    if (!target || target < 2) {
+      addJarvisMsg({ type: "TEXT", text: `Minimum odds target is 2×. Try "Build me a ${targetOdds} odds parley" instead.` }, []);
+      return;
+    }
+    // Rebuild with corrected target odds, keeping last ticket's context if available
+    const lastTicket = chatLastAction?.ticket || null;
+    await handleBuildParley({
+      intent:     "BUILD_PARLEY",
+      targetOdds: String(target),
+      legs:       lastTicket ? null : "auto",
+      market:     lastTicket?.marketFamily || null,
+      autoJarvis: false,
+    });
+  }
+
+  async function handleAddMoreLegs(rawText) {
+    if (!chatLastAction?.ticket) {
+      addJarvisMsg({ type: "TEXT", text: "No active ticket to add legs to. Build one first." }, [
+        { label: "Build a parley", text: "Build me a parley" },
+      ]);
+      return;
+    }
+    const { ticket } = chatLastAction;
+    // Extract count from "add 2 more legs" etc, default to 2
+    const countMatch = rawText?.match(/add\s*(\d+)\s*more/i);
+    const extraLegs  = countMatch ? parseInt(countMatch[1], 10) : 2;
+    const newTarget  = ticket.legs.length + extraLegs;
+
+    const loadingMsg = makeLoadingMsg();
+    addMsg(loadingMsg);
+    await new Promise(r => setTimeout(r, 800));
+
+    const result = buildParley({
+      fixtures,
+      marketFamily:     ticket.marketFamily || ticket.legs[0]?.market?.toLowerCase().replace(/\s/g,"") || "theRead",
+      legCount:         newTarget,
+      leagueFilter:     ticket.leagueFilter || null,
+      poolSource:       ticket.poolSource   || "all",
+      engineIds:        engineFixtureIds,
+      customFixtureIds: customFixtureIds,
+      excludeIds:       [],
+    });
+
+    if (!result) {
+      replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+        { type: "TEXT", text: `Not enough fixtures to build a ${newTarget}-leg ticket. Try fewer legs.` },
+        [{ label: "Remix instead", text: "Remix" }]
+      ));
+      return;
+    }
+
+    const { ticket: newTicket } = result;
+    onSaveTicket?.(newTicket);
+    replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
+      { type: "TICKET_CARD", ticket: newTicket },
+      [{ label: "Remix again", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]
+    ));
+    setChatLastAction({ type: "PARLEY_BUILT", ticket: newTicket });
+  }
 
   function handleChipAction(chip) {
     if (chip.text) {
@@ -952,15 +972,16 @@ export default function ChatLayout({
     addMsg(makeUserMsg(raw));
     inputRef.current?.focus();
 
-    // Special remix
-    if (/^remix$/i.test(raw)) { handleRemix(); return; }
-
+    // Special remix handled via intent now
     const classified = classifyIntent(raw);
     switch (classified.intent) {
       case INTENT.GREETING:           handleGreeting(classified.polarity); break;
       case INTENT.HELP:               handleHelp(); break;
       case INTENT.ROLLOVER_STATUS:    handleRolloverStatus(); break;
       case INTENT.ROLLOVER_ANALYTICS: handleRolloverAnalytics(); break;
+      case INTENT.REMIX:              handleRemix(); return; // return — handleRemix adds its own user msg
+      case INTENT.ADD_MORE_LEGS:      handleAddMoreLegs(classified.raw); break;
+      case INTENT.ODDS_CORRECTION:    handleOddsCorrection(classified.targetOdds); break;
       // BUILD_PARLEY may carry NL params (legs, market, targetOdds, league)
       case INTENT.BUILD_PARLEY:       handleBuildParley(classified); break;
       case INTENT.MATCH_ANALYSIS:     handleMatchAnalysis(classified.home, classified.away, false); break;
@@ -1611,7 +1632,7 @@ function MessageContent({
             {[
               { id:"all",    label:"All fixtures"      },
               { id:"engine", label:"Engine picks only"  },
-              { id:"custom", label:"My custom list"     },
+              { id:"custom", label:"Custom Strategy"    },
             ].map(opt => (
               <button key={opt.id} className="grm-chip" style={S.chip} onClick={() => onBuildPoolSelect(opt.id)}>
                 {opt.label}
@@ -1628,12 +1649,17 @@ function MessageContent({
       return <LegsTargetWidget C={C} S={S} onSelect={onBuildLegsTargetSelect} />;
 
     case "TICKET_CARD":
-      // F8-SCAFFOLD: When the Jarvis Parlay script engine is ready, it will pre-build
-      // tickets at fetch time and push them here as TICKET_CARD messages automatically.
-      // ChatLayout is already wired to receive and render them — no changes needed here.
-      // The engine will call onSaveTicket(ticket) + addJarvisMsg({ type:"TICKET_CARD", ticket })
-      // from App.jsx after fetch. ChatLayout stays view-only.
-      return <TicketCard C={C} S={S} ticket={content.ticket} partial={content.partial} onBookNow={onBookNow} onNavigatePro={onNavigatePro} defaultBookmaker={defaultBookmaker} />;
+      // F8-SCAFFOLD: engine will push pre-built tickets here when ready — ChatLayout stays view-only
+      return (
+        <div>
+          {content.noteText && (
+            <div style={{ fontSize:10, color:C.muted, fontStyle:"italic", marginBottom:6 }}>
+              {content.noteText}
+            </div>
+          )}
+          <TicketCard C={C} S={S} ticket={content.ticket} partial={content.partial} onBookNow={onBookNow} onNavigatePro={onNavigatePro} defaultBookmaker={defaultBookmaker} />
+        </div>
+      );
 
     case "ROLLOVER_CARD":
       return <RolloverCard C={C} S={S} chain={content.chain} pick={content.pick} booked={content.booked} totalFixtures={content.totalFixtures || 0} onNavigatePro={onNavigatePro} />;
@@ -1840,14 +1866,14 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         ) : null;
       })()}
 
-      {/* Actions — Book Now opens Parley system with ticket pre-loaded as built */}
+      {/* Actions — booking handled by App's TicketBookNowButton in Saved tab */}
       <div style={{ display:"flex", gap:6 }}>
         <button
           className="grm-mini-btn-primary"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
           onClick={() => {
-            onBookNow?.(ticket, "SB"); // mark bookmaker intent
-            onNavigatePro?.({ tab:"parley", ticket, openAsBuilt: true });
+            onBookNow?.(ticket, null); // save to tickets
+            onNavigatePro?.({ tab:"saved", ticketId: ticket.id });
           }}
         >
           Book Now
@@ -1855,7 +1881,7 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         <button
           className="grm-mini-btn"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
-          onClick={() => onNavigatePro?.({ tab:"parley", ticket, openAsBuilt: true })}
+          onClick={() => onNavigatePro?.({ layout:"pro", tab:"parley", ticket })}
         >
           View Full
         </button>

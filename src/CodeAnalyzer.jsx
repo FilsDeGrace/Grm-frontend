@@ -1693,15 +1693,19 @@ export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFu
           history:  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
         };
         return (
+          // P12-FIX: inactive tabs had border:none — looked like static text, not navigable.
+          // Active = accent underbar. Inactive = outlined surface pill so all 3 tabs read as tappable.
           <button
             key={tab.id}
             onClick={() => !tab.locked && setSubTab(tab.id)}
             style={{
               flex: 1,
-              padding: "12px 8px",
-              border: "none",
-              borderBottom: active ? `2.5px solid ${C.accent}` : `2.5px solid transparent`,
-              background: "transparent",
+              padding: active ? "12px 8px" : "9px 6px",
+              border: active ? "none" : `1px solid ${tab.locked ? "transparent" : C.border}`,
+              borderBottom: active ? `2.5px solid ${C.accent}` : `1px solid ${tab.locked ? "transparent" : C.border}`,
+              borderRadius: active ? 0 : 6,
+              margin: active ? 0 : "5px 4px",
+              background: active ? "transparent" : tab.locked ? "transparent" : C.surface,
               color: active ? C.accent : tab.locked ? C.muted : C.text,
               fontSize: 10, fontWeight: 800,
               cursor: tab.locked ? "not-allowed" : "pointer",
