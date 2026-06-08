@@ -21,6 +21,7 @@ export const INTENT = {
   REMIX:              "REMIX",
   ADD_MORE_LEGS:      "ADD_MORE_LEGS",
   ODDS_CORRECTION:    "ODDS_CORRECTION",
+  UNSUPPORTED:        "UNSUPPORTED",
   ROLLOVER_ANALYTICS: "ROLLOVER_ANALYTICS",
   BUILD_PARLEY:       "BUILD_PARLEY",
   MATCH_ANALYSIS:     "MATCH_ANALYSIS",
@@ -279,12 +280,14 @@ function _parseNLBuild(t) {
   const hasBuildWord = /ticket|parley|slip|acca|accumulator|bet|pick|build|create|make|generate/i.test(t);
   // OR a direct legs/odds pattern with no other matching intent
   const hasLegsOdds  = /\d+\s*(?:leg|fold|way|odds|x)/i.test(t);
-  if (!hasBuildWord && !hasLegsOdds) return null;
+  // OR a custom/engine pool reference with a market
+  const hasPoolRef   = /custom|my list|my games|engine/i.test(t);
+  if (!hasBuildWord && !hasLegsOdds && !hasPoolRef) return null;
 
   const result = {};
 
-  // Extract leg count: "5 leg", "6-leg", "5fold", "5 way"
-  const legsM = t.match(/(\d+)\s*(?:leg|fold|way)\b/i);
+  // Extract leg count: "5 leg", "6-leg", "5fold", "5 way", "top 10", "top 5"
+  const legsM = t.match(/(\d+)\s*(?:leg|fold|way)\b/i) || t.match(/\btop\s*(\d+)\b/i);
   if (legsM) result.legs = parseInt(legsM[1], 10);
 
   // Extract target odds: "8 odds", "×10", "x10", "10x", "8odds"
@@ -300,8 +303,17 @@ function _parseNLBuild(t) {
   const leagueM = t.match(/\b(premier league|la liga|serie a|bundesliga|ligue 1|championship|eredivisie|mls)\b/i);
   if (leagueM) result.league = leagueM[1];
 
-  // Must have extracted at least one meaningful param, or it's a generic build
-  if (!result.legs && !result.targetOdds && !result.market && !result.league) return null;
+  // Extract pool source — custom list or engine only
+  // Handles: "from custom", "in custom", "custom list", "my list", "my games",
+  //          "from my custom", "using custom", "engine only", "engine picks", "from engine"
+  if (/\b(custom|my list|my games|from my|in my custom|in custom|using custom|from custom)\b/i.test(t)) {
+    result.pool = "custom";
+  } else if (/\b(engine only|engine picks?|from engine|engine games?|engine fixtures?)\b/i.test(t)) {
+    result.pool = "engine";
+  }
+
+  // Must have extracted at least one meaningful param
+  if (!result.legs && !result.targetOdds && !result.market && !result.league && !result.pool) return null;
 
   return result;
 }
@@ -314,10 +326,12 @@ function _parseMarket(t) {
   if (/over\s*1\.5|o1\.5/i.test(t))                return "over15";
   if (/under\s*2\.5|u2\.5/i.test(t))               return "under25";
   if (/under\s*3\.5|u3\.5/i.test(t))               return "under35";
+  if (/under\s*1\.5|u1\.5/i.test(t))               return "under15";
   if (/1x2|home.*draw.*away/i.test(t))              return "1X2";
   if (/double chance|dc\b/i.test(t))                return "DC";
   if (/home.*score|home.*goal|h\s*o0\.5/i.test(t)) return "homeo05";
   if (/away.*score|away.*goal|a\s*o0\.5/i.test(t)) return "awayo05";
+  if (/model pick|the read|engine pick|jarvis pick|grmread/i.test(t)) return "theRead";
   return null;
 }
 

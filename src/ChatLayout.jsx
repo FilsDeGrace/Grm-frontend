@@ -196,6 +196,49 @@ function makeLoadingMsg() {
   return { id: genId(), role: "jarvis", loading: true, ts: Date.now() };
 }
 
+// ── UNSUPPORTED REQUEST DETECTOR ─────────────────────────────────────────────
+// Returns a straight-talking response string when Jarvis genuinely cannot help.
+// Checked BEFORE Gemini so we don't waste the round trip.
+function _detectUnsupported(t) {
+  // Tomorrow / future fixtures
+  if (/tomorrow|next week|this weekend|upcoming|future\s*games|next\s*match/i.test(t) && !/today/i.test(t))
+    return "I only work with today's fixtures — I can't see tomorrow's games yet. Check back after the next fetch.";
+
+  // Yesterday / past results
+  if (/yesterday|last\s*night|last\s*week|previous\s*match|past\s*results?|result.*vs|score.*vs/i.test(t) && !/today/i.test(t))
+    return "I don't have historical results — I work with today's model data only. Try the live model for recent form.";
+
+  // Unsupported bookmakers
+  if (/bet9ja|betway|1xbet|bet365|parimatch|nairabet|melbet|22bet|msport|bangbet/i.test(t))
+    return "I can only book on SportyBet right now — other bookmakers aren't connected yet.";
+
+  // Correct score market
+  if (/correct score|exact score|scoreline|\d+-\d+\s*(?:win|result)/i.test(t))
+    return "Correct score markets aren't supported — the model doesn't have scoreline predictions. Try Over/Under or BTTS instead.";
+
+  // Notifications / reminders / alerts
+  if (/remind|alert|notification|notify|alarm|set.*timer|ping me/i.test(t))
+    return "I can't set reminders or alerts — no notification system yet.";
+
+  // Combine rollover + parley
+  if (/rollover.*parley|parley.*rollover|combine.*rollover|merge.*rollover/i.test(t))
+    return "I can't merge your rollover pick into a parley automatically — they're separate systems. Build a parley, then manually add your rollover pick in the Parley Builder.";
+
+  // Shared slips / other people's tickets
+  if (/someone else|friend.s|their slip|shared.*ticket|send.*ticket|share.*ticket/i.test(t))
+    return "I can't access other users' tickets — slip sharing isn't built yet.";
+
+  // Budget alerts
+  if (/budget alert|spending limit|loss limit|deposit limit/i.test(t))
+    return "Budget alerts aren't supported yet — that's a bookmaker-side feature.";
+
+  // Live scores / in-play
+  if (/live score|in.play|in play|\blive\b.*score|halftime score|current score/i.test(t))
+    return "I don't have live scores — I work with pre-match model data only.";
+
+  return null; // not unsupported — pass to Gemini
+}
+
 // ── MAIN COMPONENT ───────────────────────────────────────────────────────────
 
 export default function ChatLayout({
@@ -426,9 +469,19 @@ export default function ChatLayout({
     // Purge stale build-step messages from previous flows — prevents echo noise
     const BUILD_STEP_TYPES = new Set(["BUILD_MODE_SELECT", "BUILD_POOL_SELECT", "BUILD_LEGS_TARGET_SELECT"]);
     setMessages(prev => (prev || []).filter(m => !BUILD_STEP_TYPES.has(m?.content?.type)));
-    // CL9: High-confidence simple request (e.g. "surest parlay") — skip all steps
-    if (nlParams?.autoJarvis) {
-      const flow = { step: BUILD_STEP.CONFIRM, mode: "jarvis", pool: "all", legs: 6, targetOdds: "auto", market: "theRead", leagues: null };
+
+    // ── NL fast-path: has inline params → build immediately, zero questions
+    // "6 leg over 1.5", "top 10 over 2.5", "8 odds engine only" etc.
+    if (nlParams && (nlParams.legs || nlParams.targetOdds || nlParams.market || nlParams.pool || nlParams.league)) {
+      const flow = {
+        step:       BUILD_STEP.CONFIRM,
+        mode:       "custom",
+        pool:       nlParams.pool       || "all",
+        legs:       nlParams.legs       || "auto",
+        targetOdds: nlParams.targetOdds || "auto",
+        market:     nlParams.market     || "theRead",
+        leagues:    nlParams.league     || null,
+      };
       setBuildFlow(flow);
       const loadingMsg = makeLoadingMsg();
       addMsg(loadingMsg);
@@ -437,29 +490,10 @@ export default function ChatLayout({
       return;
     }
 
-    // NL fast-path: legs/market/targetOdds extracted inline — skip flow
-    if (nlParams && (nlParams.legs || nlParams.targetOdds || nlParams.market)) {
-      const flow = {
-        step:    BUILD_STEP.CONFIRM,
-        mode:    "jarvis",
-        pool:    "all",
-        legs:    nlParams.legs    || "auto",
-        targetOdds: nlParams.targetOdds || "auto",
-        market:  nlParams.market  || "theRead",
-        leagues: nlParams.league  || null,
-      };
-      setBuildFlow(flow);
-      const loadingMsg = makeLoadingMsg();
-      addMsg(loadingMsg);
-      setActiveBuildMsgId(null); // no interactive step — straight to result
-      executeBuild(flow, loadingMsg.id);
-      return;
-    }
-
-    // CL7-UPDATE: MODE step removed — App's Parley tab now handles Jarvis vs Custom
-    // via its own tab strip. CL only controls pool source + legs/odds.
-    // Default mode to "jarvis" and jump straight to POOL selection.
-    const newFlow = { step: BUILD_STEP.POOL, mode: "jarvis" };
+    // ── Plain "build me a parley" — ask Jarvis or Custom
+    // autoJarvis (e.g. "surest parlay") skips straight to mode select so user still
+    // has one tap to confirm they want Jarvis pre-builts vs a custom build.
+    const newFlow = { step: BUILD_STEP.MODE, mode: null };
     setBuildFlow(newFlow);
     const msg = makeJarvisMsg({ type: "BUILD_MODE_SELECT" });
     addMsg(msg);
@@ -627,6 +661,19 @@ export default function ChatLayout({
   }
 
   async function handleUnknown(rawText) {
+    const t = rawText.toLowerCase();
+
+    // ── Straight-up unsupported requests — be honest immediately, don't call Gemini
+    const unsupported = _detectUnsupported(t);
+    if (unsupported) {
+      await simulateTyping(400);
+      addJarvisMsg({ type: "TEXT", text: unsupported }, [
+        { label: "Build a parley", text: "Build me a parley" },
+        { label: "Analyse a slip", text: "Analyse a slip"    },
+      ]);
+      return;
+    }
+
     const loadingMsg = makeLoadingMsg();
     addMsg(loadingMsg);
 
@@ -695,6 +742,15 @@ export default function ChatLayout({
 
   function onBuildModeSelect(mode) {
     saveBuildPref(mode);
+    if (mode === "jarvis") {
+      // Jarvis pre-builts live in the Parley tab — navigate there directly
+      setActiveBuildMsgId(null);
+      setBuildFlow(null);
+      addJarvisMsg({ type: "TEXT", text: "Opening Jarvis Parley — tap any pre-built ticket to book." }, []);
+      setTimeout(() => onNavigatePro?.({ tab: "parley" }), 600);
+      return;
+    }
+    // Custom — ask pool source next
     const newFlow = { ...buildFlow, mode, step: BUILD_STEP.POOL };
     setBuildFlow(newFlow);
     const msg = makeJarvisMsg({ type: "BUILD_POOL_SELECT" });
@@ -703,15 +759,6 @@ export default function ChatLayout({
   }
 
   function onBuildPoolSelect(pool) {
-    // "custom" pool → navigate to custom list first if no customFixtureIds loaded
-    if (pool === "custom" && !customFixtureIds?.length) {
-      addJarvisMsg({ type: "TEXT", text: "Opening your Custom Strategy — add fixtures there, then come back to build." }, [
-        { label: "Open Custom Strategy", action: "NAV_CUSTOM" },
-      ]);
-      setBuildFlow(null);
-      setActiveBuildMsgId(null);
-      return;
-    }
     const newFlow = { ...buildFlow, pool, step: BUILD_STEP.LEGS_TARGET };
     setBuildFlow(newFlow);
     const msg = makeJarvisMsg({ type: "BUILD_LEGS_TARGET_SELECT" });
@@ -1609,38 +1656,63 @@ function MessageContent({
     // ── Build flow steps — only interactive if isActiveBuildStep
     case "BUILD_MODE_SELECT":
       if (!isActiveBuildStep) {
-        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Build mode selected.</div>;
+        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Mode selected.</div>;
       }
       return (
         <div>
-          <div style={textStyle}>Which build mode?</div>
-          <div style={{ display:"flex",flexDirection:"column",gap:6,marginTop:8 }}>
-            <ModeCard C={C} title="Jarvis Parley"  desc="Jarvis picks the best legs using the model"            active={buildFlow?.mode==="jarvis"} onClick={() => onBuildModeSelect("jarvis")} />
-            <ModeCard C={C} title="Custom Parley"  desc="You control every filter — markets, leagues, confidence" active={buildFlow?.mode==="custom"} onClick={() => onBuildModeSelect("custom")} />
+          <div style={{ fontSize:12, color:C.text, marginBottom:10, lineHeight:1.55 }}>
+            How do you want to build?
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            <ModeCard C={C}
+              title="🌚 Jarvis"
+              desc="Pre-built tickets from the model engine — DA + SA signal-backed. Just tap and book."
+              tip="Best if you trust the model and want zero effort."
+              active={false}
+              onClick={() => {
+                onBuildModeSelect("jarvis");
+              }}
+            />
+            <ModeCard C={C}
+              title="⚙️ Custom"
+              desc="You pick the pool, market, and leg count. Full control."
+              tip="Best if you have a specific market or odds target in mind."
+              active={false}
+              onClick={() => onBuildModeSelect("custom")}
+            />
           </div>
         </div>
       );
 
     case "BUILD_POOL_SELECT":
       if (!isActiveBuildStep) {
-        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Fixture pool selected.</div>;
+        return <div style={{ ...textStyle, color: C.muted, fontStyle:"italic" }}>Pool selected.</div>;
       }
       return (
         <div>
-          <div style={textStyle}>Which fixtures should I pick from?</div>
-          <div style={S.chips}>
-            {[
-              { id:"all",    label:"All fixtures"      },
-              { id:"engine", label:"Engine picks only"  },
-              { id:"custom", label:"Custom Strategy"    },
-            ].map(opt => (
-              <button key={opt.id} className="grm-chip" style={S.chip} onClick={() => onBuildPoolSelect(opt.id)}>
-                {opt.label}
-              </button>
-            ))}
+          <div style={{ fontSize:12, color:C.text, marginBottom:10, lineHeight:1.55 }}>
+            Which fixtures should I pick from?
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            <ModeCard C={C}
+              title="All Fixtures"
+              desc="Every game today with model data — widest possible pool."
+              tip="More legs to choose from, higher ticket diversity."
+              active={buildFlow?.pool === "all"}
+              onClick={() => onBuildPoolSelect("all")}
+            />
+            <ModeCard C={C}
+              title="Engine Only"
+              desc="The Engine's highest-conviction picks only."
+              tip="Fewer games but each one has a stronger signal."
+              active={buildFlow?.pool === "engine"}
+              onClick={() => onBuildPoolSelect("engine")}
+            />
           </div>
         </div>
       );
+
+
 
     case "BUILD_LEGS_TARGET_SELECT":
       if (!isActiveBuildStep) {
@@ -1688,7 +1760,7 @@ function MessageContent({
 
 // ── MODE CARD ────────────────────────────────────────────────────────────────
 
-function ModeCard({ C, title, desc, active, onClick }) {
+function ModeCard({ C, title, desc, tip, active, onClick }) {
   return (
     <div
       onClick={onClick}
@@ -1703,6 +1775,7 @@ function ModeCard({ C, title, desc, active, onClick }) {
         {title}
       </div>
       <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.4 }}>{desc}</div>
+      {tip && <div style={{ fontSize: 9, color: C.accent, marginTop: 4, opacity: 0.7 }}>💡 {tip}</div>}
     </div>
   );
 }

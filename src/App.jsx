@@ -8236,21 +8236,33 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           </svg>
         </button>
 
-        {/* Pill tabs — Builder and Saved */}
-        <div style={{ display:"flex",gap:4,flex:1 }}>
+        {/* Builder / Saved — full-width segmented control */}
+        <div style={{ display:"flex", flex:1, background:C.faint,
+                      borderRadius:10, padding:3, gap:3 }}>
           {[
             { id:"parlay", label:`Builder${draftLegs.length+tickets.length>0?` (${draftLegs.length+tickets.length})`:""}`,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
             { id:"saved",  label:`Saved${savedTickets.length>0?` (${savedTickets.length})`:""}`,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
-          ].map(t => (
-            <button key={t.id} onClick={() => setView(t.id)}
-              className={`grm-pill${view===t.id?" active":""}`}
-              style={{ display:"flex",alignItems:"center",gap:5 }}>
-              <span style={{ color: view===t.id ? "var(--accent)" : "var(--muted)" }}>{t.icon}</span>
-              {t.label}
-            </button>
-          ))}
+          ].map(t => {
+            const on = view === t.id;
+            return (
+              <button key={t.id} onClick={() => setView(t.id)} style={{
+                flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                padding:"8px 0", fontSize:11, fontWeight:800, fontFamily:C.font,
+                background: on ? C.surface      : "transparent",
+                color:      on ? C.accent        : C.muted,
+                border:     on ? `1px solid ${C.accent}40` : `1px solid transparent`,
+                borderRadius:8,
+                boxShadow:  on ? "0 1px 6px rgba(0,0,0,0.22)" : "none",
+                cursor:"pointer", transition:"all .15s",
+                WebkitTapHighlightColor:"transparent",
+              }}>
+                <span style={{ opacity: on ? 1 : 0.55, display:"flex", flexShrink:0 }}>{t.icon}</span>
+                {t.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -10481,7 +10493,8 @@ export default function GRMPro() {
 
         {/* Row 2 — Tools sub-tabs */}
         {(activeTab === "backtest" || activeTab === "code") && mainView === "main" && (
-          <div className="grm-header-subnav" style={{ borderTop:`1px solid var(--glass-border)`,paddingTop:2 }}>
+          <div style={{ padding:"6px 12px 2px", borderTop:`1px solid var(--glass-border)` }}>
+            <div style={{ display:"flex", background:C.faint, borderRadius:10, padding:3, gap:3 }}>
             {[
               { id:"code",     label:"Code Analyzer", icon:
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -10493,14 +10506,26 @@ export default function GRMPro() {
                   <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
                 </svg>
               },
-            ].map(({ id, label, icon }) => (
-              <button key={id} onClick={() => setActiveTab(id)}
-                className={`grm-pill grm-pill-accent${activeTab===id?" active":""}`}
-                style={{ display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"8px 14px" }}>
-                <span style={{ color:activeTab===id?"var(--accent)":"var(--muted)",display:"flex" }}>{icon}</span>
-                {label}
-              </button>
-            ))}
+            ].map(({ id, label, icon }) => {
+              const on = activeTab === id;
+              return (
+                <button key={id} onClick={() => setActiveTab(id)} style={{
+                  flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                  padding:"9px 0", fontSize:11, fontWeight:800, fontFamily:C.font,
+                  background: on ? C.surface      : "transparent",
+                  color:      on ? C.accent        : C.muted,
+                  border:     on ? `1px solid ${C.accent}40` : `1px solid ${C.border}`,
+                  borderRadius:8,
+                  boxShadow:  on ? "0 1px 6px rgba(0,0,0,0.22)" : "none",
+                  cursor:"pointer", transition:"all .15s",
+                  WebkitTapHighlightColor:"transparent",
+                }}>
+                  <span style={{ color: on ? C.accent : C.muted, display:"flex", opacity: on ? 1 : 0.6 }}>{icon}</span>
+                  {label}
+                </button>
+              );
+            })}
+            </div>
           </div>
         )}
 
