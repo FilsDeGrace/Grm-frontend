@@ -7591,145 +7591,197 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     );
   }
 
-  // ── Ready — render strategy cards ────────────────────────────────────────────
-  const markets = (strat) => {
-    const mkts = [...new Set((strat.legs || []).map(l => l.market).filter(Boolean))];
-    if (!mkts.length) return "—";
-    if (mkts.length === 1) return mkts[0];
-    return mkts.length <= 2 ? mkts.join(" · ") : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
+  // ── Derive human-readable strategy name + rationale from TA data ────────────
+  // TA strategies don't ship with display names — we infer from the data fields.
+  const getStrategyMeta = (strat, idx) => {
+    const legs = strat.legs || [];
+    const mkts = [...new Set(legs.map(l => l.market).filter(Boolean))];
+    const hasDA  = strat.learnedHR > 0;
+    const hasSA  = strat.saPositive > 0;
+    const hasAll = hasDA && hasSA;
+    const legCount = legs.length;
+
+    // Strategy name — derived from dominant market + signal mix
+    const dominant = mkts[0] || "";
+    const isUnder  = dominant.toLowerCase().includes("under");
+    const isOver   = dominant.toLowerCase().includes("over");
+    const isDC     = dominant.toLowerCase().includes("dc");
+    const isTB     = dominant.toLowerCase().includes("tb");
+    const isGoals  = isOver || isUnder;
+
+    let name, colour;
+    if (hasAll && isGoals)      { name = "DA + SA · Goals";         colour = C.green; }
+    else if (hasAll && isDC)    { name = "DA + SA · Cover";         colour = C.green; }
+    else if (hasAll)            { name = "Full Signal · "+dominant; colour = C.green; }
+    else if (hasDA && isTB)     { name = "DA Momentum · Team";      colour = C.edge;  }
+    else if (hasDA && isGoals)  { name = "DA Pattern · Goals";      colour = C.edge;  }
+    else if (hasDA)             { name = "DA Backed";                colour = C.edge;  }
+    else if (hasSA && isDC)     { name = "SA · Draw Cover";         colour = C.radar; }
+    else if (hasSA)             { name = "SA Pattern";              colour = C.radar; }
+    else if (isDC)              { name = "Low Risk · DC";           colour = C.muted; }
+    else if (isUnder)           { name = "Goals Under";             colour = C.muted; }
+    else if (isOver)            { name = "Goals Over";              colour = C.muted; }
+    else                        { name = `Strategy ${idx+1}`;       colour = C.muted; }
+
+    // One-line rationale
+    const pct = strat.parlayPct;
+    const pctStr = pct != null ? `${pct}% parlay probability` : null;
+    const daStr  = hasDA  ? `${strat.learnedHR}% DA hit rate` : null;
+    const saStr  = hasSA  ? `${strat.saPositive} SA pattern${strat.saPositive!==1?"s":""}` : null;
+    const bits   = [daStr, saStr, pctStr].filter(Boolean);
+    const rationale = bits.length
+      ? bits.join(" · ")
+      : `${legCount} leg${legCount!==1?"s":""} · ${mkts.slice(0,2).join(", ") || "mixed markets"}`;
+
+    // Market summary for collapsed view
+    const marketSummary = mkts.length === 0 ? "—"
+      : mkts.length <= 2 ? mkts.join(" · ")
+      : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
+
+    return { name, colour, rationale, marketSummary };
   };
 
+  // ── Strategy colour palette — each card gets a distinct left-border accent ──
+  const PALETTE = [C.accent, C.edge, C.radar, C.gold];
+
   return (
-    <div style={{ display:"flex",flexDirection:"column",gap:10 }}>
-      {/* Subtitle */}
-      <div style={{ fontSize:8,color:C.muted,letterSpacing:".08em",marginBottom:2 }}>
-        {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap to expand
+    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+
+      {/* Header — count + date context */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4 }}>
+        <div style={{ fontSize:9, color:C.muted, letterSpacing:".06em" }}>
+          {strategies.length} pre-built ticket{strategies.length!==1?"s":""} for today
+        </div>
+        <div style={{ fontSize:8, color:C.muted, opacity:.6 }}>tap to see legs</div>
       </div>
 
       {strategies.map((strat, idx) => {
-        const isOpen  = expanded === strat.id;
-        const isUsed  = usedIds.has(strat.id);
-        const odds    = strat.combinedOdds;
-        const pct     = strat.parlayPct;
+        const isOpen   = expanded === strat.id;
+        const isUsed   = usedIds.has(strat.id);
+        const odds     = strat.combinedOdds;
         const legCount = (strat.legs || []).length;
-        const hrLabel = strat.learnedHR ? `${strat.learnedHR}% DA` : null;
-        const saLabel = strat.saPositive > 0 ? `${strat.saPositive} SA` : null;
-        const hasMeta = hrLabel || saLabel;
+        const hrLabel  = strat.learnedHR ? `${strat.learnedHR}% DA` : null;
+        const saLabel  = strat.saPositive > 0 ? `${strat.saPositive} SA` : null;
+        const { name, colour, rationale, marketSummary } = getStrategyMeta(strat, idx);
+        const accentCol = PALETTE[idx % PALETTE.length];
 
         return (
-          <div key={strat.id}
-            style={{
-              background: C.surface,
-              border: `1px solid ${isOpen ? C.accent : C.border}`,
-              borderRadius: 12,
-              overflow: "hidden",
-              transition: "border-color .15s",
-            }}>
+          <div key={strat.id} style={{
+            background: C.surface,
+            border: `1px solid ${isOpen ? accentCol : C.border}`,
+            borderLeft: `3px solid ${accentCol}`,
+            borderRadius: 12,
+            overflow: "hidden",
+            transition: "border-color .15s",
+            opacity: isUsed ? 0.75 : 1,
+          }}>
 
-            {/* ── Card header (always visible) ── */}
-            <div
-              onClick={() => setExpanded(isOpen ? null : strat.id)}
-              style={{ padding:"12px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10 }}>
+            {/* ── Collapsed header — always visible ── */}
+            <div onClick={() => setExpanded(isOpen ? null : strat.id)}
+              style={{ padding:"11px 14px", cursor:"pointer" }}>
 
-              {/* Index badge */}
-              <div style={{
-                width:26,height:26,borderRadius:"50%",flexShrink:0,
-                background: isUsed ? C.green : C.accent,
-                display:"flex",alignItems:"center",justifyContent:"center",
-              }}>
-                {isUsed
-                  ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  : <span style={{ fontSize:9,fontWeight:800,color:C.accentText }}>{idx+1}</span>}
-              </div>
-
-              {/* Main info */}
-              <div style={{ flex:1,minWidth:0 }}>
-                {/* Odds — the primary label */}
-                <div style={{ fontSize:14,fontWeight:800,color:C.text,lineHeight:1 }}>
-                  {odds ? `${odds}×` : "—"}
-                  <span style={{ fontSize:9,fontWeight:500,color:C.muted,marginLeft:6 }}>
-                    {pct != null ? `${pct}% parlay` : ""}
+              {/* Row 1: strategy name + tags */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:5 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+                  {/* Strategy name badge */}
+                  <span style={{ fontSize:8, fontWeight:800, color:accentCol,
+                                 background:`${accentCol}15`, borderRadius:5,
+                                 padding:"2px 7px", letterSpacing:".04em", textTransform:"uppercase" }}>
+                    {name}
                   </span>
+                  {/* DA/SA signal tags */}
+                  {hrLabel && (
+                    <span style={{ fontSize:7, fontWeight:700, color:C.green,
+                                   background:`${C.green}15`, borderRadius:4, padding:"1px 5px" }}>
+                      {hrLabel}
+                    </span>
+                  )}
+                  {saLabel && (
+                    <span style={{ fontSize:7, fontWeight:700, color:C.edge,
+                                   background:`${C.edge}15`, borderRadius:4, padding:"1px 5px" }}>
+                      {saLabel}
+                    </span>
+                  )}
                 </div>
-                {/* Leg count + markets */}
-                <div style={{ fontSize:8,color:C.muted,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
-                  {legCount} leg{legCount!==1?"s":""} · {markets(strat)}
-                </div>
+                {/* Used tick or chevron */}
+                {isUsed
+                  ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
+                      strokeLinecap="round" strokeLinejoin="round"
+                      style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s" }}>
+                      <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                }
               </div>
 
-              {/* DA/SA tags + chevron */}
-              <div style={{ display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0 }}>
-                {hasMeta && (
-                  <div style={{ display:"flex",gap:4 }}>
-                    {hrLabel && (
-                      <span style={{ fontSize:7,fontWeight:700,color:C.green,background:`${C.green}18`,
-                                     borderRadius:4,padding:"1px 5px" }}>{hrLabel}</span>
-                    )}
-                    {saLabel && (
-                      <span style={{ fontSize:7,fontWeight:700,color:C.edge,background:`${C.edge}18`,
-                                     borderRadius:4,padding:"1px 5px" }}>{saLabel}</span>
-                    )}
-                  </div>
-                )}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
-                  strokeLinecap="round" strokeLinejoin="round"
-                  style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)",transition:"transform .2s" }}>
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
+              {/* Row 2: odds (big) + rationale (small) */}
+              <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:3 }}>
+                <span style={{ fontSize:18, fontWeight:800, color:C.text, lineHeight:1 }}>
+                  {odds ? `${odds}×` : "—"}
+                </span>
+                <span style={{ fontSize:8, color:C.muted, lineHeight:1.4, flex:1 }}>
+                  {rationale}
+                </span>
+              </div>
+
+              {/* Row 3: legs + market summary */}
+              <div style={{ fontSize:8, color:C.muted, opacity:.7 }}>
+                {legCount} leg{legCount!==1?"s":""} · {marketSummary}
               </div>
             </div>
 
-            {/* ── Expanded legs + CTA ── */}
+            {/* ── Expanded: legs + CTA ── */}
             {isOpen && (
-              <div style={{ borderTop:`1px solid ${C.border}`,padding:"10px 14px 14px" }}>
-                {/* Tier note */}
+              <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
                 {strat.note && (
-                  <div style={{ fontSize:8,color:C.muted,marginBottom:8,fontStyle:"italic" }}>
+                  <div style={{ fontSize:8, color:C.muted, marginBottom:8,
+                                fontStyle:"italic", lineHeight:1.5 }}>
                     {strat.note}
                   </div>
                 )}
 
-                {/* Legs */}
-                <div style={{ display:"flex",flexDirection:"column",gap:5,marginBottom:12 }}>
+                {/* Legs list */}
+                <div style={{ display:"flex", flexDirection:"column", gap:5, marginBottom:12 }}>
                   {(strat.legs || []).map((leg, li) => (
                     <div key={li} style={{
-                      display:"flex",justifyContent:"space-between",alignItems:"center",
-                      padding:"6px 9px",background:C.bg,borderRadius:7,
+                      display:"flex", justifyContent:"space-between", alignItems:"center",
+                      padding:"7px 10px", background:C.bg, borderRadius:8,
                       border:`1px solid ${C.border}`,
                     }}>
-                      <div style={{ minWidth:0,flex:1 }}>
-                        <div style={{ fontSize:9,color:C.text,fontWeight:700,
-                                      whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
-                          {leg.game || `${leg.home} vs ${leg.away}`}
+                      <div style={{ minWidth:0, flex:1 }}>
+                        <div style={{ fontSize:9, color:C.text, fontWeight:700,
+                                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                          {leg.game || `${leg.home || "?"} vs ${leg.away || "?"}`}
                         </div>
-                        <div style={{ fontSize:8,color:C.muted,marginTop:1 }}>
+                        <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
                           {leg.market}{leg.league ? ` · ${leg.league}` : ""}
                         </div>
                       </div>
-                      <div style={{ textAlign:"right",flexShrink:0,marginLeft:8 }}>
-                        {leg.odds ? (
-                          <span style={{ fontSize:10,fontWeight:800,color:C.gold }}>{leg.odds}×</span>
-                        ) : (
-                          <span style={{ fontSize:9,color:C.muted }}>
-                            {leg.conf ? `${leg.conf}%` : "—"}
-                          </span>
-                        )}
+                      <div style={{ textAlign:"right", flexShrink:0, marginLeft:10 }}>
+                        {leg.odds
+                          ? <span style={{ fontSize:11, fontWeight:800, color:C.gold }}>{leg.odds}×</span>
+                          : <span style={{ fontSize:9, color:C.muted }}>{leg.conf ? `${leg.conf}%` : "—"}</span>
+                        }
                       </div>
                     </div>
                   ))}
                 </div>
 
-                {/* Use This Ticket CTA */}
+                {/* CTA */}
                 <button
                   onClick={() => {
                     onUseTicket(strat);
                     setUsedIds(prev => new Set([...prev, strat.id]));
-                    // Scroll to ticket list — close the card
                     setExpanded(null);
                   }}
-                  className="gb-primary"
-                  style={{ width:"100%",padding:"11px 0",fontSize:11,fontWeight:800 }}>
-                  {isUsed ? "↺ Re-add Ticket" : "Use This Ticket"}
+                  style={{
+                    width:"100%", padding:"11px 0", fontSize:11, fontWeight:800,
+                    background: accentCol, color:"#fff",
+                    border:"none", borderRadius:8, cursor:"pointer",
+                    fontFamily:C.font, letterSpacing:".04em",
+                    transition:"opacity .15s",
+                  }}>
+                  {isUsed ? "↺ Re-add to Builder" : "Use This Ticket →"}
                 </button>
               </div>
             )}
@@ -8226,24 +8278,31 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           </svg>
         </button>
 
-        {/* Pill tabs — Builder and Saved */}
-        <div style={{ display:"flex",gap:4,flex:1 }}>
+        {/* P12-FIX: Builder/Saved — segmented control, matches Jarvis/Custom style */}
+        <div style={{ display:"flex", gap:2, flex:1,
+                      background:C.faint, borderRadius:10, padding:3 }}>
           {[
             { id:"parlay", label:`Builder${draftLegs.length+tickets.length>0?` (${draftLegs.length+tickets.length})`:""}`,
-              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
+              icon:<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
             { id:"saved",  label:`Saved${savedTickets.length>0?` (${savedTickets.length})`:""}`,
-              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
-          ].map(t => (
-            // P12-FIX: inactive pill needs explicit border — transparent border was invisible
-            <button key={t.id} onClick={() => setView(t.id)}
-              className={`grm-pill${view===t.id?" active":""}`}
-              style={{ display:"flex", alignItems:"center", gap:5,
-                       border: view===t.id ? undefined : `1px solid ${C.border}`,
-                       color:  view===t.id ? undefined : C.text }}>
-              <span style={{ color: view===t.id ? "var(--accent)" : "var(--muted)" }}>{t.icon}</span>
-              {t.label}
-            </button>
-          ))}
+              icon:<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
+          ].map(t => {
+            const active = view === t.id;
+            return (
+              <button key={t.id} onClick={() => setView(t.id)}
+                style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+                         padding:"7px 8px", fontSize:10, fontWeight:800, fontFamily:C.font,
+                         background: active ? C.surface : "transparent",
+                         color:      active ? C.accent  : C.muted,
+                         border:     active ? `1px solid ${C.border}` : "1px solid transparent",
+                         borderRadius:8,
+                         boxShadow:  active ? "0 1px 4px rgba(0,0,0,0.18)" : "none",
+                         cursor:"pointer", transition:"all .15s" }}>
+                <span style={{ opacity: active ? 1 : 0.5, display:"flex" }}>{t.icon}</span>
+                {t.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -8278,32 +8337,33 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
               {/* ── Parley System explainer — shown once, dismissable ── */}
               <ParlayExplainer />
 
-              {/* ── Tab strip: Jarvis | Custom ── */}
-              <div style={{ display:"flex",marginBottom:16,background:C.bg,borderRadius:12,padding:3,border:`1px solid ${C.border}`,gap:3 }}>
+              {/* ── Tab strip: Jarvis | Custom — lightweight segmented control ── */}
+              <div style={{ display:"flex", marginBottom:16, background:C.faint,
+                            borderRadius:10, padding:3, gap:2 }}>
                 {[
-                  { id:"jarvis", label:"Jarvis",
-                    icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
-                    desc:"AI-built ticket" },
-                  { id:"custom", label:"Custom",
-                    icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>,
-                    desc:"Your rules" },
-                ].map(m => (
-                  <button key={m.id} onClick={() => setBuilderMode(m.id)}
-                    style={{
-                      flex:1,padding:"9px 6px",
-                      display:"flex",flexDirection:"column",alignItems:"center",gap:3,
-                      fontSize:9,fontWeight:800,
-                      background: builderMode===m.id ? C.accent : "transparent",
-                      color: builderMode===m.id ? C.accentText : C.muted,
-                      border:"none",borderRadius:10,
-                      transition:"all .18s ease",cursor:"pointer",
-                      fontFamily:C.font,
-                    }}>
-                    <span style={{ opacity: builderMode===m.id ? 1 : 0.6 }}>{m.icon}</span>
-                    <span>{m.label}</span>
-                    <span style={{ fontSize:7,opacity:.7,fontWeight:500 }}>{m.desc}</span>
-                  </button>
-                ))}
+                  { id:"jarvis", label:"Jarvis",     desc:"AI-built ticket" },
+                  { id:"custom", label:"Custom",     desc:"Your rules" },
+                ].map(m => {
+                  const active = builderMode === m.id;
+                  return (
+                    <button key={m.id} onClick={() => setBuilderMode(m.id)}
+                      style={{
+                        flex:1, padding:"7px 8px",
+                        display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                        fontSize:10, fontWeight:800,
+                        background: active ? C.surface : "transparent",
+                        color:      active ? C.accent  : C.muted,
+                        border:     active ? `1px solid ${C.border}` : "1px solid transparent",
+                        borderRadius:8,
+                        boxShadow:  active ? "0 1px 4px rgba(0,0,0,0.18)" : "none",
+                        transition: "all .15s ease", cursor:"pointer",
+                        fontFamily: C.font,
+                      }}>
+                      <span style={{ fontSize:8, opacity: active ? 0.9 : 0.5, fontWeight:500 }}>{m.desc}</span>
+                      <span style={{ fontSize:10, fontWeight:800 }}>{m.label}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* ── JARVIS TAB — TA Pre-built Slate ── */}
@@ -10485,14 +10545,21 @@ export default function GRMPro() {
                   <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
                 </svg>
               },
-            ].map(({ id, label, icon }) => (
-              <button key={id} onClick={() => setActiveTab(id)}
-                className={`grm-pill grm-pill-accent${activeTab===id?" active":""}`}
-                style={{ display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"8px 14px" }}>
-                <span style={{ color:activeTab===id?"var(--accent)":"var(--muted)",display:"flex" }}>{icon}</span>
-                {label}
-              </button>
-            ))}
+            ].map(({ id, label, icon }) => {
+              const active = activeTab === id;
+              return (
+                // P12-FIX: inactive tab gets border so both read as navigable
+                <button key={id} onClick={() => setActiveTab(id)}
+                  className={`grm-pill${active?" grm-pill-accent active":""}`}
+                  style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, padding:"8px 14px",
+                           border: active ? undefined : `1px solid ${C.border}`,
+                           color:  active ? undefined : C.text,
+                           background: active ? undefined : "transparent" }}>
+                  <span style={{ color: active ? "var(--accent)" : "var(--muted)", display:"flex" }}>{icon}</span>
+                  {label}
+                </button>
+              );
+            })}
           </div>
         )}
 
