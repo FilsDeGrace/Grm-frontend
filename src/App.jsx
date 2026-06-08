@@ -7591,167 +7591,135 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     );
   }
 
-  // ── Derive human-readable strategy name + rationale from TA data ────────────
-  // TA strategies don't ship with display names — we infer from the data fields.
-  const getStrategyMeta = (strat, idx) => {
-    const legs = strat.legs || [];
-    const mkts = [...new Set(legs.map(l => l.market).filter(Boolean))];
-    const hasDA  = strat.learnedHR > 0;
-    const hasSA  = strat.saPositive > 0;
-    const hasAll = hasDA && hasSA;
-    const legCount = legs.length;
+  // ── Strategy label + rationale — derived from TA signal data ───────────────
+  // DA  = Directional Accuracy: how often this exact market+context has landed
+  //        historically in GRM's learned data. High DA = pattern has real backing.
+  // SA  = Situational Agreement: separate pattern engine that checks team form,
+  //        fixture context, and market behaviour. SA patterns confirm the pick
+  //        from a different angle. DA + SA together = two independent signals agree.
+  const getStrategyLabel = (strat, idx) => {
+    const legs    = strat.legs || [];
+    const mkts    = [...new Set(legs.map(l => l.market).filter(Boolean))];
+    const dom     = (mkts[0] || "").toLowerCase();
+    const hasDA   = (strat.learnedHR || 0) > 0;
+    const hasSA   = (strat.saPositive || 0) > 0;
+    const isGoals = dom.includes("over") || dom.includes("under");
+    const isDC    = dom.includes("dc");
+    const isTB    = dom.includes("tb:");
 
-    // Strategy name — derived from dominant market + signal mix
-    const dominant = mkts[0] || "";
-    const isUnder  = dominant.toLowerCase().includes("under");
-    const isOver   = dominant.toLowerCase().includes("over");
-    const isDC     = dominant.toLowerCase().includes("dc");
-    const isTB     = dominant.toLowerCase().includes("tb");
-    const isGoals  = isOver || isUnder;
+    // Name — short, scannable
+    let name;
+    if (hasDA && hasSA && isGoals) name = "Goals Momentum";
+    else if (hasDA && hasSA && isDC) name = "DA + SA Cover";
+    else if (hasDA && hasSA)         name = "Full Signal";
+    else if (hasDA && isTB)          name = "DA Team Goals";
+    else if (hasDA && isGoals)       name = "DA Goals";
+    else if (hasDA)                  name = "DA Backed";
+    else if (hasSA && isDC)          name = "SA Draw Cover";
+    else if (hasSA)                  name = "SA Pattern";
+    else if (isDC)                   name = "Low Risk DC";
+    else if (dom.includes("under"))  name = "Goals Under";
+    else if (dom.includes("over"))   name = "Goals Over";
+    else                             name = `Pick ${idx + 1}`;
 
-    let name, colour;
-    if (hasAll && isGoals)      { name = "DA + SA · Goals";         colour = C.green; }
-    else if (hasAll && isDC)    { name = "DA + SA · Cover";         colour = C.green; }
-    else if (hasAll)            { name = "Full Signal · "+dominant; colour = C.green; }
-    else if (hasDA && isTB)     { name = "DA Momentum · Team";      colour = C.edge;  }
-    else if (hasDA && isGoals)  { name = "DA Pattern · Goals";      colour = C.edge;  }
-    else if (hasDA)             { name = "DA Backed";                colour = C.edge;  }
-    else if (hasSA && isDC)     { name = "SA · Draw Cover";         colour = C.radar; }
-    else if (hasSA)             { name = "SA Pattern";              colour = C.radar; }
-    else if (isDC)              { name = "Low Risk · DC";           colour = C.muted; }
-    else if (isUnder)           { name = "Goals Under";             colour = C.muted; }
-    else if (isOver)            { name = "Goals Over";              colour = C.muted; }
-    else                        { name = `Strategy ${idx+1}`;       colour = C.muted; }
+    // One-line rationale — explain what the signals mean in plain English
+    let rationale;
+    if (hasDA && hasSA)
+      rationale = `${strat.learnedHR}% historical hit rate · ${strat.saPositive} pattern${strat.saPositive!==1?"s":""} confirm`;
+    else if (hasDA)
+      rationale = `${strat.learnedHR}% historical hit rate on this market`;
+    else if (hasSA)
+      rationale = `${strat.saPositive} situational pattern${strat.saPositive!==1?"s":""} aligned`;
+    else
+      rationale = mkts.slice(0, 2).join(" · ") || "Mixed markets";
 
-    // One-line rationale
-    const pct = strat.parlayPct;
-    const pctStr = pct != null ? `${pct}% parlay probability` : null;
-    const daStr  = hasDA  ? `${strat.learnedHR}% DA hit rate` : null;
-    const saStr  = hasSA  ? `${strat.saPositive} SA pattern${strat.saPositive!==1?"s":""}` : null;
-    const bits   = [daStr, saStr, pctStr].filter(Boolean);
-    const rationale = bits.length
-      ? bits.join(" · ")
-      : `${legCount} leg${legCount!==1?"s":""} · ${mkts.slice(0,2).join(", ") || "mixed markets"}`;
-
-    // Market summary for collapsed view
-    const marketSummary = mkts.length === 0 ? "—"
-      : mkts.length <= 2 ? mkts.join(" · ")
-      : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
-
-    return { name, colour, rationale, marketSummary };
+    return { name, rationale };
   };
 
-  // ── Strategy colour palette — each card gets a distinct left-border accent ──
-  const PALETTE = [C.accent, C.edge, C.radar, C.gold];
-
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
 
-      {/* Header — count + date context */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4 }}>
-        <div style={{ fontSize:9, color:C.muted, letterSpacing:".06em" }}>
-          {strategies.length} pre-built ticket{strategies.length!==1?"s":""} for today
-        </div>
-        <div style={{ fontSize:8, color:C.muted, opacity:.6 }}>tap to see legs</div>
+      {/* Header */}
+      <div style={{ fontSize:8, color:C.muted, letterSpacing:".06em", marginBottom:2 }}>
+        {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap any to see legs
       </div>
 
       {strategies.map((strat, idx) => {
         const isOpen   = expanded === strat.id;
         const isUsed   = usedIds.has(strat.id);
         const odds     = strat.combinedOdds;
+        const pct      = strat.parlayPct;
         const legCount = (strat.legs || []).length;
-        const hrLabel  = strat.learnedHR ? `${strat.learnedHR}% DA` : null;
-        const saLabel  = strat.saPositive > 0 ? `${strat.saPositive} SA` : null;
-        const { name, colour, rationale, marketSummary } = getStrategyMeta(strat, idx);
-        const accentCol = PALETTE[idx % PALETTE.length];
+        const mkts     = [...new Set((strat.legs||[]).map(l=>l.market).filter(Boolean))];
+        const mktStr   = mkts.length === 0 ? "—"
+          : mkts.length <= 2 ? mkts.join(" · ")
+          : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
+        const { name, rationale } = getStrategyLabel(strat, idx);
 
         return (
           <div key={strat.id} style={{
             background: C.surface,
-            border: `1px solid ${isOpen ? accentCol : C.border}`,
-            borderLeft: `3px solid ${accentCol}`,
-            borderRadius: 12,
+            border: `1px solid ${isOpen ? C.accent+"80" : C.border}`,
+            borderRadius: 10,
             overflow: "hidden",
             transition: "border-color .15s",
-            opacity: isUsed ? 0.75 : 1,
           }}>
 
-            {/* ── Collapsed header — always visible ── */}
+            {/* ── Collapsed — scan row ── */}
             <div onClick={() => setExpanded(isOpen ? null : strat.id)}
-              style={{ padding:"11px 14px", cursor:"pointer" }}>
+              style={{ padding:"12px 14px", cursor:"pointer" }}>
 
-              {/* Row 1: strategy name + tags */}
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:5 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:7 }}>
-                  {/* Strategy name badge */}
-                  <span style={{ fontSize:8, fontWeight:800, color:accentCol,
-                                 background:`${accentCol}15`, borderRadius:5,
-                                 padding:"2px 7px", letterSpacing:".04em", textTransform:"uppercase" }}>
-                    {name}
-                  </span>
-                  {/* DA/SA signal tags */}
-                  {hrLabel && (
-                    <span style={{ fontSize:7, fontWeight:700, color:C.green,
-                                   background:`${C.green}15`, borderRadius:4, padding:"1px 5px" }}>
-                      {hrLabel}
-                    </span>
-                  )}
-                  {saLabel && (
-                    <span style={{ fontSize:7, fontWeight:700, color:C.edge,
-                                   background:`${C.edge}15`, borderRadius:4, padding:"1px 5px" }}>
-                      {saLabel}
-                    </span>
-                  )}
-                </div>
-                {/* Used tick or chevron */}
-                {isUsed
-                  ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
-                      strokeLinecap="round" strokeLinejoin="round"
-                      style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s" }}>
-                      <polyline points="6 9 12 15 18 9"/>
-                    </svg>
-                }
+              {/* Strategy name + chevron */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                <span style={{
+                  fontSize:8, fontWeight:800, letterSpacing:".06em", textTransform:"uppercase",
+                  color:C.accent, background:`${C.accent}14`, borderRadius:5, padding:"2px 8px"
+                }}>{name}</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
+                  strokeLinecap="round" strokeLinejoin="round"
+                  style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", flexShrink:0 }}>
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
               </div>
 
-              {/* Row 2: odds (big) + rationale (small) */}
-              <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:3 }}>
-                <span style={{ fontSize:18, fontWeight:800, color:C.text, lineHeight:1 }}>
-                  {odds ? `${odds}×` : "—"}
-                </span>
-                <span style={{ fontSize:8, color:C.muted, lineHeight:1.4, flex:1 }}>
-                  {rationale}
-                </span>
+              {/* Odds — big and primary */}
+              <div style={{ fontSize:20, fontWeight:800, color: isUsed ? C.green : C.text, lineHeight:1, marginBottom:4 }}>
+                {odds ? `${odds}×` : "—"}
+                {isUsed && (
+                  <svg style={{ marginLeft:6, verticalAlign:"middle" }} width="13" height="13" viewBox="0 0 24 24"
+                    fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12"/>
+                  </svg>
+                )}
               </div>
 
-              {/* Row 3: legs + market summary */}
+              {/* Rationale — one line, plain English */}
+              <div style={{ fontSize:9, color:C.muted, marginBottom:3, lineHeight:1.4 }}>
+                {rationale}
+              </div>
+
+              {/* Leg count · market · parlay % */}
               <div style={{ fontSize:8, color:C.muted, opacity:.7 }}>
-                {legCount} leg{legCount!==1?"s":""} · {marketSummary}
+                {legCount} leg{legCount!==1?"s":""} · {mktStr}{pct != null ? ` · ${pct}% probability` : ""}
               </div>
             </div>
 
-            {/* ── Expanded: legs + CTA ── */}
+            {/* ── Expanded legs + CTA ── */}
             {isOpen && (
               <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
-                {strat.note && (
-                  <div style={{ fontSize:8, color:C.muted, marginBottom:8,
-                                fontStyle:"italic", lineHeight:1.5 }}>
-                    {strat.note}
-                  </div>
-                )}
 
-                {/* Legs list */}
-                <div style={{ display:"flex", flexDirection:"column", gap:5, marginBottom:12 }}>
+                {/* Legs */}
+                <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
                   {(strat.legs || []).map((leg, li) => (
                     <div key={li} style={{
                       display:"flex", justifyContent:"space-between", alignItems:"center",
-                      padding:"7px 10px", background:C.bg, borderRadius:8,
+                      padding:"7px 10px", background:C.bg, borderRadius:7,
                       border:`1px solid ${C.border}`,
                     }}>
                       <div style={{ minWidth:0, flex:1 }}>
                         <div style={{ fontSize:9, color:C.text, fontWeight:700,
                                       whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-                          {leg.game || `${leg.home || "?"} vs ${leg.away || "?"}`}
+                          {leg.game || `${leg.home||"?"} vs ${leg.away||"?"}`}
                         </div>
                         <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
                           {leg.market}{leg.league ? ` · ${leg.league}` : ""}
@@ -7769,18 +7737,9 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
 
                 {/* CTA */}
                 <button
-                  onClick={() => {
-                    onUseTicket(strat);
-                    setUsedIds(prev => new Set([...prev, strat.id]));
-                    setExpanded(null);
-                  }}
-                  style={{
-                    width:"100%", padding:"11px 0", fontSize:11, fontWeight:800,
-                    background: accentCol, color:"#fff",
-                    border:"none", borderRadius:8, cursor:"pointer",
-                    fontFamily:C.font, letterSpacing:".04em",
-                    transition:"opacity .15s",
-                  }}>
+                  onClick={() => { onUseTicket(strat); setUsedIds(prev => new Set([...prev, strat.id])); setExpanded(null); }}
+                  className="gb-primary"
+                  style={{ width:"100%", padding:"11px 0", fontSize:11, fontWeight:800 }}>
                   {isUsed ? "↺ Re-add to Builder" : "Use This Ticket →"}
                 </button>
               </div>
@@ -7791,7 +7750,6 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     </div>
   );
 }
-
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
@@ -8278,31 +8236,21 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           </svg>
         </button>
 
-        {/* P12-FIX: Builder/Saved — segmented control, matches Jarvis/Custom style */}
-        <div style={{ display:"flex", gap:2, flex:1,
-                      background:C.faint, borderRadius:10, padding:3 }}>
+        {/* Pill tabs — Builder and Saved */}
+        <div style={{ display:"flex",gap:4,flex:1 }}>
           {[
             { id:"parlay", label:`Builder${draftLegs.length+tickets.length>0?` (${draftLegs.length+tickets.length})`:""}`,
-              icon:<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
+              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
             { id:"saved",  label:`Saved${savedTickets.length>0?` (${savedTickets.length})`:""}`,
-              icon:<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
-          ].map(t => {
-            const active = view === t.id;
-            return (
-              <button key={t.id} onClick={() => setView(t.id)}
-                style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:5,
-                         padding:"7px 8px", fontSize:10, fontWeight:800, fontFamily:C.font,
-                         background: active ? C.surface : "transparent",
-                         color:      active ? C.accent  : C.muted,
-                         border:     active ? `1px solid ${C.border}` : "1px solid transparent",
-                         borderRadius:8,
-                         boxShadow:  active ? "0 1px 4px rgba(0,0,0,0.18)" : "none",
-                         cursor:"pointer", transition:"all .15s" }}>
-                <span style={{ opacity: active ? 1 : 0.5, display:"flex" }}>{t.icon}</span>
-                {t.label}
-              </button>
-            );
-          })}
+              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
+          ].map(t => (
+            <button key={t.id} onClick={() => setView(t.id)}
+              className={`grm-pill${view===t.id?" active":""}`}
+              style={{ display:"flex",alignItems:"center",gap:5 }}>
+              <span style={{ color: view===t.id ? "var(--accent)" : "var(--muted)" }}>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -10545,21 +10493,14 @@ export default function GRMPro() {
                   <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
                 </svg>
               },
-            ].map(({ id, label, icon }) => {
-              const active = activeTab === id;
-              return (
-                // P12-FIX: inactive tab gets border so both read as navigable
-                <button key={id} onClick={() => setActiveTab(id)}
-                  className={`grm-pill${active?" grm-pill-accent active":""}`}
-                  style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, padding:"8px 14px",
-                           border: active ? undefined : `1px solid ${C.border}`,
-                           color:  active ? undefined : C.text,
-                           background: active ? undefined : "transparent" }}>
-                  <span style={{ color: active ? "var(--accent)" : "var(--muted)", display:"flex" }}>{icon}</span>
-                  {label}
-                </button>
-              );
-            })}
+            ].map(({ id, label, icon }) => (
+              <button key={id} onClick={() => setActiveTab(id)}
+                className={`grm-pill grm-pill-accent${activeTab===id?" active":""}`}
+                style={{ display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"8px 14px" }}>
+                <span style={{ color:activeTab===id?"var(--accent)":"var(--muted)",display:"flex" }}>{icon}</span>
+                {label}
+              </button>
+            ))}
           </div>
         )}
 
