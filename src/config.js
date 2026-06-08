@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://865cb86519a89c.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://4a116ab946407e.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 export const SS_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
