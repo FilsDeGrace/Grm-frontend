@@ -1999,10 +1999,12 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
   const pendingOnboardRef = useRef(false);
   const lockedDateRef = useRef(null);
 
-  // Notify App whenever chain changes so Jarvis always has the real chain
+  // Notify App whenever chain or pick changes so Jarvis always has the real chain + today's pick
   useEffect(() => {
-    onChainChange?.(chain);
-  }, [chain, onChainChange]);
+    if (!chain) { onChainChange?.(null); return; }
+    // Merge pick into chain so Jarvis can access chain.todayPick without a separate prop
+    onChainChange?.({ ...chain, todayPick: pick || null });
+  }, [chain, pick, onChainChange]);
 
   // Stable device UUID — generated once, persisted in localStorage
   const userId = useRef(getOrCreateUUID()).current;

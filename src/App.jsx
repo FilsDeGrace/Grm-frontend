@@ -7796,9 +7796,15 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [activeTicketId, setActiveTicketId] = useState(null);
 
   // When Jarvis sends a pre-built ticket via "Book Now" / "View Full",
-  // save it and open it in the Builder tab as the active ticket — one tap to Book Now.
+  // save it and open it. Book Now → Saved tab. View Full → Builder tab.
   useEffect(() => {
     if (!jarvisBuiltTicket) return;
+    // _viewSaved = true means "Book Now" was tapped — route to Saved tab
+    if (jarvisBuiltTicket._viewSaved) {
+      setView("saved");
+      onJarvisBuiltTicketConsumed?.();
+      return;
+    }
     const exists = savedTickets.find(t => t.id === jarvisBuiltTicket.id);
     if (!exists) {
       const payload = { ...jarvisBuiltTicket, source: "jarvis_chat", savedAt: new Date().toISOString() };
@@ -7807,7 +7813,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       persistTickets(updated);
     }
     setActiveTicketId(jarvisBuiltTicket.id);
-    setView("parley"); // open Builder tab, not Saved — ticket detail opens from activeTicketId
+    setView("parley"); // View Full → Builder tab with ticket active
     onJarvisBuiltTicketConsumed?.();
   }, [jarvisBuiltTicket]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -9617,9 +9623,12 @@ export default function GRMPro() {
       return;
     }
     if (navTab === "saved") {
-      setMainView("main");
-      setActiveTab("parley"); // Saved tickets live inside the parley tab
-      setParlayJarvisOpen(false);
+      // "saved" means open Parley System on the Saved sub-tab
+      setParlayJarvisOpen(true);
+      // Signal ParlayJarvisTab to switch to saved view after mount
+      if (dest.ticketId || dest.ticket) {
+        setJarvisBuiltTicket(dest.ticket || { id: dest.ticketId, _viewSaved: true });
+      }
       if (!keepOpen) setJarvisOpen(false);
       return;
     }

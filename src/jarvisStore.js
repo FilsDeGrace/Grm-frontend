@@ -34,6 +34,12 @@ export const INTENT = {
   NAVIGATE_ENGINE:          "NAVIGATE_ENGINE",
   SAVED_PARLEYS:      "SAVED_PARLEYS",
   STRATEGY:           "STRATEGY",
+  BUILD_WITH_MATCH:   "BUILD_WITH_MATCH",   // "build a parley with X vs Y"
+  BUILD_WITH_ROLLOVER:"BUILD_WITH_ROLLOVER", // "build a parley to go with my rollover"
+  REBUILD_SLIP:       "REBUILD_SLIP",        // "rebuild this slip with strongest legs"
+  MULTI_ADD:          "MULTI_ADD",           // "add Bayern and Barca to my ticket"
+  TEAM_FIXTURES:      "TEAM_FIXTURES",       // "Bayern games", "show Arsenal fixtures"
+  LEAGUE_TOP:         "LEAGUE_TOP",          // "top 5 Premier League games"
   UNKNOWN:            "UNKNOWN",
 };
 
@@ -233,6 +239,61 @@ export function classifyIntent(text) {
     return { intent: INTENT.BUILD_PARLEY };
   }
 
+  // ── Multi-fixture ADD — "add Bayern and Barca to my ticket" ─────────────
+  // Must come before MATCH_ANALYSIS so "add X and Y" doesn't fall to unknown
+  if (/\badd\b.+\b(and|plus|also|,)\b/i.test(t) && !/slip|code|ticket\s*$/.test(t)) {
+    // Strip "add" and "to my ticket/draft/parley" etc.
+    const stripped = t
+      .replace(/^add\s+/i, "")
+      .replace(/\s+to\s+(my\s+)?(ticket|draft|parley|slip).*$/i, "")
+      .trim();
+    const queries = stripped
+      .split(/\s*(?:,|\band\b|\bplus\b|\balso\b)\s*/i)
+      .map(q => q.replace(/\b(match|game|fixture|the)\b/gi, "").trim())
+      .filter(q => q.length >= 3);
+    if (queries.length >= 2) return { intent: INTENT.MULTI_ADD, queries };
+  }
+
+  // ── Team fixtures — "Bayern games", "show Arsenal fixtures today" ─────────
+  // Must come before FIXTURES_TODAY/FILTERED so team-name queries don't fall through
+  const teamFixtureM = t.match(/(?:show|list|find|get|what(?:'?s| is| are))?\s*(?:the\s+)?([a-zÀ-ɏ\s]{3,25}?)(?:'s)?\s+(?:match(?:es)?|game[s]?|fixture[s]?)/i);
+  if (teamFixtureM) {
+    const teamQ = teamFixtureM[1].replace(/\b(today|all|upcoming|live)\b/gi, "").trim();
+    // Only if it doesn't look like a league name pattern (already handled above)
+    const knownLeague = /premier league|la liga|serie a|bundesliga|ligue 1|championship|eredivisie|mls|superliga/i.test(teamQ);
+    if (!knownLeague && teamQ.length >= 3) {
+      return { intent: INTENT.TEAM_FIXTURES, team: teamQ };
+    }
+  }
+
+  // ── League top N — "top 5 Premier League games", "top 3 over 2.5 Bundesliga"
+  //    Also handles disambiguation chip results: "Top 5 in England Premier League"
+  //    and "Top 5 across all Premier League"
+  const leagueTopM = t.match(/\btop\s*(\d+)\s+(?:in\s+|across\s+all\s+)?(.+?)(?:\s+(?:games?|fixtures?|picks?|matches?))?$/i);
+  if (leagueTopM && /\btop\s*\d+/.test(t)) {
+    const count   = parseInt(leagueTopM[1], 10);
+    const rest    = leagueTopM[2].toLowerCase().replace(/\s+$/, "");
+    const market  = _parseMarket(rest);
+    // League detection — check hardcoded list first, then any 3+ word sequence after market tokens
+    const leagueM2 = rest.match(/\b(premier league|la liga|serie a|bundesliga|ligue 1|championship|liga|eredivisie|mls|superliga|primera division|super league|primera|ligue)\b/i);
+    // Country-prefixed: "england premier league" → keep full string as league key
+    // filterFixturesByLeague's fallback handles the country-prefix stripping
+    const leagueStr = leagueM2
+      ? rest.slice(rest.indexOf(leagueM2[1].toLowerCase())).trim()  // "england premier league" or just "premier league"
+      : null;
+    // If "across all X" chip — pass league without country prefix (no disambiguation needed)
+    const isAcrossAll = /across\s+all/i.test(t);
+    return {
+      intent: INTENT.LEAGUE_TOP,
+      count:  isNaN(count) ? 5 : count,
+      market: market || "theRead",
+      league: isAcrossAll
+        ? (leagueM2 ? leagueM2[1] : leagueStr)  // strip country for "across all"
+        : leagueStr,
+      raw: rest,
+    };
+  }
+
   // ── Fixtures ─────────────────────────────────────────────────────────────
   const leagueMatch = t.match(/\b(premier league|la liga|serie a|bundesliga|ligue 1|championship|liga|eredivisie|mls|primera division|superliga)\b/i);
   if (/today.s fixtures|today.s games|what.s playing|fixtures|games today|matches today/i.test(t) && !leagueMatch) return { intent: INTENT.FIXTURES_TODAY };
@@ -253,6 +314,30 @@ export function classifyIntent(text) {
       away: matchVs[2].trim(),
       naturalQuery: t, // pass original for Gemini context
     };
+  }
+
+  // ── TIP follow-up intents — encoded in tip chip tap text ────────────────────
+  // "Build those 8 Over 1.5 as a parley" — carries count + market from FIXTURES_FILTERED tip
+  // These are parsed here so _parseNLBuild picks up the params via BUILD_PARLEY fast-path
+  if (/build.*with.*vs|build.*parley.*with\s+\w+.*vs/i.test(t)) {
+    const vsM = t.match(/with\s+(.+?)\s+vs\s+(.+?)(?:\s+as|\s+in|\s*$)/i);
+    if (vsM) return { intent: INTENT.BUILD_WITH_MATCH, home: vsM[1].trim(), away: vsM[2].trim() };
+  }
+  if (/rollover pick|go with my rollover|alongside.*rollover|with my rollover/i.test(t)) {
+    return { intent: INTENT.BUILD_WITH_ROLLOVER };
+  }
+  if (/rebuild.*slip|rebuild.*strongest|strongest legs.*only|rebuild.*strong/i.test(t)) {
+    return { intent: INTENT.REBUILD_SLIP };
+  }
+  // "Build those N [market/league] as a parley" — from FIXTURES_FILTERED/TODAY tip chips
+  // Falls through to BUILD_PARLEY — _parseNLBuild extracts legs + market from the full phrase
+  if (/build those|build these|build.*from these|build.*from those/i.test(t)) {
+    const nl = _parseNLBuild(t);
+    // Extract count from "those N" / "these N"
+    const countM = t.match(/(?:those|these)\s+(\d+)/i);
+    if (countM && nl) nl.legs = parseInt(countM[1], 10);
+    if (nl) return { intent: INTENT.BUILD_PARLEY, ...nl };
+    return { intent: INTENT.BUILD_PARLEY };
   }
 
   // ── CL10: Natural football/betting questions — route to Gemini via UNKNOWN ─
@@ -536,6 +621,41 @@ export function findFixture(fixtures, homeQuery, awayQuery) {
   }) || null;
 }
 
+/**
+ * Find all fixtures matching a partial team name query.
+ * Returns array of matches (may be multiple if name is ambiguous).
+ * e.g. "Bayern" → [FC Bayern München vs X, Bayern Leverkusen vs Y]
+ */
+export function findFixturesByTeam(fixtures, query) {
+  if (!fixtures?.length || !query) return [];
+  const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const q = norm(query);
+  if (q.length < 3) return [];
+  return fixtures.filter(f => {
+    const h = norm(f.teams?.home || "");
+    const a = norm(f.teams?.away || "");
+    return h.includes(q) || a.includes(q);
+  });
+}
+
+/**
+ * Split a natural language string on "and", "plus", "also", "as well as", ","
+ * and extract team name queries. Used for multi-add intent.
+ * e.g. "Bayern and Barcelona" → ["Bayern", "Barcelona"]
+ * e.g. "Barca match, the PSG game and Arsenal" → ["Barca", "PSG", "Arsenal"]
+ */
+export function splitMultiTeamQuery(text) {
+  // Strip common noise words: "match", "game", "fixture", "the", "add"
+  const cleaned = text
+    .replace(/\b(add|the|match|game|fixture|fixtures|games|and the|plus the)\b/gi, " ")
+    .replace(/\s+/g, " ").trim();
+  // Split on conjunctions and commas
+  const parts = cleaned.split(/\s*(?:,|\band\b|\bplus\b|\balso\b|\bas well as\b)\s*/i);
+  return parts
+    .map(p => p.trim())
+    .filter(p => p.length >= 3);
+}
+
 export function getTopFixtures(fixtures, limit = 8) {
   if (!fixtures?.length) return [];
   const rank = f => {
@@ -553,13 +673,53 @@ export function getTopFixtures(fixtures, limit = 8) {
 
 export function filterFixturesByLeague(fixtures, leagueName) {
   if (!fixtures?.length) return [];
-  const q = leagueName.toLowerCase();
-  return fixtures.filter(f => (f.league || "").toLowerCase().includes(q));
+  const q = leagueName.toLowerCase().trim();
+  // First try exact contains match (handles "Premier League", "Bundesliga" etc.)
+  let res = fixtures.filter(f => (f.league || "").toLowerCase().includes(q));
+  if (res.length) return res;
+  // Fallback: user may have typed "England Premier League" (from disambiguation chip)
+  // Try stripping a leading country token and matching on remaining league name
+  const parts = q.split(/\s+/);
+  if (parts.length > 1) {
+    // Try progressively shorter suffixes: "england premier league" → "premier league"
+    for (let i = 1; i < parts.length; i++) {
+      const sub = parts.slice(i).join(" ");
+      if (sub.length < 4) continue;
+      res = fixtures.filter(f => {
+        const fl = (f.league || "").toLowerCase();
+        const fc = (f.country || "").toLowerCase();
+        const prefix = parts.slice(0, i).join(" ");
+        return fl.includes(sub) && fc.includes(prefix);
+      });
+      if (res.length) return res;
+    }
+  }
+  return [];
 }
 
 export function getLeagueCountries(fixtures, leagueName) {
   if (!fixtures?.length) return [];
-  const q = leagueName.toLowerCase();
+  const q = leagueName.toLowerCase().trim();
+
+  // If the query already has a country prefix (e.g. "England Premier League"),
+  // try the full query first. If it returns exactly one country, no disambiguation needed.
+  // filterFixturesByLeague's country-prefix fallback will resolve the actual fixtures.
+  const parts = q.split(/\s+/);
+  if (parts.length > 1) {
+    // Check if first word(s) look like a country name by trying a country-scoped match
+    const firstWord = parts[0];
+    const rest = parts.slice(1).join(" ");
+    const countryScoped = fixtures.filter(f =>
+      (f.league || "").toLowerCase().includes(rest) &&
+      (f.country || "").toLowerCase().includes(firstWord)
+    );
+    if (countryScoped.length > 0) {
+      // Already country-scoped — no disambiguation needed, return single entry
+      const f0 = countryScoped[0];
+      return [{ country: f0.country || "Unknown", league: f0.league }];
+    }
+  }
+
   const seen = new Map();
   fixtures.forEach(f => {
     if ((f.league || "").toLowerCase().includes(q)) {

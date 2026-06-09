@@ -36,7 +36,8 @@ import {
   SB_LINK_RE, LL_LINK_RE,
   classifyIntent,
   buildParley, legsFromTargetOdds,
-  findFixture, getTopFixtures, filterFixturesByLeague, getLeagueCountries,
+  findFixture, findFixturesByTeam, splitMultiTeamQuery,
+  getTopFixtures, filterFixturesByLeague, getLeagueCountries,
   copyToClipboard, safeImpliedOdds,
 } from "./jarvisStore.js";
 
@@ -454,6 +455,8 @@ export default function ChatLayout({
       totalFixtures: fixtures.length,
     }, [
       { label: "View Rollover", action: "NAV_ROLLOVER" },
+      // TIP: user can build a complementary parley alongside their rollover pick
+      { label: "Build parley alongside this", text: "Build a parley to go with my rollover pick" },
     ]);
   }
 
@@ -519,12 +522,16 @@ export default function ChatLayout({
       ]);
       return;
     }
+    const anchor = fixture.theRead?.anchor;
+    const matchLabel = `${fixture.teams?.home || home} vs ${fixture.teams?.away || away}`;
     addJarvisMsg({
       type: "MATCH_CARD",
       fixture,
       withJarvis,
     }, [
-      { label: "+ Add to parley", action: "ADD_LEG", fixture },
+      { label: "+ Add to draft", action: "ADD_LEG", fixture },
+      // TIP: context-encoded — user can follow up to build a full parley with this game
+      ...(anchor ? [{ label: "Build parley with this game", text: `Build a parley with ${matchLabel}` }] : []),
     ]);
     maybeShowTip("match_analysis_tip", "Tip: Add 'Jarvis research' to any match query and I'll check injuries and squad news.");
   }
@@ -542,7 +549,8 @@ export default function ChatLayout({
     }
     const top = getTopFixtures(fixtures);
     addJarvisMsg({ type: "FIXTURES_CARD", fixtures: top, label: "Top games today" }, [
-      { label: "Build a parley", text: "Build me a parley" },
+      // TIP: context-encoded — tells CL to use theRead market from today's top picks
+      { label: `Build parley from these ${top.length}`, text: `Build those ${top.length} top picks as a parley` },
     ]);
   }
 
@@ -576,7 +584,11 @@ export default function ChatLayout({
       ]);
       return;
     }
-    addJarvisMsg({ type: "FIXTURES_CARD", fixtures: fx.slice(0, 10), label: leagueName });
+    const shown = fx.slice(0, 10);
+    addJarvisMsg({ type: "FIXTURES_CARD", fixtures: shown, label: leagueName }, [
+      // TIP: context-encoded tap text — carries count + league so BUILD_PARLEY can use it directly
+      { label: `Build parley from these ${shown.length}`, text: `Build those ${shown.length} ${leagueName} as a parley` },
+    ]);
   }
 
   async function handleCodeAnalyze(platform, code) {
@@ -587,6 +599,8 @@ export default function ChatLayout({
     }
     addJarvisMsg({ type: "TEXT", text: "Opening Code Analyzer with your slip pre-loaded…" }, [
       { label: "Go to Code Analyzer", action: "NAV_CODE", platform, code },
+      // TIP: after analysis the user can rebuild with strong legs only
+      { label: "Rebuild with strongest legs", text: "Rebuild this slip with strongest legs only" },
     ]);
     // Auto-fire after 1.5s
     setTimeout(() => {
@@ -660,6 +674,179 @@ export default function ChatLayout({
     setTimeout(() => onNavigatePro?.({ layout: "pro", tab: "live", subTab: "custom", strategy }), 800);
   }
 
+  // ── MULTI_ADD — "add Bayern and Barca to my ticket" ───────────────────────
+  async function handleMultiAdd(queries) {
+    await simulateTyping(500);
+    if (!fixturesLoaded) {
+      addJarvisMsg({ type: "TEXT", text: "No fixtures loaded yet." }, [{ label: "Fetch fixtures", action: "FETCH" }]);
+      return;
+    }
+    const resolved = [];   // { fixture }
+    const ambiguous = [];  // { query, candidates }
+    const notFound  = [];  // string
+
+    for (const q of queries) {
+      const matches = findFixturesByTeam(fixtures, q);
+      if (!matches.length) {
+        notFound.push(q);
+      } else if (matches.length === 1) {
+        resolved.push(matches[0]);
+      } else {
+        // Multiple matches — need disambiguation
+        ambiguous.push({ query: q, candidates: matches });
+      }
+    }
+
+    if (ambiguous.length > 0) {
+      // Show disambiguation for the first ambiguous query, add chips for each candidate
+      const { query, candidates } = ambiguous[0];
+      const disambigChips = candidates.slice(0, 4).map(f => ({
+        label: `${f.teams.home} vs ${f.teams.away}`,
+        text:  `Add ${f.teams.home} vs ${f.teams.away} to my ticket`,
+      }));
+      addJarvisMsg({
+        type: "TEXT",
+        text: `Found ${candidates.length} matches for "${query}" — which one?${notFound.length ? ` (couldn't find: ${notFound.join(", ")})` : ""}`,
+      }, disambigChips);
+      // Still add the unambiguous ones
+      if (resolved.length) {
+        addJarvisMsg({
+          type: "TEXT",
+          text: `Added ${resolved.length} game${resolved.length !== 1 ? "s" : ""} to your draft.`,
+        }, resolved.map(f => ({ action: "ADD_LEG", fixture: f, label: `${f.teams.home} vs ${f.teams.away}` })));
+      }
+      return;
+    }
+
+    if (!resolved.length) {
+      addJarvisMsg({ type: "TEXT", text: `Couldn't find any of those games: ${notFound.join(", ")}. Try the full team name.` }, [
+        { label: "See today's games", text: "Today's fixtures" },
+      ]);
+      return;
+    }
+
+    // All resolved — add them all
+    const names = resolved.map(f => `${f.teams.home} vs ${f.teams.away}`).join(", ");
+    addJarvisMsg({
+      type: "TEXT",
+      text: `Added ${resolved.length} game${resolved.length !== 1 ? "s" : ""} to your draft: ${names}`,
+    }, [
+      ...resolved.map(f => ({ action: "ADD_LEG", fixture: f, label: `✓ ${f.teams.home} vs ${f.teams.away}` })),
+      { label: "Build parley from draft", text: "Build me a parley" },
+    ]);
+    if (notFound.length) {
+      addJarvisMsg({ type: "TEXT", text: `Couldn't find: ${notFound.join(", ")}. Try the full team name.` }, []);
+    }
+  }
+
+  // ── TEAM_FIXTURES — "Bayern games", "show Arsenal fixtures" ───────────────
+  async function handleTeamFixtures(teamQuery) {
+    await simulateTyping(500);
+    if (!fixturesLoaded) {
+      addJarvisMsg({ type: "TEXT", text: "No fixtures loaded yet." }, [{ label: "Fetch fixtures", action: "FETCH" }]);
+      return;
+    }
+    const matches = findFixturesByTeam(fixtures, teamQuery);
+    if (!matches.length) {
+      addJarvisMsg({ type: "TEXT", text: `No games found for "${teamQuery}" today.` }, [
+        { label: "See all today's games", text: "Today's fixtures" },
+      ]);
+      return;
+    }
+    if (matches.length === 1) {
+      // Single match — show match card directly
+      addJarvisMsg({ type: "MATCH_CARD", fixture: matches[0], withJarvis: false }, [
+        { label: "+ Add to draft", action: "ADD_LEG", fixture: matches[0] },
+        { label: "Build parley with this game", text: `Build a parley with ${matches[0].teams.home} vs ${matches[0].teams.away}` },
+      ]);
+      return;
+    }
+    // Multiple matches — disambiguation chips
+    addJarvisMsg({
+      type: "TEXT",
+      text: `Found ${matches.length} games matching "${teamQuery}" — which one?`,
+    }, matches.slice(0, 4).map(f => ({
+      label: `${f.teams.home} vs ${f.teams.away}`,
+      text:  `Show me ${f.teams.home} vs ${f.teams.away}`,
+    })));
+  }
+
+  // ── LEAGUE_TOP — "top 5 Premier League games", "top 3 over 2.5 bundesliga" ─
+  async function handleLeagueTop(count, market, league) {
+    await simulateTyping(500);
+    if (!fixturesLoaded) {
+      addJarvisMsg({ type: "TEXT", text: "No fixtures loaded yet." }, [{ label: "Fetch fixtures", action: "FETCH" }]);
+      return;
+    }
+
+    // League disambiguation — "Premier League" can be England, Egypt, Bolivia, etc.
+    if (league) {
+      const countries = getLeagueCountries(fixtures, league);
+      if (countries.length > 1) {
+        const n = count || 5;
+        const mktLabel = market && market !== "theRead" ? ` ${market}` : "";
+        addJarvisMsg({ type: "TEXT", text: `Which ${league}? Found in ${countries.length} countries.` }, [
+          ...countries.map(c => ({
+            label: `${c.country} — ${c.league}`,
+            text:  `Top ${n}${mktLabel} in ${c.country} ${league}`,
+          })),
+          { label: "Show all", text: `Top ${n}${mktLabel} across all ${league}` },
+        ]);
+        return;
+      }
+      if (!countries.length) {
+        addJarvisMsg({ type: "TEXT", text: `No ${league} games found today.` }, [
+          { label: "See all today's games", text: "Today's fixtures" },
+        ]);
+        return;
+      }
+    }
+
+    let pool = league ? filterFixturesByLeague(fixtures, league) : [...fixtures];
+
+    pool = pool
+      .filter(f => f.state !== "finished" && f.state !== "ft" && f.markets)
+      .sort((a, b) => {
+        const getConf = f => {
+          if (market === "theRead")  return f.theRead?.anchor?.prob ?? 0;
+          if (market === "over25")   return f.markets?.over25 ?? 0;
+          if (market === "over15")   return f.markets?.over15 ?? 0;
+          if (market === "over35")   return f.markets?.over35 ?? 0;
+          if (market === "bttsyes")  return f.markets?.bttsYes ?? 0;
+          if (market === "under25")  return 100 - (f.markets?.over25 ?? 50);
+          return f.theRead?.anchor?.prob ?? 0;
+        };
+        return getConf(b) - getConf(a);
+      })
+      .slice(0, count || 5);
+
+    if (!pool.length) {
+      addJarvisMsg({ type: "TEXT", text: `No qualifying games found${league ? ` in ${league}` : ""} today.` }, [
+        { label: "See all today's games", text: "Today's fixtures" },
+      ]);
+      return;
+    }
+
+    const mktStr = market && market !== "theRead"
+      ? ` ${market.replace(/([a-z])(\d)/g, "$1 $2").replace(/^over/i, "Over").replace(/^under/i, "Under").replace(/^btts/i, "BTTS ")}`
+      : "";
+    const label = `Top ${pool.length}${mktStr}${league ? ` · ${league}` : ""}`;
+    addJarvisMsg({ type: "FIXTURES_CARD", fixtures: pool, label }, [
+      {
+        label: `Build parley from these ${pool.length}`,
+        text:  `Build those ${pool.length}${mktStr || " top picks"} as a parley`,
+      },
+    ]);
+  }
+
+
+  async function handleRebuildSlip() {
+    await simulateTyping(400);
+    addJarvisMsg({ type: "TEXT", text: "Head to Code Analyzer — paste your slip code and tap Analyse, then hit Rebuild to get a stronger version." }, [
+      { label: "Open Code Analyzer", action: "NAV_CODE", platform: "SB", code: "" },
+    ]);
+  }
+
   async function handleUnknown(rawText) {
     const t = rawText.toLowerCase();
 
@@ -677,10 +864,15 @@ export default function ChatLayout({
     const loadingMsg = makeLoadingMsg();
     addMsg(loadingMsg);
 
-    const recentHistory = (messages || []).slice(-6).map(m => ({
-      role: m.role === "user" ? "user" : "jarvis",
-      text: typeof m.content === "string" ? m.content : m.content?.text || m.text || "",
-    })).filter(m => m.text);
+    // Build history including current message — messages state may not yet reflect
+    // the addMsg(makeUserMsg(raw)) call above (React state is async), so append manually.
+    const recentHistory = [
+      ...(messages || []).slice(-8).map(m => ({
+        role: m.role === "user" ? "user" : "jarvis",
+        text: typeof m.content === "string" ? m.content : m.content?.text || m.text || "",
+      })),
+      { role: "user", text: rawText }, // always include current message
+    ].filter(m => m.text).slice(-10); // keep last 10 turns max
 
     const fixturePayload = (fixtures || []).slice(0, 12).map(f => ({
       home: f.teams?.home || f.home || "",
@@ -989,8 +1181,9 @@ export default function ChatLayout({
   }
 
   function handleChipAction(chip) {
+    // Guard: prevent double-fire if chip is tapped multiple times before Jarvis responds
+    if (isGateOpen) return;
     if (chip.text) {
-      // Treat as user sending that message
       handleSend(chip.text);
       return;
     }
@@ -1016,20 +1209,22 @@ export default function ChatLayout({
 
     setInput("");
     try { sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
-    addMsg(makeUserMsg(raw));
+
+    // Classify first — REMIX adds its own user msg to avoid double-bubble
+    const classified = classifyIntent(raw);
+    if (classified.intent !== INTENT.REMIX) {
+      addMsg(makeUserMsg(raw));
+    }
     inputRef.current?.focus();
 
-    // Special remix handled via intent now
-    const classified = classifyIntent(raw);
     switch (classified.intent) {
       case INTENT.GREETING:           handleGreeting(classified.polarity); break;
       case INTENT.HELP:               handleHelp(); break;
       case INTENT.ROLLOVER_STATUS:    handleRolloverStatus(); break;
       case INTENT.ROLLOVER_ANALYTICS: handleRolloverAnalytics(); break;
-      case INTENT.REMIX:              handleRemix(); return; // return — handleRemix adds its own user msg
+      case INTENT.REMIX:              handleRemix(); return;
       case INTENT.ADD_MORE_LEGS:      handleAddMoreLegs(classified.raw); break;
       case INTENT.ODDS_CORRECTION:    handleOddsCorrection(classified.targetOdds); break;
-      // BUILD_PARLEY may carry NL params (legs, market, targetOdds, league)
       case INTENT.BUILD_PARLEY:       handleBuildParley(classified); break;
       case INTENT.MATCH_ANALYSIS:     handleMatchAnalysis(classified.home, classified.away, false); break;
       case INTENT.JARVIS_ANALYSIS:    handleMatchAnalysis(classified.home, classified.away, true); break;
@@ -1041,6 +1236,12 @@ export default function ChatLayout({
       case INTENT.NAVIGATE_ENGINE:          handleNavigateEngine(); break;
       case INTENT.SAVED_PARLEYS:      handleSavedParleys(); break;
       case INTENT.STRATEGY:           handleStrategy(); break;
+      case INTENT.BUILD_WITH_MATCH:   handleBuildParley({ market: "theRead", home: classified.home, away: classified.away }); break;
+      case INTENT.BUILD_WITH_ROLLOVER:handleBuildParley({ pool: "all", _withRollover: true }); break;
+      case INTENT.REBUILD_SLIP:       handleRebuildSlip(); break;
+      case INTENT.MULTI_ADD:          handleMultiAdd(classified.queries); break;
+      case INTENT.TEAM_FIXTURES:      handleTeamFixtures(classified.team); break;
+      case INTENT.LEAGUE_TOP:         handleLeagueTop(classified.count, classified.market, classified.league); break;
       default:                        handleUnknown(raw); break;
     }
   }
@@ -1446,6 +1647,7 @@ function ChatTab({
               S={S}
               buildFlow={buildFlow}
               activeBuildMsgId={activeBuildMsgId}
+              isTyping={isTyping}
               onBuildModeSelect={onBuildModeSelect}
               onBuildPoolSelect={onBuildPoolSelect}
               onBuildLegsTargetSelect={onBuildLegsTargetSelect}
@@ -1517,7 +1719,7 @@ function ChatTab({
 // ── MESSAGE ROW ──────────────────────────────────────────────────────────────
 
 function MessageRow({
-  msg, C, S, buildFlow, activeBuildMsgId,
+  msg, C, S, buildFlow, activeBuildMsgId, isTyping,
   onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro,
   defaultBookmaker, savedTickets, fixtures,
@@ -1581,8 +1783,8 @@ function MessageRow({
             <button
               key={i}
               className="grm-chip"
-              style={S.chip}
-              onClick={() => onChipAction(chip)}
+              style={{ ...S.chip, opacity: isTyping ? 0.45 : 1, pointerEvents: isTyping ? "none" : "auto" }}
+              onClick={() => !isTyping && onChipAction(chip)}
             >
               {chip.label}
             </button>
