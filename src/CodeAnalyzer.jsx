@@ -16,8 +16,9 @@ const STEPS = [
 ];
 
 const BOOKMAKERS = [
-  { id: "sb", label: "SportyBet" },
-  { id: "ll", label: "Lucky's Ledger" },
+  { id: "sb",   label: "SportyBet" },
+  { id: "duel", label: "Duel" },
+  { id: "ll",   label: "Lucky's Ledger" },
 ];
 
 const HISTORY_KEY    = "grm_ca_history";
@@ -29,6 +30,10 @@ const BOOKIE_LINKS = {
   sb: {
     shareLink: (code) => `https://www.sportybet.com/ng/?shareCode=${code}`,
     appLink:   (code) => `sportybet://share?shareCode=${code}`,
+  },
+  duel: {
+    shareLink: (code) => `https://duel.com/sports?bt-path=%2F%3FbtBookingCode%3D${code}`,
+    appLink:   (code) => `duel://betslip?btBookingCode=${code}`,
   },
   ll: {
     shareLink: (code) => `https://luckysledger.com/sports?btBookingCode=${code}`,
@@ -221,6 +226,11 @@ function parseInput(raw) {
   // e.g. https://luckysledger.com/sports?btBookingCode=E9EEE0A
   const llMatch = s.match(/luckysledger\.com.*[?&]btBookingCode=([A-Z0-9]+)/i);
   if (llMatch) return { code: llMatch[1].toUpperCase(), detectedPlatform: "ll" };
+
+  // Duel booking link — bt-path encoded or plain btBookingCode
+  // e.g. https://duel.com/sports?bt-path=%2F%3FbtBookingCode%3D720BC03
+  const duelMatch = s.match(/duel\.com.*(?:btBookingCode(?:%3D|=))([A-Z0-9]+)/i);
+  if (duelMatch) return { code: duelMatch[1].toUpperCase(), detectedPlatform: "duel" };
 
   // Plain code — no detection
   return { code: s.toUpperCase(), detectedPlatform: null };
@@ -937,7 +947,9 @@ function RebuildBooking({ legs, C, SERVER, onSendToDraft }) {
     if (!legs?.length) return;
     setBooking(true); setResult(null); setError(null);
     try {
-      const endpoint = bookmaker === "sb" ? "/api/book-sportybet" : "/api/book-luckyledger";
+      const endpoint = bookmaker === "sb"   ? "/api/book-sportybet"
+                       : bookmaker === "duel" ? "/api/book-duel"
+                       : "/api/book-luckyledger";
       const res  = await fetch(`${SERVER}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1001,21 +1013,34 @@ function RebuildBooking({ legs, C, SERVER, onSendToDraft }) {
 
   return (
     <div>
-      {/* Bookmaker selector */}
-      <div style={{ display:"flex", gap:6, marginBottom:12,
-                    background:C.surface, borderRadius:br+4, padding:4,
-                    border:`1px solid ${C.border}` }}>
-        {BOOKMAKERS.map(bm => (
-          <button key={bm.id} onClick={() => { setBookmaker(bm.id); setResult(null); setError(null); }} style={{
-            flex:1, padding:"8px 0", borderRadius:br, border:"none",
-            background: bookmaker===bm.id ? C.accent : "transparent",
-            color: bookmaker===bm.id ? C.accentText : C.muted,
-            fontSize:10, fontWeight:800, cursor:"pointer", fontFamily:C.font,
-            letterSpacing:".06em", transition:"all .15s",
-          }}>
-            {bm.label}
-          </button>
-        ))}
+      {/* Bookmaker selector — dropdown */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize:9, fontWeight:800, color:C.muted, letterSpacing:".14em",
+                      textTransform:"uppercase", marginBottom:5 }}>
+          Book to
+        </div>
+        <div style={{ position:"relative" }}>
+          <select
+            value={bookmaker}
+            onChange={e => { setBookmaker(e.target.value); setResult(null); setError(null); }}
+            style={{
+              width:"100%", padding:"11px 38px 11px 13px", appearance:"none",
+              background:C.surface, border:`1px solid ${C.border}`,
+              borderRadius:br+2, fontFamily:C.font, fontSize:12, fontWeight:800,
+              color:C.text, cursor:"pointer", outline:"none",
+            }}
+          >
+            {BOOKMAKERS.map(bm => (
+              <option key={bm.id} value={bm.id}>{bm.label}</option>
+            ))}
+          </select>
+          <svg style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)",
+                        pointerEvents:"none", color:C.muted }}
+               width="13" height="13" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
       </div>
 
       {/* Send to Draft */}
@@ -1966,26 +1991,34 @@ export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFu
           </div>
         </div>
 
-        {/* Platform toggle */}
-        <div style={{
-          display: "flex", gap: 0, marginBottom: 12,
-          background: C.surface, borderRadius: 999,
-          padding: 4, border: `1px solid ${C.border}`,
-        }}>
-          {BOOKMAKERS.map(bm => (
-            <button key={bm.id} onClick={() => setPlatform(bm.id)} style={{
-              flex: 1, padding: "10px 0",
-              borderRadius: 999, border: "none",
-              background: platform === bm.id ? C.accent : "transparent",
-              color: platform === bm.id ? C.accentText : C.muted,
-              fontSize: 11, fontWeight: 800, cursor: "pointer",
-              fontFamily: C.font, letterSpacing: ".05em",
-              transition: "all .18s",
-              boxShadow: platform === bm.id ? `0 0 16px ${C.accent}30` : "none",
-            }}>
-              {bm.label}
-            </button>
-          ))}
+        {/* Platform selector — dropdown scales to any number of bookmakers */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 9, fontWeight: 800, color: C.muted, letterSpacing: ".14em",
+                        textTransform: "uppercase", marginBottom: 6 }}>
+            Bookmaker
+          </div>
+          <div style={{ position: "relative" }}>
+            <select
+              value={platform}
+              onChange={e => { setPlatform(e.target.value); if (phase === "error") setPhase("idle"); }}
+              style={{
+                width: "100%", padding: "12px 40px 12px 14px", appearance: "none",
+                background: C.surface, border: `1px solid ${C.border}`,
+                borderRadius: 12, fontFamily: C.font, fontSize: 13, fontWeight: 800,
+                color: C.text, cursor: "pointer", outline: "none",
+              }}
+            >
+              {BOOKMAKERS.map(bm => (
+                <option key={bm.id} value={bm.id}>{bm.label}</option>
+              ))}
+            </select>
+            <svg style={{ position:"absolute", right:13, top:"50%", transform:"translateY(-50%)",
+                          pointerEvents:"none", color:C.muted }}
+                 width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
         </div>
 
         {/* Input */}
@@ -1996,9 +2029,9 @@ export default function CodeAnalyzer({ theme: C, SERVER, onSendToDraft, onOpenFu
             onChange={e => setRawInput(e.target.value)}
             onKeyDown={e => e.key === "Enter" && rawInput.trim() && analyze()}
             placeholder={
-              platform === "sb"
-                ? "Code or sportybet link"
-                : "Code or lucky's booking link"
+              platform === "sb"   ? "Code or sportybet.com link" :
+              platform === "duel" ? "Code or duel.com link"      :
+                                    "Code or lucky's booking link"
             }
             style={{
               display: "block", width: "100%", boxSizing: "border-box",

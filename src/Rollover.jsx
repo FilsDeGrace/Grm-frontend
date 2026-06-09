@@ -436,7 +436,7 @@ function hasLiveLegs(legs = []) {
 // Duel added (sptpub engine, route now registered in server.js).
 const BOOKIE_META = {
   sportybet:   { label:"SportyBet NG",   link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,              app: code => `sportybet://share?shareCode=${code}` },
-  duel:        { label:"Duel",           link: code => `https://duel.com/sports?btBookingCode=${code}`,                app: code => `duel://betslip?btBookingCode=${code}` },
+  duel:        { label:"Duel",           link: code => `https://duel.com/sports?bt-path=%2F%3FbtBookingCode%3D${code}`, app: code => `duel://betslip?btBookingCode=${code}` },
   luckyledger: { label:"Lucky's Ledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`,        app: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 };
 
