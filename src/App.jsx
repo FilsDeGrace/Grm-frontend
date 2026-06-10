@@ -4,6 +4,7 @@ import RolloverSystem from "./Rollover";
 import CodeAnalyzer from "./CodeAnalyzer";
 import ChatLayout from "./ChatLayout";
 import { SERVER, LEAGUE_RANK, POOL_MIN_EMPIRICAL_RATE, POOL_SCORE_P_EXP } from "./config";
+export { SERVER };
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 import FullModelPage from "./FullModelPage";
 
@@ -282,7 +283,7 @@ const CUSTOM_FAMILIES = [
   { id:"homeo05",label:"H O0.5" }, { id:"homeo15",label:"H O1.5" }, { id:"awayo05",label:"A O0.5" }, { id:"awayo15",label:"A O1.5" },
 ];
 
-const STRATEGY_LABELS = {
+export const STRATEGY_LABELS = {
   home_win:"Home Win", away_win:"Away Win", btts_value:"BTTS Value",
   home_goalfest:"H Goalfest", away_goalfest:"A Goalfest",
   over25_quality:"O2.5 Quality", low_scoring:"Low Scoring",
@@ -981,7 +982,7 @@ const todayStr = () => window.__grmServerDate || _serverDateCache || new Date().
 // C is a mutable object. syncC(theme) stamps all theme tokens into it so
 // every existing C.xxx reference in JSX automatically reflects the active
 // theme without any find-replace across the codebase.
-let C = { ...loadSavedTheme() };
+export let C = { ...loadSavedTheme() };
 function syncC(theme) { Object.keys(theme).forEach(k => { C[k] = theme[k]; }); }
 
 // ── MARKET STYLES ─────────────────────────────────────────────────────────
@@ -1802,15 +1803,15 @@ const Pill = ({ children, color, bg }) => (
     {children}
   </span>
 );
-const Bar = ({ value, color }) => (
+export const Bar = ({ value, color }) => (
   <div className="cb" style={{ marginTop:5 }}>
     <div className="cf" style={{ width:`${Math.min(value,100)}%`, background:color }} />
   </div>
 );
-const Lbl = ({ children }) => (
+export const Lbl = ({ children }) => (
   <div style={{ fontSize:8,color:C.text,opacity:.5,textTransform:"uppercase",letterSpacing:".11em",fontWeight:700,marginBottom:5 }}>{children}</div>
 );
-const Panel = ({ label, color, bg, children }) => (
+export const Panel = ({ label, color, bg, children }) => (
   <div style={{ background:bg,border:`1px solid ${color}22`,borderRadius:9,padding:"10px 11px" }}>
     <Lbl>{label}</Lbl>
     {children}
@@ -1857,7 +1858,7 @@ const IcoCheckSm = ({size=9,col}) => (
   </svg>
 );
 
-function StatusBadge({ state, time }) {
+export function StatusBadge({ state, time }) {
   const s = (state || "").toLowerCase().replace(/[_\-\s]/g, "");
   // Live / in-play states
   if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
@@ -2080,7 +2081,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
 }
 
 // ── ASK JARVIS (per-card) ─────────────────────────────────────────────────
-function AskJarvis({ fixture, backtestSummary, brief = null }) {
+export function AskJarvis({ fixture, backtestSummary, brief = null }) {
   const [open,     setOpen]     = useState(false);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]); // { role: "user"|"jarvis", text }
@@ -2307,7 +2308,7 @@ function ResultBadge({ f }) {
 // Source: SofaScore pregame endpoint — current competition only, oldest→newest (left to right).
 // Differs from Team Totals recent results (all-competition, newest first).
 // Note: for Cup / UCL fixtures, this reflects CL form only, not league form.
-function FormRow({ home, away, allCompHome, allCompAway }) {
+export function FormRow({ home, away, allCompHome, allCompAway }) {
   const dot = r => ({ W:C.green, D:C.gold, L:C.red }[r] || C.faint);
   // Prefer all-comp form if competition-only form is thin (< 3 games)
   const hForm = (home?.length >= 3) ? home : (allCompHome?.length ? allCompHome : home);
@@ -2473,7 +2474,7 @@ function AddToTicketBtn({ onClick, color, alreadyAdded, otherInDraft, label, isF
   );
 }
 
-function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded, otherInDraft }) {
+export function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded, otherInDraft }) {
   if (!theRead) return null;
   const { anchor, reinforcer, isFallback, scenario } = theRead;
   if (!anchor) return null;
@@ -2553,7 +2554,7 @@ function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded, otherIn
 }
 
 // ── THE EDGE SECTION ──────────────────────────────────────────────────────
-function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded, otherInDraft, fixture }) {
+export function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded, otherInDraft, fixture }) {
   const ftStates = ["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties"];
   const isFinished = ftStates.includes((fixture?.state || "").toLowerCase().replace(/[_\-\s]/g,""));
 
@@ -2607,7 +2608,7 @@ function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded, otherInDraft, fi
 }
 
 // ── GOAL RADAR SECTION ────────────────────────────────────────────────────
-function GoalRadarSection({ goalRadar, onAddToParlay, alreadyAdded, otherInDraft }) {
+export function GoalRadarSection({ goalRadar, onAddToParlay, alreadyAdded, otherInDraft }) {
   if (!goalRadar) return null;
   const { home, away, homeExtra, awayExtra } = goalRadar;
   if (!home && !away) return null;
@@ -2667,7 +2668,7 @@ function GoalRadarSection({ goalRadar, onAddToParlay, alreadyAdded, otherInDraft
 }
 
 // ── COMBO ROW ─────────────────────────────────────────────────────────────
-function ComboRow({ combo, onAddToParlay }) {
+export function ComboRow({ combo, onAddToParlay }) {
   const [added, setAdded] = useState(false);
   const color = combo.type === "DC" ? C.dc : C.radar;
 
@@ -2708,7 +2709,7 @@ function ComboRow({ combo, onAddToParlay }) {
 }
 
 // ── GOALS PANEL (expanded) ────────────────────────────────────────────────
-function GoalsPanel({ f }) {
+export function GoalsPanel({ f }) {
   const m = f.markets;
   const scoreBright = parseFloat(m.likelyScoreProb) >= 15;
   return (
@@ -3251,7 +3252,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
 // Opens as a full-screen overlay when "▼ Full Model" is tapped.
 // Same pattern as ParlayJarvisTab overlay. Saves/restores scroll position.
 // ── buildMatchVoice — Tier 1 instant brief from pure data, no API ────────────
-function buildMatchVoice(f) {
+export function buildMatchVoice(f) {
   const m = f?.markets;
   if (!m) return null;
   const lines = [];
@@ -5171,7 +5172,7 @@ function TicketBookNowButton({ legs }) {
 
 // ── FIXTURE BOOK NOW (inline, per-card) ──────────────────────────────────
 // Market/pick selector that adds the choice to the draft ticket.
-function FixtureBookNow({ fixture, onAddToParlay }) {
+export function FixtureBookNow({ fixture, onAddToParlay }) {
   const [open, setOpen]     = useState(false);
   const [market, setMarket] = useState("1X2");
   const [pick, setPick]     = useState("");
