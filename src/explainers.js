@@ -8,12 +8,13 @@
 // the same sentence twice across different fixtures.
 //
 // Exports:
-//   getReadExplainer(f)          → { headline, sub } for The Read hero
-//   getXGExplainer(f)            → string for Expected Goals section
-//   getMatchResultExplainer(f)   → { H, X, A } each a short string
-//   getGoalRangeExplainer(f)     → { headline, desc } for Goal Range panel
-//   getBTTSExplainer(f)          → { yes, no } each a short string
-//   getTeamTotalExplainer(team, stats, side) → string per team
+//   getReadExplainer(f)                        → { headline, sub } for The Read hero
+//   getEdgeExplainer(f)                        → { headline, sub } for The Edge strip
+//   getXGExplainer(f)                          → string for Expected Goals section
+//   getMatchResultExplainer(f)                 → { H, X, A } each a short string
+//   getGoalRangeExplainer(f)                   → { headline, desc } for Goal Range panel
+//   getBTTSExplainer(f)                        → { yes, no } each a short string
+//   getTeamTotalExplainer(team, stats, side, f) → string per team
 //
 // All functions are null-safe — if data is missing they return null
 // and the UI should render nothing rather than a broken sentence.
@@ -166,6 +167,72 @@ export function getReadExplainer(f) {
 }
 
 
+// ── THE EDGE EXPLAINER ───────────────────────────────────────────────────────
+// Returns { headline, sub }
+// headline: why this pick represents value vs the book
+// sub: what the edge magnitude means in context
+
+export function getEdgeExplainer(f) {
+  const edge = f?.theEdge;
+  if (!edge) return null;
+
+  const { pick, prob, edgeOddsPct, odds } = edge;
+  const m    = f.markets || {};
+  const hxg  = parseFloat(m.homeXG) || 0;
+  const axg  = parseFloat(m.awayXG) || 0;
+  const home = f.teams?.home || "Home";
+  const away = f.teams?.away || "Away";
+
+  const edgePct   = parseFloat(edgeOddsPct) || 0;
+  const modelProb = pct(prob);
+  const pickType  = classifyPick(pick, edge.market);
+  const side      = pickSide(pick, home, away);
+
+  // ── Headline: why the value exists ──
+  let headline = null;
+
+  if (edgePct >= 15) {
+    if (pickType === "over" || pickType === "under") {
+      const line = (pick.match(/[\d.]+/) || ["2.5"])[0];
+      headline = `The book is significantly mispricing the ${pick} line — the model's ${modelProb}% probability is ${edgePct}% above the implied odds. That gap is what makes this value.`;
+    } else if (pickType === "dc") {
+      headline = `Large value gap on the double chance. The model gives this ${modelProb}% — the book is pricing it ${edgePct}% lower. The odds haven't caught up to the model's read.`;
+    } else if (side === "away") {
+      headline = `${short(away)}'s implied probability is being underestimated by the market. At ${edgePct}% above book odds, this is a meaningful mispricing.`;
+    } else if (side === "home") {
+      headline = `${short(home)} are underpriced relative to model output. The ${edgePct}% gap between model and book implies the market is underweighting home advantage here.`;
+    } else {
+      headline = `The model finds ${edgePct}% excess value on this pick — a gap this wide is one of the stronger edge signals in the current slate.`;
+    }
+  } else if (edgePct >= 8) {
+    if (pickType === "btts") {
+      headline = `Book odds on BTTS are pricing this below what the xG profiles support. The model's ${modelProb}% creates a ${edgePct}% value gap.`;
+    } else if (pickType === "draw") {
+      headline = `Draw is being undervalued relative to the balanced xG profile. The ${edgePct}% edge over book is the model's core argument for this selection.`;
+    } else {
+      headline = `Model probability exceeds book implied odds by ${edgePct}%. Not a runaway gap, but consistent with picks that have produced positive returns historically.`;
+    }
+  } else if (edgePct > 0) {
+    headline = `A narrow but real value gap — the model's ${modelProb}% sits ${edgePct}% ahead of what the book implies. Marginal edges compound over volume.`;
+  } else {
+    headline = `Value based on model probability — no bookmaker odds available to measure against.`;
+  }
+
+  // ── Sub: how to interpret the edge ──
+  let sub = null;
+  if (odds) {
+    const impliedProb = Math.round((1 / parseFloat(odds)) * 100);
+    sub = `At ${odds}× odds, the book implies ${impliedProb}% probability. The model reads ${modelProb}% — back if you trust the model's accuracy over the bookmaker's line.`;
+  } else if (edgePct >= 10) {
+    sub = `Edge picks at ${edgePct}%+ vs book are in the top tier of value signals the system generates. Worth considering even on lower-confidence fixtures.`;
+  } else {
+    sub = `Value picks require volume to realise — single-game edge variance is high. This is a directional lean, not a certainty.`;
+  }
+
+  return { headline, sub };
+}
+
+
 // ── XG EXPLAINER ─────────────────────────────────────────────────────────────
 // Returns a single string that reads naturally in the xG section
 
@@ -194,13 +261,13 @@ export function getXGExplainer(f) {
     : "";
 
   if (profile === "level") {
-    return `Expected goals are essentially level — ${hxg.toFixed(2)} for ${short(home)}, ${axg.toFixed(2)} for ${short(away)}. The model sees no meaningful output advantage for either side.${formLine}`;
+    return `Combined xG of ${(hxg+axg).toFixed(2)} is split evenly — ${hxg.toFixed(2)} for ${short(home)}, ${axg.toFixed(2)} for ${short(away)}. The model sees no meaningful output advantage for either side.${formLine}`;
   } else if (profile === "slight") {
-    return `${fav} carry a slight xG edge (${favXG} vs ${dogXG}) — enough to support a directional lean but not a dominant performance read.${formLine}`;
+    return `Combined xG of ${(hxg+axg).toFixed(2)} (${favXG} vs ${dogXG}) gives ${fav} a slight edge — enough to support a directional lean but not a dominant read.${formLine}`;
   } else if (profile === "dominant") {
-    return `${fav} are projected to generate ${favXG} xG against ${dogXG} for ${dog} — a clear performance gap that the model reads as decisive.${formLine}`;
+    return `Combined xG of ${(hxg+axg).toFixed(2)} — ${fav} project ${favXG} against just ${dogXG} for ${dog}. A clear performance gap the model reads as decisive.${formLine}`;
   } else {
-    return `${fav} hold a clear xG advantage at ${favXG} vs ${dogXG} for ${dog}. The model reads this as a controlled rather than chaotic match.${formLine}`;
+    return `Combined xG of ${(hxg+axg).toFixed(2)} favours ${fav} (${favXG} vs ${dogXG} for ${dog}). The model reads this as a controlled rather than chaotic match.${formLine}`;
   }
 }
 
@@ -220,8 +287,6 @@ export function getMatchResultExplainer(f) {
   const hWin = pct(m.homeWin);
   const draw = pct(m.draw);
   const aWin = pct(m.awayWin);
-  const anchor     = f.theRead?.anchor;
-  const empirical  = anchor?.empiricalRate;
 
   // H explainer
   let H;
@@ -256,31 +321,76 @@ export function getGoalRangeExplainer(f) {
   const m = f?.markets;
   if (!m) return null;
 
-  const hxg   = parseFloat(m.homeXG) || 0;
-  const axg   = parseFloat(m.awayXG) || 0;
-  const total = hxg + axg;
-  const o25   = pct(m.over25);
-  const btts  = pct(m.bttsYes);
-  const u25   = pct(m.under25);
-  const range = f.goalRange || "";
+  const hxg    = parseFloat(m.homeXG) || 0;
+  const axg    = parseFloat(m.awayXG) || 0;
+  const total  = parseFloat((hxg + axg).toFixed(2));
+  const o15    = pct(m.over15);
+  const o25    = pct(m.over25);
+  const o35    = pct(m.over35);
+  const u25    = pct(m.under25);
+  const u35    = pct(m.under35);
+  const o15Odds = parseFloat(m.over15Odds || 0);
+  const range  = f.goalRange || "";
   const volume = goalVolume(total);
+
+  // Config-mirrored thresholds
+  const OVER25_MIN     = 63;
+  const OVER35_MIN     = 63;
+  const STRONG_OVER25  = 72;
+  const STRONG_OVER35  = 65; // post-deflation O3.5 is compressed, lower bar
+  const UNDER25_MIN    = 70;
+  const UNDER35_MIN    = 80;
+  const O15_MIN_ODDS   = 1.17; // only mention O1.5 if odds are meaningful
+
+  // Pick the most informative goal line to highlight — never O1.5 unless nothing else qualifies
+  let featuredLine = null;
+  let featuredPct  = null;
+  if (o35 >= STRONG_OVER35)        { featuredLine = "O3.5"; featuredPct = o35; }
+  else if (o25 >= OVER25_MIN)      { featuredLine = "O2.5"; featuredPct = o25; }
+  else if (u25 >= UNDER25_MIN)     { featuredLine = "U2.5"; featuredPct = u25; }
+  else if (u35 >= UNDER35_MIN)     { featuredLine = "U3.5"; featuredPct = u35; }
+  else if (o15 >= 70 && (o15Odds === 0 || o15Odds >= O15_MIN_ODDS)) { featuredLine = "O1.5"; featuredPct = o15; }
 
   let headline, desc;
 
   if (volume === "high") {
     headline = "High Scoring";
-    if (btts >= 60) desc = `Combined xG of ${total.toFixed(2)} and BTTS Yes at ${btts}% — both attacks are expected to score. Over 2.5 is the probability-weighted outcome.`;
-    else            desc = `High combined xG of ${total.toFixed(2)} suggests goals, though one side may dominate. Over 2.5 sits at ${o25}%.`;
+    if (featuredLine === "O3.5") {
+      desc = `Combined xG of ${total} pushes into high-scoring territory. Over 3.5 clears at ${featuredPct}% — both attacks are projected to contribute multiple goals.`;
+    } else if (featuredLine === "O2.5") {
+      desc = `Combined xG of ${total} strongly supports a goal-rich game. Over 2.5 sits at ${featuredPct}% — the model's clearest goals signal here.`;
+    } else {
+      desc = `Combined xG of ${total} points to a high-output game. Both attacks are expected to create, though the market spread is wide.`;
+    }
   } else if (volume === "moderate-high") {
     headline = range || "Active Scoring";
-    desc = `xG of ${total.toFixed(2)} places this in a productive middle ground. Over 2.5 at ${o25}% is the model's most supported goals line.`;
+    if (featuredLine === "O2.5") {
+      desc = `Combined xG of ${total} sits in a productive range. Over 2.5 at ${featuredPct}% is the model's most confident goals line — value relative to the market.`;
+    } else if (featuredLine === "O3.5") {
+      desc = `Combined xG of ${total}. Over 3.5 qualifies at ${featuredPct}% — an active game expected, though three goals is not guaranteed.`;
+    } else if (featuredLine) {
+      desc = `Combined xG of ${total}. ${featuredLine} at ${featuredPct}% is the model's most supported line at this output level.`;
+    } else {
+      desc = `Combined xG of ${total} sits on the boundary. The model's goal distribution is spread across lines without a dominant signal.`;
+    }
   } else if (volume === "moderate-low") {
     headline = range || "Contained Game";
-    if (u25 >= 55) desc = `Moderate xG of ${total.toFixed(2)} leans toward a tight game. Under 2.5 at ${u25}% is more probable than the market implies.`;
-    else           desc = `xG of ${total.toFixed(2)} sits on the boundary. Neither Over nor Under 2.5 is dominant — the goal environment is genuinely uncertain.`;
+    if (featuredLine === "U2.5") {
+      desc = `Combined xG of ${total} leans toward a tight game. Under 2.5 at ${featuredPct}% is the model's primary lean — clean sheet probability is elevated.`;
+    } else if (featuredLine === "U3.5") {
+      desc = `Moderate xG of ${total}. Under 3.5 at ${featuredPct}% is solid — the model doesn't expect a high-scoring game but goals are still likely.`;
+    } else if (featuredLine) {
+      desc = `Combined xG of ${total}. ${featuredLine} at ${featuredPct}% is the model's clearest line — the goal environment is moderately cautious.`;
+    } else {
+      desc = `Combined xG of ${total} sits on the boundary between cautious and active. Neither Over nor Under 2.5 is dominant here.`;
+    }
   } else {
     headline = "Low Scoring";
-    desc = `Combined xG of ${total.toFixed(2)} points to a defensive match. The model expects clean sheet probability to be elevated and goals to be scarce.`;
+    if (featuredLine === "U2.5" || featuredLine === "U3.5") {
+      desc = `Combined xG of ${total} projects a defensive match. ${featuredLine} at ${featuredPct}% — at least one clean sheet is the model's default expectation.`;
+    } else {
+      desc = `Combined xG of ${total} points firmly to a low-output game. The model expects clean sheet probability to be elevated and goals to be scarce.`;
+    }
   }
 
   return { headline, desc };

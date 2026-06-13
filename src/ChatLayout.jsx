@@ -34,7 +34,6 @@ import { SERVER } from "./config";
 import {
   INTENT, BUILD_STEP, MARKET_GROUPS, TOP_LEAGUES_RANK, TOP_COUNTRIES,
   SB_LINK_RE, LL_LINK_RE,
-  classifyIntent,
   buildParley, legsFromTargetOdds,
   findFixture, findFixturesByTeam, splitMultiTeamQuery,
   getTopFixtures, filterFixturesByLeague, getLeagueCountries,
@@ -189,55 +188,104 @@ function makeUserMsg(text) {
   return { id: genId(), role: "user", text, ts: Date.now() };
 }
 
-function makeJarvisMsg(content, chips = []) {
-  return { id: genId(), role: "jarvis", content, chips, ts: Date.now() };
+function makeJarvisMsg(content, chips = [], toolCalls = []) {
+  return { id: genId(), role: "jarvis", content, chips, toolCalls, ts: Date.now() };
 }
 
 function makeLoadingMsg() {
   return { id: genId(), role: "jarvis", loading: true, ts: Date.now() };
 }
 
-// ── UNSUPPORTED REQUEST DETECTOR ─────────────────────────────────────────────
-// Returns a straight-talking response string when Jarvis genuinely cannot help.
-// Checked BEFORE Gemini so we don't waste the round trip.
-function _detectUnsupported(t) {
-  // Tomorrow / future fixtures
-  if (/tomorrow|next week|this weekend|upcoming|future\s*games|next\s*match/i.test(t) && !/today/i.test(t))
-    return "I only work with today's fixtures — I can't see tomorrow's games yet. Check back after the next fetch.";
+// ── CONFIDENCE FORMATTER ─────────────────────────────────────────────────────
+// Single source of truth for rendering confidence values.
+// Rounds to 1 decimal, drops ".0" for whole numbers.
+// e.g. 80.1999... → "80.2"  |  77.0 → "77"  |  84 → "84"
+function fmtConf(v) {
+  if (v == null || isNaN(v)) return null;
+  const n = Math.round(parseFloat(v) * 10) / 10;
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
 
-  // Yesterday / past results
+// ── UNSUPPORTED REQUEST DETECTOR ─────────────────────────────────────────────
+// Returns { text, chips } or null.
+// chips are context-aware — only when there is a genuinely useful next action.
+// Checked BEFORE Gemini to avoid wasting the round trip.
+function _detectUnsupported(t) {
+  // Future-dated — clearly next day or beyond. "upcoming" excluded (ambiguous, often means today)
+  if (/\btomorrow\b|next week|this weekend|\bnext (month|season|year)\b/i.test(t) && !/today/i.test(t))
+    return { text: "I only work with today's fixtures — I can't see future games. Check back after tomorrow's fetch.", chips: [] };
+
+  // Past results
   if (/yesterday|last\s*night|last\s*week|previous\s*match|past\s*results?|result.*vs|score.*vs/i.test(t) && !/today/i.test(t))
-    return "I don't have historical results — I work with today's model data only. Try the live model for recent form.";
+    return { text: "I don't have historical results — I work with today's model data only.", chips: [
+      { label: "Today's fixtures", text: "Today's fixtures" },
+    ]};
 
   // Unsupported bookmakers
   if (/bet9ja|betway|1xbet|bet365|parimatch|nairabet|melbet|22bet|msport|bangbet/i.test(t))
-    return "I can only book on SportyBet right now — other bookmakers aren't connected yet.";
+    return { text: "I can only book on SportyBet right now — other bookmakers aren't connected yet.", chips: [] };
 
-  // Correct score market
+  // Correct score
   if (/correct score|exact score|scoreline|\d+-\d+\s*(?:win|result)/i.test(t))
-    return "Correct score markets aren't supported — the model doesn't have scoreline predictions. Try Over/Under or BTTS instead.";
+    return { text: "Correct score markets aren't supported — the model doesn't predict scorelines.", chips: [
+      { label: "Try Over/Under", text: "Top 5 over 2.5 games today" },
+      { label: "Try BTTS",       text: "Top 5 BTTS games today"     },
+    ]};
 
-  // Notifications / reminders / alerts
+  // Notifications / reminders
   if (/remind|alert|notification|notify|alarm|set.*timer|ping me/i.test(t))
-    return "I can't set reminders or alerts — no notification system yet.";
+    return { text: "I can't set reminders — no notification system yet.", chips: [] };
 
-  // Combine rollover + parley
+  // Rollover + parley merge
   if (/rollover.*parley|parley.*rollover|combine.*rollover|merge.*rollover/i.test(t))
-    return "I can't merge your rollover pick into a parley automatically — they're separate systems. Build a parley, then manually add your rollover pick in the Parley Builder.";
+    return { text: "I can't merge your rollover into a parley automatically — they're separate systems. Build your parley first, then add your rollover pick manually.", chips: [
+      { label: "Build a parley", text: "Build me a parley" },
+      { label: "My Rollover",    text: "Check my Rollover" },
+    ]};
 
-  // Shared slips / other people's tickets
+  // Shared slips
   if (/someone else|friend.s|their slip|shared.*ticket|send.*ticket|share.*ticket/i.test(t))
-    return "I can't access other users' tickets — slip sharing isn't built yet.";
+    return { text: "I can't access other users' tickets — slip sharing isn't built yet.", chips: [] };
 
   // Budget alerts
   if (/budget alert|spending limit|loss limit|deposit limit/i.test(t))
-    return "Budget alerts aren't supported yet — that's a bookmaker-side feature.";
+    return { text: "Budget alerts aren't supported — that's a bookmaker-side feature.", chips: [] };
 
-  // Live scores / in-play
+  // Live scores
   if (/live score|in.play|in play|\blive\b.*score|halftime score|current score/i.test(t))
-    return "I don't have live scores — I work with pre-match model data only.";
+    return { text: "I don't have live scores — I work with pre-match model data only.", chips: [
+      { label: "Today's fixtures", text: "Today's fixtures" },
+    ]};
 
-  return null; // not unsupported — pass to Gemini
+  // Cash out — bookmaker-side feature
+  if (/cash.?out|cashout/i.test(t))
+    return { text: "Cash out is handled directly on SportyBet — I can't trigger that from here.", chips: [] };
+
+  // Share / send coupon / WhatsApp
+  if (/send.*whatsapp|share.*coupon|send.*ticket|share.*ticket|forward.*slip|send.*slip/i.test(t))
+    return { text: "I can't share tickets externally yet — screenshot the ticket card for now.", chips: [] };
+
+  // HT/FT market
+  if (/half.?time.{0,6}full.?time|ht.?ft|halftime fulltime/i.test(t))
+    return { text: "Half time / full time markets aren't in the model — try Double Chance or 1X2 instead.", chips: [
+      { label: "Double Chance picks", text: "Top 5 double chance games today" },
+      { label: "1X2 picks",           text: "Top 5 1X2 games today"           },
+    ]};
+
+  // Asian handicap
+  if (/asian handicap|\bah\b.*odds|handicap market/i.test(t))
+    return { text: "Asian handicap isn't supported — the model covers Over/Under, BTTS, 1X2, and DC.", chips: [
+      { label: "See supported markets", text: "What markets do you support?" },
+    ]};
+
+  // "Keep same picks" — impossible with correct_odds
+  if (/keep.*same.*picks?|same.*picks?.*but|don.*change.*picks?/i.test(t))
+    return { text: "I can't keep the exact same legs and change the odds — odds are a product of which games are selected. I'll rebuild to match the target as closely as possible.", chips: [
+      { label: "Try correct odds", text: "Correct odds" },
+      { label: "Remix instead",    text: "Remix"        },
+    ]};
+
+  return null;
 }
 
 // ── MAIN COMPONENT ───────────────────────────────────────────────────────────
@@ -262,6 +310,7 @@ export default function ChatLayout({
   onBookNow,
   defaultBookmaker = "SB",
   geminiApiKey = null,        // passed from App but routed server-side; kept for future client use
+  selectedDate = null,        // YYYY-MM-DD from App's calendar picker — null means today
 }) {
   // ── Message state
   const [messages, setMessages]         = useState(() => safeGet(CHAT_HISTORY_KEY, null));
@@ -295,6 +344,14 @@ export default function ChatLayout({
   // natural questions; only build actions fail gracefully.
   const isGateOpen  = !fixturesLoaded;
   const chatEnabled = fixturesLoaded;
+
+  // Past date gate — if user has a past date selected, Jarvis is read-only.
+  // Building parleys for yesterday's games is pointless — block early.
+  const isPastDate = (() => {
+    if (!selectedDate) return false;
+    const today = new Date().toISOString().slice(0, 10);
+    return selectedDate < today;
+  })();
 
   // ── Init messages from sessionStorage on mount — auto-clear on new calendar day
   useEffect(() => {
@@ -346,14 +403,26 @@ export default function ChatLayout({
   useEffect(() => {
     if (!fixturesLoaded) return;
     if (messages !== null && messages.length > 0) return;
-    // Show welcome
+
+    // Past date — show read-only notice instead of normal welcome
+    if (isPastDate) {
+      const pastMsg = makeJarvisMsg({ type: "TEXT", text:
+        `You're viewing ${selectedDate} — a past date. I can analyse slips from that date, but I can't build new parleys for it. Switch to today to build.`
+      }, [
+        { label: "Analyse a slip", text: "Analyse a slip" },
+      ]);
+      setMessages([pastMsg]);
+      return;
+    }
+
+    // Normal welcome
     const welcome = makeJarvisMsg({ type: "WELCOME" }, [
       { label: "Build me a parley", text: "Build me a parley" },
       { label: "Analyse a slip",    text: "Analyse a slip"    },
       { label: "Check my Rollover", text: "Check my Rollover" },
     ]);
     setMessages([welcome]);
-  }, [fixturesLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fixturesLoaded, isPastDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Partial fetch notice
   useEffect(() => {
@@ -368,6 +437,10 @@ export default function ChatLayout({
 
   // ── HELPERS ────────────────────────────────────────────────────────────────
 
+  // Tracks the currently-dispatching tool so handlers can stamp context onto their messages
+  // without needing their signatures changed. Set before dispatch, cleared after.
+  const pendingToolRef = React.useRef(null);
+
   const addMsg = useCallback((msg) => {
     setMessages(prev => [...(prev || []), msg]);
   }, []);
@@ -378,8 +451,17 @@ export default function ChatLayout({
     );
   }, []);
 
-  const addJarvisMsg = useCallback((content, chips = []) => {
-    addMsg(makeJarvisMsg(content, chips));
+  // addJarvisMsg — stamps pendingToolRef context if available so history always knows what fired
+  const addJarvisMsg = useCallback((content, chips = [], toolCalls = []) => {
+    const tc = toolCalls.length ? toolCalls : (pendingToolRef.current ? [pendingToolRef.current] : []);
+    addMsg(makeJarvisMsg(content, chips, tc));
+  }, [addMsg]);
+
+  // addJarvisToolMsg — stamps tool name+args onto the message for history context
+  // Used by handlers that produce a visible result (ticket card, fixtures card, etc.)
+  // so subsequent turns know exactly what was built/shown.
+  const addJarvisToolMsg = useCallback((content, chips = [], toolName = "", toolArgs = {}) => {
+    addMsg(makeJarvisMsg(content, chips, [{ name: toolName, args: toolArgs }]));
   }, [addMsg]);
 
   const simulateTyping = useCallback(async (durationMs = 700) => {
@@ -424,7 +506,7 @@ export default function ChatLayout({
       { label: "Build a parley",   text: "Build me a parley"          },
       { label: "Analyse a slip",   text: "Analyse a slip"             },
       { label: "My Rollover",      text: "Check my Rollover"          },
-      { label: "Analyse a slip",   text: "Analyse a slip"             },
+      { label: "Top games today",  text: "Top 5 games today"          },
     ]);
   }
 
@@ -477,13 +559,15 @@ export default function ChatLayout({
     // "6 leg over 1.5", "top 10 over 2.5", "8 odds engine only" etc.
     if (nlParams && (nlParams.legs || nlParams.targetOdds || nlParams.market || nlParams.pool || nlParams.league)) {
       const flow = {
-        step:       BUILD_STEP.CONFIRM,
-        mode:       "custom",
-        pool:       nlParams.pool       || "all",
-        legs:       nlParams.legs       || "auto",
-        targetOdds: nlParams.targetOdds || "auto",
-        market:     nlParams.market     || "theRead",
-        leagues:    nlParams.league     || null,
+        step:           BUILD_STEP.CONFIRM,
+        mode:           "custom",
+        pool:           nlParams.pool            || "all",
+        legs:           nlParams.legs            || "auto",
+        targetOdds:     nlParams.targetOdds      || "auto",
+        market:         nlParams.market          || "theRead",
+        leagues:        nlParams.league          || null,
+        minConfidence:  nlParams.minConfidence   || null,
+        excludeMarkets: nlParams.excludeMarkets  || null,
       };
       setBuildFlow(flow);
       const loadingMsg = makeLoadingMsg();
@@ -772,7 +856,7 @@ export default function ChatLayout({
   }
 
   // ── LEAGUE_TOP — "top 5 Premier League games", "top 3 over 2.5 bundesliga" ─
-  async function handleLeagueTop(count, market, league) {
+  async function handleLeagueTop(count, market, league, minConfidence = null, excludeMarkets = null) {
     await simulateTyping(500);
     if (!fixturesLoaded) {
       addJarvisMsg({ type: "TEXT", text: "No fixtures loaded yet." }, [{ label: "Fetch fixtures", action: "FETCH" }]);
@@ -802,22 +886,32 @@ export default function ChatLayout({
       }
     }
 
+    const excludeSet = new Set(Array.isArray(excludeMarkets) ? excludeMarkets.map(m => m.toLowerCase()) : []);
+
+    const getConf = (f, mkt) => {
+      if (mkt === "theRead")  return f.theRead?.anchor?.prob ?? 0;
+      if (mkt === "over25")   return f.markets?.over25 ?? 0;
+      if (mkt === "over15")   return f.markets?.over15 ?? 0;
+      if (mkt === "over35")   return f.markets?.over35 ?? 0;
+      if (mkt === "under35")  return f.markets?.under35 ?? (f.markets?.over35 != null ? 100 - f.markets.over35 : 0);
+      if (mkt === "under25")  return 100 - (f.markets?.over25 ?? 50);
+      if (mkt === "bttsyes")  return f.markets?.bttsYes ?? 0;
+      return f.theRead?.anchor?.prob ?? 0;
+    };
+
     let pool = league ? filterFixturesByLeague(fixtures, league) : [...fixtures];
 
     pool = pool
       .filter(f => f.state !== "finished" && f.state !== "ft" && f.markets)
-      .sort((a, b) => {
-        const getConf = f => {
-          if (market === "theRead")  return f.theRead?.anchor?.prob ?? 0;
-          if (market === "over25")   return f.markets?.over25 ?? 0;
-          if (market === "over15")   return f.markets?.over15 ?? 0;
-          if (market === "over35")   return f.markets?.over35 ?? 0;
-          if (market === "bttsyes")  return f.markets?.bttsYes ?? 0;
-          if (market === "under25")  return 100 - (f.markets?.over25 ?? 50);
-          return f.theRead?.anchor?.prob ?? 0;
-        };
-        return getConf(b) - getConf(a);
+      // min_confidence filter
+      .filter(f => !minConfidence || getConf(f, market || "theRead") >= minConfidence)
+      // exclude_markets filter — drop fixtures whose theRead anchor market is excluded
+      .filter(f => {
+        if (!excludeSet.size) return true;
+        const anchor = (f.theRead?.anchor?.market || "").toLowerCase().replace(/\s/g, "");
+        return !excludeSet.has(anchor);
       })
+      .sort((a, b) => getConf(b, market || "theRead") - getConf(a, market || "theRead"))
       .slice(0, count || 5);
 
     if (!pool.length) {
@@ -854,10 +948,7 @@ export default function ChatLayout({
     const unsupported = _detectUnsupported(t);
     if (unsupported) {
       await simulateTyping(400);
-      addJarvisMsg({ type: "TEXT", text: unsupported }, [
-        { label: "Build a parley", text: "Build me a parley" },
-        { label: "Analyse a slip", text: "Analyse a slip"    },
-      ]);
+      addJarvisMsg({ type: "TEXT", text: unsupported.text }, unsupported.chips);
       return;
     }
 
@@ -874,12 +965,24 @@ export default function ChatLayout({
       { role: "user", text: rawText }, // always include current message
     ].filter(m => m.text).slice(-10); // keep last 10 turns max
 
-    const fixturePayload = (fixtures || []).slice(0, 12).map(f => ({
-      home: f.teams?.home || f.home || "",
-      away: f.teams?.away || f.away || "",
-      pick: f.theRead?.anchor?.pick || f.modelPick || "",
-      conf: f.theRead?.anchor?.prob ?? f.confidence ?? null,
+    // Include last built ticket legs so Gemini can answer follow-up questions
+    // like "why this games?", "are these the remaining games?"
+    const lastTicketLegs = (chatLastAction?.ticket?.legs || []).slice(0, 8).map(l => ({
+      home: l.game?.split(" vs ")[0]?.trim() || "",
+      away: l.game?.split(" vs ")[1]?.trim() || "",
+      pick: l.pick || "",
+      conf: l.conf || null,
+      _fromTicket: true,
     }));
+    const fixturePayload = [
+      ...lastTicketLegs,
+      ...(fixtures || []).slice(0, 10).map(f => ({
+        home: f.teams?.home || f.home || "",
+        away: f.teams?.away || f.away || "",
+        pick: f.theRead?.anchor?.pick || f.modelPick || "",
+        conf: f.theRead?.anchor?.prob ?? f.confidence ?? null,
+      })),
+    ].slice(0, 18);
 
     // 15s hard timeout — no more infinite bubbles if Termux is sleeping
     const controller = new AbortController();
@@ -903,13 +1006,20 @@ export default function ChatLayout({
       if (res.ok) {
         const { reply } = await res.json();
         if (reply?.trim()) {
-          const isMatchQuery = /vs\.?|versus|v/i.test(rawText);
-          const isSlipQuery  = /slip|code|book|analyz|analyse/i.test(rawText);
-          const contextChips = isMatchQuery
-            ? [{ label: "Build parley with this", text: "Build me a parley" }, { label: "Analyse a slip", text: "Analyse a slip" }]
+          // Chips only when they're the natural next action.
+          // Follow-up questions get no chips — user will continue naturally.
+          const isMatchQuery = /\bvs\.?\b|\bversus\b/i.test(rawText);
+          const isSlipQuery  = /\bslip\b|\bcode\b|\banalyse\b|\banalyze\b/i.test(rawText);
+          const isFollowUp   = /^(are these|is this|is that|were these|why (these|this|did)|how (many|did)|did you|what are these|are those)/i.test(rawText.trim());
+          const contextChips = isFollowUp
+            ? []
+            : isMatchQuery
+            ? [{ label: "Build parley with this game", text: "Build me a parley with this game" }]
             : isSlipQuery
-            ? [{ label: "Paste your code", text: "Analyse a slip" }, { label: "Build a new parley", text: "Build me a parley" }]
-            : [{ label: "Build a parley", text: "Build me a parley" }, { label: "My Rollover", text: "What's my rollover status?" }];
+            ? [{ label: "Open Code Analyzer", text: "Analyse a slip" }]
+            : chatLastAction?.type === "PARLEY_BUILT"
+            ? [{ label: "Remix", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]
+            : [{ label: "Build a parley", text: "Build me a parley" }];
           replaceLoadingMsg(loadingMsg.id, makeJarvisMsg({ type: "TEXT", text: reply.trim() }, contextChips));
           return;
         }
@@ -1004,21 +1114,40 @@ export default function ChatLayout({
     try {
       await new Promise(r => setTimeout(r, 1200));
 
-    const { mode, pool, legs, targetOdds, market, leagues } = flow;
+    const { mode, pool, legs, targetOdds, market, leagues, minConfidence, excludeMarkets } = flow;
 
-    // Determine leg count
+    // Determine leg count — NO artificial ceiling. buildParley caps at pool size naturally.
+    // "all" = entire qualifying pool. Target odds = log formula uncapped.
     let legCount;
-    if (legs && legs !== "auto") {
-      legCount = parseInt(legs, 10) || 6;
+    if (legs === "all") {
+      legCount = 999;
+    } else if (legs && legs !== "auto") {
+      legCount = Math.max(1, parseInt(legs, 10) || 6);
     } else if (targetOdds && targetOdds !== "auto") {
-      legCount = legsFromTargetOdds(targetOdds);
+      const target = parseFloat(targetOdds);
+      legCount = isFinite(target) && target > 1
+        ? Math.max(3, Math.round(Math.log(target) / Math.log(1.5)))
+        : 6;
     } else {
       legCount = 6;
     }
 
-    const result = fixturesLoaded && fixtures.length
+    // Pre-filter fixtures by minConfidence and excludeMarkets if provided by agent
+    let filteredFixtures = fixtures;
+    if (minConfidence || (Array.isArray(excludeMarkets) && excludeMarkets.length)) {
+      const excludeSet = new Set((excludeMarkets || []).map(m => m.toLowerCase().replace(/\s/g, "")));
+      filteredFixtures = fixtures.filter(f => {
+        const conf   = f.theRead?.anchor?.prob ?? f.markets?.over25 ?? 0;
+        const anchor = (f.theRead?.anchor?.market || "").toLowerCase().replace(/\s/g, "");
+        if (minConfidence && conf < minConfidence) return false;
+        if (excludeSet.size && excludeSet.has(anchor)) return false;
+        return true;
+      });
+    }
+
+    const result = fixturesLoaded && filteredFixtures.length
       ? buildParley({
-          fixtures,
+          fixtures:         filteredFixtures,
           marketFamily:     market || "theRead",
           legCount,
           leagueFilter:     (leagues === "all" || !leagues) ? null : leagues,
@@ -1200,6 +1329,124 @@ export default function ChatLayout({
     }
   }
 
+  // ── AGENT TOOL DISPATCHER ────────────────────────────────────────────────────
+  // Executes a single tool call returned by /api/jarvis-agent.
+  // Sets pendingToolRef before each handler so addJarvisMsg auto-stamps tool context
+  // onto every message the handler produces — zero handler signature changes needed.
+  async function dispatchTool(toolCall) {
+    const { name, args = {} } = toolCall;
+    pendingToolRef.current = { name, args }; // stamp before handler fires
+    try {
+    switch (name) {
+
+      case "build_parley":
+        // Map agent args → the nlParams shape handleBuildParley already understands
+        await handleBuildParley({
+          legs:           args.legs       || null,
+          market:         args.market     || null,
+          targetOdds:     args.target_odds ? String(args.target_odds) : null,
+          pool:           args.pool       || null,
+          league:         args.league     || null,
+          minConfidence:  args.min_confidence || null,
+          excludeMarkets: args.exclude_markets || null,
+          _withRollover:  args.with_rollover  || false,
+          anchorFixture:  args.anchor_fixture || null,
+        });
+        break;
+
+      case "get_top_fixtures":
+        await handleLeagueTop(
+          args.count   || 5,
+          args.market  || "theRead",
+          args.league  || null,
+          args.min_confidence  || null,
+          args.exclude_markets || null,
+        );
+        break;
+
+      case "get_match_analysis":
+        await handleMatchAnalysis(args.home, args.away, args.with_research || false);
+        break;
+
+      case "get_fixtures_today":
+        await handleFixturesToday();
+        break;
+
+      case "get_fixtures_by_league":
+        await handleFixturesFiltered(args.league);
+        break;
+
+      case "get_team_fixtures":
+        await handleTeamFixtures(args.team);
+        break;
+
+      case "add_teams_to_ticket":
+        await handleMultiAdd(args.teams || []);
+        break;
+
+      case "analyse_slip":
+        await handleCodeAnalyze(args.platform || null, args.code || null);
+        break;
+
+      case "remix_parley":
+        await handleRemix();
+        break;
+
+      case "add_more_legs":
+        // Synthesise "add N more legs" string so handleAddMoreLegs can parse the count
+        await handleAddMoreLegs(`add ${args.count || 2} more legs`);
+        break;
+
+      case "correct_odds":
+        await handleOddsCorrection(String(args.target_odds));
+        break;
+
+      case "get_rollover_status":
+        await handleRolloverStatus();
+        break;
+
+      case "get_rollover_analytics":
+        await handleRolloverAnalytics();
+        break;
+
+      case "navigate":
+        switch (args.destination) {
+          case "engine":          await handleNavigateEngine();        break;
+          case "custom":          await handleNavigateCustom();        break;
+          case "custom_strategy": await handleNavigateCustomStrategy(); break;
+          case "saved_parleys":   await handleSavedParleys();          break;
+          case "rollover":        await handleRolloverAnalytics();     break;
+          case "code_analyzer":   await handleCodeAnalyze(null, null); break;
+          default: break;
+        }
+        break;
+
+      case "rebuild_slip":
+        await handleRebuildSlip();
+        break;
+
+      case "apply_strategy":
+        await handleStrategy();
+        break;
+
+      case "show_help":
+        await handleHelp();
+        break;
+
+      case "conversational_reply":
+        await handleUnknown(args.question || "");
+        break;
+
+      default:
+        console.warn("[dispatchTool] unknown tool:", name);
+        await handleUnknown(args.question || "");
+        break;
+    }
+    } finally {
+      pendingToolRef.current = null; // always clear after handler finishes
+    }
+  }
+
   // ── MAIN SEND HANDLER ───────────────────────────────────────────────────────
 
   async function handleSend(text) {
@@ -1210,39 +1457,130 @@ export default function ChatLayout({
     setInput("");
     try { sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
 
-    // Classify first — REMIX adds its own user msg to avoid double-bubble
-    const classified = classifyIntent(raw);
-    if (classified.intent !== INTENT.REMIX) {
+    // ── Local fast-path — no network call for these ────────────────────────
+    // REMIX: skip user bubble, dispatch directly
+    if (/^(remix|remix again|regenerate|try again|another one|new version)$/i.test(raw)) {
       addMsg(makeUserMsg(raw));
+      inputRef.current?.focus();
+      handleRemix();
+      return;
     }
+
+    // ── Past date gate — block build actions, allow slip analysis only ──────
+    if (isPastDate) {
+      const lower = raw.toLowerCase();
+      const isSlipQuery = /analyz|analyse|slip|code|check.*code/i.test(lower);
+      if (!isSlipQuery) {
+        addJarvisMsg({ type: "TEXT", text:
+          `I'm in read-only mode for ${selectedDate}. Switch to today's date to build parleys or check your rollover. I can still analyse a slip from that date.`
+        }, [{ label: "Analyse a slip", text: "Analyse a slip" }]);
+        return;
+      }
+    }
+
+    // ── Pre-flight: catch unsupported requests instantly ───────────────────
+    const unsupported = _detectUnsupported(raw.toLowerCase());
+    if (unsupported) {
+      addMsg(makeUserMsg(raw));
+      inputRef.current?.focus();
+      await simulateTyping(400);
+      addJarvisMsg({ type: "TEXT", text: unsupported.text }, unsupported.chips);
+      return;
+    }
+
+    // ── All other messages — route through the agent ───────────────────────
+    addMsg(makeUserMsg(raw));
     inputRef.current?.focus();
 
-    switch (classified.intent) {
-      case INTENT.GREETING:           handleGreeting(classified.polarity); break;
-      case INTENT.HELP:               handleHelp(); break;
-      case INTENT.ROLLOVER_STATUS:    handleRolloverStatus(); break;
-      case INTENT.ROLLOVER_ANALYTICS: handleRolloverAnalytics(); break;
-      case INTENT.REMIX:              handleRemix(); return;
-      case INTENT.ADD_MORE_LEGS:      handleAddMoreLegs(classified.raw); break;
-      case INTENT.ODDS_CORRECTION:    handleOddsCorrection(classified.targetOdds); break;
-      case INTENT.BUILD_PARLEY:       handleBuildParley(classified); break;
-      case INTENT.MATCH_ANALYSIS:     handleMatchAnalysis(classified.home, classified.away, false); break;
-      case INTENT.JARVIS_ANALYSIS:    handleMatchAnalysis(classified.home, classified.away, true); break;
-      case INTENT.FIXTURES_TODAY:     handleFixturesToday(); break;
-      case INTENT.FIXTURES_FILTERED:  handleFixturesFiltered(classified.league); break;
-      case INTENT.CODE_ANALYZE:       handleCodeAnalyze(classified.platform, classified.code || raw); break;
-      case INTENT.NAVIGATE_CUSTOM:          handleNavigateCustom(); break;
-      case INTENT.NAVIGATE_CUSTOM_STRATEGY: handleNavigateCustomStrategy(); break;
-      case INTENT.NAVIGATE_ENGINE:          handleNavigateEngine(); break;
-      case INTENT.SAVED_PARLEYS:      handleSavedParleys(); break;
-      case INTENT.STRATEGY:           handleStrategy(); break;
-      case INTENT.BUILD_WITH_MATCH:   handleBuildParley({ market: "theRead", home: classified.home, away: classified.away }); break;
-      case INTENT.BUILD_WITH_ROLLOVER:handleBuildParley({ pool: "all", _withRollover: true }); break;
-      case INTENT.REBUILD_SLIP:       handleRebuildSlip(); break;
-      case INTENT.MULTI_ADD:          handleMultiAdd(classified.queries); break;
-      case INTENT.TEAM_FIXTURES:      handleTeamFixtures(classified.team); break;
-      case INTENT.LEAGUE_TOP:         handleLeagueTop(classified.count, classified.market, classified.league); break;
-      default:                        handleUnknown(raw); break;
+    // Show typing indicator while agent call is in flight
+    setIsTyping(true);
+
+    // Build payloads
+    const fixturePayload = (fixtures || []).slice(0, 25).map(f => ({
+      home: f.teams?.home || f.home || "",
+      away: f.teams?.away || f.away || "",
+      pick: f.theRead?.anchor?.pick || f.modelPick || "",
+      conf: f.theRead?.anchor?.prob ?? f.confidence ?? null,
+    }));
+
+    // Send last 10 turns with full tool context so Gemini can handle multi-turn
+    // corrections like "nah make am 6", "same but remove under 2.5", "make it safer"
+    const historyPayload = (messages || []).slice(-10).map(m => {
+      const text = m.role === "user"
+        ? (m.text || "")
+        : (typeof m.content === "string" ? m.content : m.content?.text || "");
+      // Summarize card types into readable text for Jarvis turns with no text
+      const displayText = text || (m.content?.type === "TICKET_CARD"
+        ? `Built ticket: ${m.content?.ticket?.legs?.length || "?"} legs, ×${m.content?.ticket?.totalOdds || "?"}`
+        : m.content?.type === "FIXTURES_CARD"
+        ? `Showed ${m.content?.fixtures?.length || "?"} fixtures`
+        : "");
+      return {
+        role:      m.role === "user" ? "user" : "jarvis",
+        text:      displayText,
+        toolCalls: m.toolCalls || [],
+      };
+    }).filter(m => m.text || m.toolCalls?.length);
+
+    const rolloverPayload = rolloverChain ? {
+      step:   rolloverChain.step ?? 0,
+      pick:   rolloverChain.todayPick || rolloverChain.pick || null,
+      status: rolloverChain.status || "active",
+    } : null;
+
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 18000);
+
+    let toolCalls = [];
+    let agentReply = null;
+
+    try {
+      const res = await fetch(`${SERVER}/api/jarvis-agent`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        signal:  controller.signal,
+        body: JSON.stringify({
+          message:             raw,
+          date:                new Date().toISOString().slice(0, 10),
+          fixtures:            fixturePayload,
+          rolloverSummary:     rolloverPayload,
+          conversationHistory: historyPayload,
+        }),
+      });
+      clearTimeout(timeoutId);
+      setIsTyping(false);
+
+      if (res.ok) {
+        const data = await res.json();
+        toolCalls  = data.toolCalls || [];
+        agentReply = data.reply    || null;
+      } else {
+        throw new Error(`agent ${res.status}`);
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      setIsTyping(false);
+      const isTimeout = err.name === "AbortError";
+      addJarvisMsg(
+        { type: "TEXT", text: isTimeout
+            ? "Jarvis took too long — the server may be sleeping. Try again in a moment."
+            : "Couldn't reach Jarvis right now — check your connection." },
+        [{ label: "Try again", text: raw }]
+      );
+      return;
+    }
+
+    // ── If agent sent a preamble text, render it first ─────────────────────
+    // Stamp the full toolCalls onto the preamble message so history knows what fired
+    if (agentReply) {
+      addJarvisMsg({ type: "TEXT", text: agentReply }, [], toolCalls);
+    }
+
+    // ── Execute each tool call in order ────────────────────────────────────
+    // dispatchTool renders its own message — we store toolCalls on it via
+    // addJarvisToolMsg so Gemini can read them in subsequent turns.
+    for (const toolCall of toolCalls) {
+      await dispatchTool(toolCall, toolCalls);
     }
   }
 
@@ -2192,7 +2530,7 @@ function RolloverCard({ C, S, chain, pick, booked, totalFixtures, onNavigatePro 
             <div style={{ display:"flex",gap:6,marginTop:2 }}>
               <span style={{ fontSize:11,color:C.accent,fontWeight:700 }}>{leg.pick}</span>
               <span style={{ fontSize:10,color:C.muted }}>@{leg.odds}</span>
-              {leg.conf && <span style={{ fontSize:10,color:C.muted }}>· Conf: {leg.conf}%</span>}
+              {leg.conf && <span style={{ fontSize:10,color:C.muted }}>· Conf: {fmtConf(leg.conf)}%</span>}
             </div>
           </div>
         )) : (
@@ -2201,7 +2539,7 @@ function RolloverCard({ C, S, chain, pick, booked, totalFixtures, onNavigatePro 
             <div style={{ display:"flex",gap:6,marginTop:2 }}>
               <span style={{ fontSize:11,color:C.accent,fontWeight:700 }}>PICK: {pick.pick}</span>
               {pick.odds && <span style={{ fontSize:10,color:C.muted }}>@{pick.odds}</span>}
-              {pick.conf && <span style={{ fontSize:10,color:C.muted }}>· Conf: {pick.conf}%</span>}
+              {pick.conf && <span style={{ fontSize:10,color:C.muted }}>· Conf: {fmtConf(pick.conf)}%</span>}
             </div>
           </>
         )}
@@ -2250,21 +2588,21 @@ function MatchCard({ C, S, fixture, withJarvis, onNavigatePro }) {
           <div style={{ fontSize:9,color:C.muted,letterSpacing:".09em",textTransform:"uppercase",marginBottom:4 }}>MODEL PICK</div>
           <div style={{ display:"flex",alignItems:"center",gap:6 }}>
             <span style={{ fontSize:12,color:C.accent,fontWeight:800 }}>{topPick.pick}</span>
-            <span style={{ fontSize:11,color:C.text,fontWeight:700 }}>{topPick.prob}%</span>
+            <span style={{ fontSize:11,color:C.text,fontWeight:700 }}>{fmtConf(topPick.prob)}%</span>
           </div>
           {/* Mini bar */}
           <div className="grm-progress" style={{ marginTop:5,marginBottom:6 }}>
-            <div className="grm-progress-fill" style={{ width:`${topPick.prob}%` }} />
+            <div className="grm-progress-fill" style={{ width:`${fmtConf(topPick.prob)}%` }} />
           </div>
         </div>
       )}
       {(homeWin || draw || awayWin) && (
         <div style={{ display:"flex",gap:8,fontSize:10,color:C.muted,marginBottom:8 }}>
-          {homeWin ? <span>H: <strong style={{ color:C.text }}>{homeWin}%</strong></span> : null}
-          {draw    ? <span>X: <strong style={{ color:C.text }}>{draw}%</strong></span>    : null}
-          {awayWin ? <span>A: <strong style={{ color:C.text }}>{awayWin}%</strong></span> : null}
-          {m.over25 ? <span>O2.5: <strong style={{ color:C.text }}>{m.over25}%</strong></span> : null}
-          {m.bttsYes ? <span>BTTS: <strong style={{ color:C.text }}>{m.bttsYes}%</strong></span> : null}
+          {homeWin ? <span>H: <strong style={{ color:C.text }}>{fmtConf(homeWin)}%</strong></span> : null}
+          {draw    ? <span>X: <strong style={{ color:C.text }}>{fmtConf(draw)}%</strong></span>    : null}
+          {awayWin ? <span>A: <strong style={{ color:C.text }}>{fmtConf(awayWin)}%</strong></span> : null}
+          {m.over25 ? <span>O2.5: <strong style={{ color:C.text }}>{fmtConf(m.over25)}%</strong></span> : null}
+          {m.bttsYes ? <span>BTTS: <strong style={{ color:C.text }}>{fmtConf(m.bttsYes)}%</strong></span> : null}
         </div>
       )}
       <div style={{ display:"flex",gap:6 }}>
@@ -2318,7 +2656,7 @@ function FixturesCard({ C, S, fixtures, label, onNavigatePro }) {
                     {f.startTime && <span style={{ fontSize:9,color:C.muted }}>{f.startTime}</span>}
                     {pick && (
                       <span style={{ fontSize:10,color:C.accent,fontWeight:700 }}>
-                        {pick.pick?.length > 14 ? pick.pick.slice(0,13)+"…" : pick.pick} {pick.prob}%
+                        {pick.pick?.length > 13 ? pick.pick.slice(0,12)+"…" : pick.pick} {fmtConf(pick.prob)}%
                       </span>
                     )}
                   </div>
@@ -2327,7 +2665,7 @@ function FixturesCard({ C, S, fixtures, label, onNavigatePro }) {
                 <button
                   className="grm-mini-btn"
                   style={{ padding:"3px 8px",fontSize:9,flexShrink:0,whiteSpace:"nowrap" }}
-                  onClick={() => onNavigatePro?.({ tab:"live", fixture:f })}
+                  onClick={() => onNavigatePro?.({ layout:"pro", tab:"live", fixture:f })}
                 >
                   Open →
                 </button>

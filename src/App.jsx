@@ -3397,14 +3397,23 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
 
 function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary }) {
   const isMobile = useIsMobile();
-  const [family,         setFamily]         = useState("theRead");
-  const [statFilters,    setStatFilters]    = useState([]);
+  const SS_KEY = "grm_clv_state_v1";
+  const loadSS = (k, fallback) => { try { const s = sessionStorage.getItem(SS_KEY); if (!s) return fallback; const d = JSON.parse(s); return d[k] !== undefined ? d[k] : fallback; } catch { return fallback; } };
+  const saveSS = (patch) => { try { const d = JSON.parse(sessionStorage.getItem(SS_KEY) || "{}"); sessionStorage.setItem(SS_KEY, JSON.stringify({ ...d, ...patch })); } catch {} };
+
+  const [family,         setFamilyState]         = useState(() => loadSS("family", "theRead"));
+  const [statFilters,    setStatFiltersState]    = useState(() => loadSS("statFilters", []));
   const [selected,       setSelected]       = useState(null);
-  const [activeStrategy, setActiveStrategy] = useState(null);
+  const [activeStrategy, setActiveStrategyState] = useState(() => loadSS("activeStrategy", null));
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
+
+  const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
+  const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
+  const setActiveStrategy = v => { setActiveStrategyState(v); saveSS({ activeStrategy: v }); };
   // Issue 6: Market exclusion — fixtures whose primary Read/pick is an excluded market
   // fall back to their second-best qualifying pick rather than being hidden entirely.
-  const [excludedMarkets, setExcludedMarkets] = useState(new Set());
+  const [excludedMarkets, setExcludedMarketsState] = useState(() => { try { const a = loadSS("excludedMarkets"); return Array.isArray(a) ? new Set(a) : new Set(); } catch { return new Set(); } });
+  const setExcludedMarkets = fn => setExcludedMarketsState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ excludedMarkets: [...next] }); return next; });
   const toggleExcludeMarket = (mkt) =>
     setExcludedMarkets(prev => {
       const next = new Set(prev);
@@ -3421,16 +3430,26 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [saveStratOpen,  setSaveStratOpen]  = useState(false);
 
   // Threshold values — null means unset (chip inactive). No defaults = no highlight bug.
-  const [xgBoth,  setXgBoth]  = useState(null);
-  const [xgHome,  setXgHome]  = useState(null);
-  const [xgAway,  setXgAway]  = useState(null);
-  const [thrBtts, setThrBtts] = useState(null);
-  const [thrHWin, setThrHWin] = useState(null);
-  const [thrAWin, setThrAWin] = useState(null);
-  const [thrHCS,  setThrHCS]  = useState(null);
-  const [thrACS,  setThrACS]  = useState(null);
-  const [thrOdds, setThrOdds] = useState(null);
-  const [thrDraw, setThrDraw] = useState(null);
+  const [xgBoth,  setXgBothS]  = useState(() => loadSS("xgBoth",  null));
+  const [xgHome,  setXgHomeS]  = useState(() => loadSS("xgHome",  null));
+  const [xgAway,  setXgAwayS]  = useState(() => loadSS("xgAway",  null));
+  const [thrBtts, setThrBttsS] = useState(() => loadSS("thrBtts", null));
+  const [thrHWin, setThrHWinS] = useState(() => loadSS("thrHWin", null));
+  const [thrAWin, setThrAWinS] = useState(() => loadSS("thrAWin", null));
+  const [thrHCS,  setThrHCSS]  = useState(() => loadSS("thrHCS",  null));
+  const [thrACS,  setThrACSS]  = useState(() => loadSS("thrACS",  null));
+  const [thrOdds, setThrOddsS] = useState(() => loadSS("thrOdds", null));
+  const [thrDraw, setThrDrawS] = useState(() => loadSS("thrDraw", null));
+  const setXgBoth  = v => { setXgBothS(v);  saveSS({ xgBoth:  v }); };
+  const setXgHome  = v => { setXgHomeS(v);  saveSS({ xgHome:  v }); };
+  const setXgAway  = v => { setXgAwayS(v);  saveSS({ xgAway:  v }); };
+  const setThrBtts = v => { setThrBttsS(v); saveSS({ thrBtts: v }); };
+  const setThrHWin = v => { setThrHWinS(v); saveSS({ thrHWin: v }); };
+  const setThrAWin = v => { setThrAWinS(v); saveSS({ thrAWin: v }); };
+  const setThrHCS  = v => { setThrHCSS(v);  saveSS({ thrHCS:  v }); };
+  const setThrACS  = v => { setThrACSS(v);  saveSS({ thrACS:  v }); };
+  const setThrOdds = v => { setThrOddsS(v); saveSS({ thrOdds: v }); };
+  const setThrDraw = v => { setThrDrawS(v); saveSS({ thrDraw: v }); };
   // Direction per threshold chip: "gte" = ≥, "lte" = ≤
   const [thrDirs, setThrDirs] = useState({});
   const setDir = (id, dir) => setThrDirs(prev => ({ ...prev, [id]: dir }));
@@ -3717,9 +3736,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       return null;
     };
 
+    // P23-FIX: live + upcoming are mutually exclusive if applied as hard filters.
+    // When both (or neither) are active, skip the status filter and sort live first instead.
+    const hasLiveFilter     = statFilters.includes("live");
+    const hasScheduledFilter = statFilters.includes("scheduled");
+    const bothOrNeither     = (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const statusFilters     = new Set(["live", "scheduled"]);
+
     return fixtures
       .filter(f => !s||f.teams.home.toLowerCase().includes(s)||f.teams.away.toLowerCase().includes(s)||f.league.toLowerCase().includes(s))
-      .filter(f => statFilters.every(id => { const sf=STAT_FILTERS.find(x=>x.id===id); return sf?sf.fn(f):true; }))
+      .filter(f => statFilters.every(id => {
+        if (statusFilters.has(id) && bothOrNeither) return true; // skip status filter — handled by sort
+        const sf=STAT_FILTERS.find(x=>x.id===id); return sf?sf.fn(f):true;
+      }))
       .map(f => {
         const primaryPick = getCustomPick(f, family);
         if (!primaryPick || primaryPick.prob <= 0) return null;
@@ -3734,7 +3763,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return { f, pick: primaryPick, _usedFallback: false };
       })
       .filter(Boolean)
-      .sort((a,b) => b.pick.prob - a.pick.prob);
+      .sort((a, b) => {
+        // P23-FIX: when both or neither status filter active, sort live first then by prob
+        if (bothOrNeither) {
+          const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
+          const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+          const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+          if (aLive !== bLive) return aLive - bLive;
+        }
+        return b.pick.prob - a.pick.prob;
+      });
   }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets]);
 
   const saveListToJSON = () => {
@@ -4040,18 +4078,37 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </svg>
             <span style={{ fontSize:9, fontWeight:800, color: advancedOpen ? C.gold : C.text,
                            textTransform:"uppercase", letterSpacing:".1em" }}>Advanced Filters</span>
-            {/* Active count badge — shows when collapsed with active filters */}
-            {!advancedOpen && (thrBtts!=null||xgBoth!=null||xgHome!=null||xgAway!=null||thrHWin!=null||thrAWin!=null||thrHCS!=null||thrACS!=null||thrOdds!=null||thrDraw!=null) && (
-              <span style={{ background:C.gold, color:C.accentText, borderRadius:10,
-                             fontSize:7, fontWeight:900, padding:"1px 6px", lineHeight:1.5 }}>
-                ACTIVE
-              </span>
-            )}
+            {/* P21-FIX: active count badge — shows number of active filters when collapsed */}
+            {!advancedOpen && (() => {
+              const count = [thrBtts,xgBoth,xgHome,xgAway,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw].filter(v=>v!=null).length;
+              return count > 0 ? (
+                <span style={{ background:C.gold, color:C.accentText, borderRadius:10,
+                               fontSize:7, fontWeight:900, padding:"1px 7px", lineHeight:1.5,
+                               minWidth:18, textAlign:"center" }}>
+                  {count}
+                </span>
+              ) : null;
+            })()}
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-            {!advancedOpen && (
-              <span style={{ fontSize:8, color:C.muted, fontStyle:"italic" }}>xG · Win % · CS · Odds</span>
-            )}
+            {!advancedOpen && (() => {
+              // P21-FIX: show active filter labels when collapsed, otherwise hint
+              const active = [
+                xgBoth  != null && `xG≥${xgBoth}`,
+                xgHome  != null && `HxG≥${xgHome}`,
+                xgAway  != null && `AxG≥${xgAway}`,
+                thrBtts != null && `BTTS≥${thrBtts}%`,
+                thrHWin != null && `HWin≥${thrHWin}%`,
+                thrAWin != null && `AWin≥${thrAWin}%`,
+                thrHCS  != null && `HCS≥${thrHCS}%`,
+                thrACS  != null && `ACS≥${thrACS}%`,
+                thrOdds != null && `Odds≥${thrOdds}`,
+                thrDraw != null && `Draw≥${thrDraw}%`,
+              ].filter(Boolean);
+              return active.length > 0
+                ? <span style={{ fontSize:8, color:C.gold, fontWeight:700 }}>{active.slice(0,3).join(" · ")}{active.length>3?` +${active.length-3}`:""}</span>
+                : <span style={{ fontSize:8, color:C.muted, fontStyle:"italic" }}>xG · Win % · CS · Odds</span>;
+            })()}
             <span style={{ fontSize:11, color: advancedOpen ? C.gold : C.muted, fontWeight:700,
                            transform: advancedOpen ? "rotate(180deg)" : "none", transition:"transform .2s" }}>▾</span>
           </div>
@@ -4166,14 +4223,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       {/* Column headers */}
       {!isMobile && (
         <div style={{ display:"grid",gridTemplateColumns:hasResults?"24px 50px 1fr 140px 60px 60px 72px":"24px 50px 1fr 140px 60px 60px",gap:8,padding:"6px 14px",borderBottom:`1px solid ${C.border}`,fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
-          {/* P10-FIX: header checkbox now wires to Select All / Clear All */}
+          {/* P10-FIX: labelled Select All / Clear All */}
           <span>
             {selectedIds.size > 0
               ? <button onClick={clearSelection} title="Clear selection" style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button>
               : <button onClick={() => {
                   const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
                   setSelectedIds(new Set(eligibleIds));
-                }} title="Select all" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,padding:0,lineHeight:1 }}>☐</button>
+                }} title="Select all fixtures" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9,padding:0,lineHeight:1,letterSpacing:".04em",fontWeight:800,textTransform:"uppercase" }}>ALL</button>
             }
           </span>
           <span>Time</span><span>Match</span><span>Pick</span><span>Prob</span><span>Odds</span>
@@ -4188,7 +4245,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               : <button onClick={() => {
                   const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
                   setSelectedIds(new Set(eligibleIds));
-                }} title="Select all" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,padding:0,lineHeight:1 }}>☐</button>
+                }} title="Select all fixtures" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9,padding:0,lineHeight:1,letterSpacing:".04em",fontWeight:800,textTransform:"uppercase" }}>ALL</button>
             }
           </span>
           <span>Match / Pick</span><span style={{ textAlign:"right" }}>%</span>
@@ -4225,7 +4282,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4 }}>
                   {/* P1-FIX: in-draft dot — shows when this fixture is already in the active draft */}
                   {draftLegs?.some(l => l.fixtureId === f.id) && (
-                    <span title="In draft" style={{ flexShrink:0,width:6,height:6,borderRadius:"50%",background:C.accent,display:"inline-block" }} />
+                    <span style={{ flexShrink:0, fontSize:6, fontWeight:900, letterSpacing:".06em",
+                                   background:C.accent, color:C.accentText, borderRadius:4,
+                                   padding:"1px 5px", lineHeight:1.6, textTransform:"uppercase" }}>
+                      Draft
+                    </span>
                   )}
                   <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{pick.label}</span>
                   {_usedFallback && (
@@ -4270,7 +4331,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 <div style={{ fontSize:10,fontWeight:700,color:pick.color||C.text,lineHeight:1.2,display:"flex",alignItems:"center",gap:4 }}>
                   {/* P1-FIX: in-draft dot */}
                   {draftLegs?.some(l => l.fixtureId === f.id) && (
-                    <span title="In draft" style={{ flexShrink:0,width:6,height:6,borderRadius:"50%",background:C.accent,display:"inline-block" }} />
+                    <span style={{ flexShrink:0, fontSize:6, fontWeight:900, letterSpacing:".06em",
+                                   background:C.accent, color:C.accentText, borderRadius:4,
+                                   padding:"1px 5px", lineHeight:1.6, textTransform:"uppercase" }}>
+                      Draft
+                    </span>
                   )}
                   {pick.label}
                 </div>
@@ -4836,7 +4901,7 @@ function BacktestTab({ loadSnapshot, adminMode, adminToken = "", onReloadFixture
 // disabled:true  → shown in picker, unselectable (greyed + subtext shown below label)
 const BOOKMAKERS = [
   { id:"sportybet",   label:"SportyBet NG",  api:"/api/book-sportybet",   link: code => `https://www.sportybet.com/ng/?shareCode=${code}`,       appLink: code => `sportybet://share?shareCode=${code}` },
-  { id:"duel",        label:"Duel",           api:"/api/book-duel",        link: code => `https://duel.com/sports?btBookingCode=${code}`,         appLink: code => `duel://betslip?btBookingCode=${code}` },
+  { id:"duel",        label:"Duel",           api:"/api/book-duel",        link: code => `https://duel.com/sports?bt-path=%2F%3FbtBookingCode%3D${code}`,         appLink: code => `duel://betslip?btBookingCode=${code}` },
   { id:"luckyledger", label:"Lucky's Ledger", api:"/api/book-luckyledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`, appLink: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 ];
 
@@ -4844,10 +4909,23 @@ function TicketBookNowButton({ legs }) {
   const [open, setOpen]         = useState(false);
   const [bookie, setBookie]     = useState("");
   const [booking, setBooking]   = useState(false);
-  const [result, setResult]     = useState(null);
   const [error, setError]       = useState(null);
+  // N27-FIX: auto-open if a persisted result exists from a previous mount
+  useEffect(() => {
+    try { const s = sessionStorage.getItem("grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80)); if (s) setOpen(true); } catch {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [copied, setCopied]     = useState(false);
   const [sharedOk, setSharedOk] = useState(false);
+
+  // N27-FIX: persist booking result across panel remounts via sessionStorage
+  const resultKey = "grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80);
+  const [result, setResultState] = useState(() => {
+    try { const s = sessionStorage.getItem(resultKey); return s ? JSON.parse(s) : null; } catch { return null; }
+  });
+  const setResult = (val) => {
+    setResultState(val);
+    try { val ? sessionStorage.setItem(resultKey, JSON.stringify(val)) : sessionStorage.removeItem(resultKey); } catch {}
+  };
 
   const buildLegs = () => (legs || []).map(leg => {
     const home = leg.home || (leg.game || "").split(" vs ")[0]?.trim() || "";
@@ -5084,6 +5162,62 @@ function TicketBookNowButton({ legs }) {
             </button>
           </div>
 
+          {/* N11-FIX: Actual BM odds — clean card, total prominent, per-leg breakdown below */}
+          {(result.combinedOdds || result.oddsBreakdown?.some(l => l.odds)) && (
+            <div style={{ border:`1px solid ${C.gold}30`, borderRadius:br, overflow:"hidden" }}>
+
+              {/* Total odds header */}
+              {result.combinedOdds && (
+                <div style={{ background:`${C.gold}0e`, padding:"10px 14px",
+                              display:"flex", justifyContent:"space-between", alignItems:"center",
+                              borderBottom: result.oddsBreakdown?.some(l=>l.odds) ? `1px solid ${C.gold}20` : "none" }}>
+                  <div>
+                    <div style={{ fontSize:7, fontWeight:800, color:C.gold, letterSpacing:".1em",
+                                  textTransform:"uppercase", marginBottom:2 }}>Booked Odds</div>
+                    <div style={{ fontSize:8, color:C.muted }}>confirmed by bookmaker</div>
+                  </div>
+                  <div style={{ fontSize:26, fontWeight:900, color:C.gold,
+                                letterSpacing:"-.01em", lineHeight:1 }}>
+                    ×{result.combinedOdds}
+                  </div>
+                </div>
+              )}
+
+              {/* Per-leg breakdown */}
+              {result.oddsBreakdown?.filter(l => l.odds).map((l, i, arr) => (
+                <div key={i} style={{
+                  display:"flex", alignItems:"center", padding:"8px 14px", gap:10,
+                  background: i % 2 === 0 ? "transparent" : `${C.text}04`,
+                  borderBottom: i < arr.length - 1 ? `1px solid ${C.border}` : "none",
+                }}>
+                  {/* Odds pill */}
+                  <div style={{ flexShrink:0, minWidth:36, textAlign:"center",
+                                background:`${C.gold}12`, border:`1px solid ${C.gold}30`,
+                                borderRadius:6, padding:"3px 6px" }}>
+                    <span style={{ fontSize:10, fontWeight:800, color:C.gold }}>
+                      {l.odds}
+                    </span>
+                  </div>
+                  {/* Match + pick */}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:9, fontWeight:700, color:C.text,
+                                  whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                      {l.game || l.pick}
+                    </div>
+                    {l.pick && l.game && (
+                      <div style={{ fontSize:8, color:C.muted, marginTop:1 }}>{l.pick}</div>
+                    )}
+                    {l._fallbackFrom && (
+                      <div style={{ fontSize:7, color:C.amber, marginTop:1 }}>
+                        booked as {l.bookedAs || l._fallbackFrom?.bookedAs}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Per-leg failures */}
           {(() => {
             const failed = Array.isArray(result.failed) ? result.failed : [];
@@ -5130,18 +5264,6 @@ function TicketBookNowButton({ legs }) {
                 <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
               </svg>
               {copied ? "Copied!" : "Copy Code"}
-            </button>
-            <button onClick={openInApp} style={{
-              flex:1, padding:"10px 0", fontSize:10, fontWeight:700,
-              background:C.accent, color:C.accentText,
-              border:"none", borderRadius:br,
-              cursor:"pointer", fontFamily:C.font,
-              display:"flex", alignItems:"center", justifyContent:"center", gap:6,
-            }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-              </svg>
-              Open App
             </button>
             <button onClick={shareTicket} style={{
               flex:1, padding:"10px 0", fontSize:10, fontWeight:700,
@@ -5681,6 +5803,277 @@ function CopyCodeButton({ code }) {
   );
 }
 
+// ── N19: GRM SHARE MENU (3-dot) ──────────────────────────────────────────
+// Lazy — only hits /api/ticket/share on first tap.
+// Shows on both built tickets (Saved tab) and Draft ticket.
+function GrmShareMenu({ ticket, bookieResult = null }) {
+  const [open,       setOpen]       = useState(false);
+  const [grmCode,    setGrmCode]    = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [copied,     setCopied]     = useState(null); // which item was just copied
+  const menuRef = useRef(null);
+
+  // Close on outside tap
+  useEffect(() => {
+    if (!open) return;
+    const handler = e => { if (menuRef.current && !menuRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("touchstart", handler); };
+  }, [open]);
+
+  const ensureGrmCode = async () => {
+    if (grmCode) return grmCode;
+    setGenerating(true);
+    try {
+      const bm = bookieResult ? BOOKMAKERS.find(b => b.id === bookieResult.bookieId) : null;
+      const res = await fetch(`${SERVER}/api/ticket/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          legs:                 ticket.legs,
+          totalOdds:            ticket.totalOdds,
+          combinedEmpiricalRate: ticket.combinedEmpiricalRate || null,
+          date:                 ticket.date || null,
+          label:                ticket.slotLabel || null,
+          bookieCode:           bookieResult?.code || null,
+          bookieId:             bookieResult?.bookieId || null,
+        }),
+      });
+      if (!res.ok) throw new Error("Server error");
+      const { code } = await res.json();
+      setGrmCode(code);
+      setGenerating(false);
+      return code;
+    } catch {
+      setGenerating(false);
+      return null;
+    }
+  };
+
+  const flash = (key) => { setCopied(key); setTimeout(() => setCopied(null), 1800); };
+
+  const handleOpen = async () => {
+    setOpen(o => !o);
+    // Pre-generate code in background when menu opens so Copy actions are instant
+    if (!grmCode) ensureGrmCode();
+  };
+
+  const copyGrmCode = async () => {
+    const code = await ensureGrmCode();
+    if (!code) return;
+    copyToClipboard(code, () => flash("code"));
+  };
+
+  const copyGrmLink = async () => {
+    const code = await ensureGrmCode();
+    if (!code) return;
+    const base = window.location.origin + window.location.pathname;
+    copyToClipboard(`${base}?grm=${code}`, () => flash("link"));
+  };
+
+  const copyBookieCode = () => {
+    if (!bookieResult?.code) return;
+    copyToClipboard(bookieResult.code, () => flash("bcode"));
+  };
+
+  const copyBookieLink = () => {
+    if (!bookieResult?.code || !bookieResult?.bookieId) return;
+    const bm = BOOKMAKERS.find(b => b.id === bookieResult.bookieId);
+    if (!bm?.link) return;
+    copyToClipboard(bm.link(bookieResult.code), () => flash("blink"));
+  };
+
+  const hasBookie = !!(bookieResult?.code);
+
+  return (
+    <div ref={menuRef} style={{ position:"relative", display:"inline-flex", alignItems:"center", gap:5 }}>
+      {/* Label + code pill */}
+      {grmCode && (
+        <span style={{ fontSize:8, fontWeight:800, color:C.muted, letterSpacing:".06em",
+                       background:C.faint, border:`1px solid ${C.border}`, borderRadius:5,
+                       padding:"2px 7px", fontFamily:C.font }}>
+          {grmCode}
+        </span>
+      )}
+      {generating && (
+        <span style={{ fontSize:8, color:C.muted, fontFamily:C.font }}>…</span>
+      )}
+
+      {/* 3-dot trigger */}
+      <button onClick={handleOpen} title="Share options"
+        style={{ background:"transparent", border:`1px solid ${C.border}`, borderRadius:7,
+                 padding:"3px 7px", cursor:"pointer", display:"flex", alignItems:"center",
+                 gap:2, color:C.muted }}>
+        {[0,1,2].map(i => (
+          <span key={i} style={{ width:3, height:3, borderRadius:"50%",
+                                  background:open ? C.text : C.muted, display:"block",
+                                  transition:"background .15s" }} />
+        ))}
+      </button>
+
+      {/* Popover */}
+      {open && (
+        <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
+                      background:C.surface, border:`1px solid ${C.border}`, borderRadius:10,
+                      padding:"6px 0", minWidth:168, boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
+
+          {/* GRM section */}
+          <div style={{ padding:"3px 12px 5px", fontSize:7, fontWeight:800, color:C.muted,
+                        letterSpacing:".1em", textTransform:"uppercase" }}>GRM Link</div>
+
+          <button onClick={copyGrmCode}
+            style={{ width:"100%", padding:"8px 14px", background:copied==="code"?`${C.green}10`:"transparent",
+                     border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
+                     display:"flex", alignItems:"center", gap:9 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={copied==="code"?C.green:C.text} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            <span style={{ fontSize:10, fontWeight:700, color:copied==="code"?C.green:C.text }}>
+              {copied==="code" ? "Copied!" : "Copy GRM Code"}
+            </span>
+          </button>
+
+          <button onClick={copyGrmLink}
+            style={{ width:"100%", padding:"8px 14px", background:copied==="link"?`${C.green}10`:"transparent",
+                     border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
+                     display:"flex", alignItems:"center", gap:9 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={copied==="link"?C.green:C.text} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+            <span style={{ fontSize:10, fontWeight:700, color:copied==="link"?C.green:C.text }}>
+              {copied==="link" ? "Copied!" : "Copy GRM Link"}
+            </span>
+          </button>
+
+          {/* Bookie section — only if booked */}
+          {hasBookie && (
+            <>
+              <div style={{ margin:"5px 12px", borderTop:`1px solid ${C.border}` }} />
+              <div style={{ padding:"3px 12px 5px", fontSize:7, fontWeight:800, color:C.muted,
+                            letterSpacing:".1em", textTransform:"uppercase" }}>
+                {BOOKMAKERS.find(b=>b.id===bookieResult.bookieId)?.label || "Bookie"}
+              </div>
+
+              <button onClick={copyBookieCode}
+                style={{ width:"100%", padding:"8px 14px", background:copied==="bcode"?`${C.gold}10`:"transparent",
+                         border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
+                         display:"flex", alignItems:"center", gap:9 }}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={copied==="bcode"?C.gold:C.text} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+                <span style={{ fontSize:10, fontWeight:700, color:copied==="bcode"?C.gold:C.text }}>
+                  {copied==="bcode" ? "Copied!" : "Copy Bookie Code"}
+                </span>
+              </button>
+
+              <button onClick={copyBookieLink}
+                style={{ width:"100%", padding:"8px 14px", background:copied==="blink"?`${C.gold}10`:"transparent",
+                         border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
+                         display:"flex", alignItems:"center", gap:9 }}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={copied==="blink"?C.gold:C.text} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                <span style={{ fontSize:10, fontWeight:700, color:copied==="blink"?C.gold:C.text }}>
+                  {copied==="blink" ? "Copied!" : "Copy Bookie Link"}
+                </span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── N19: GRM LOAD PANEL ───────────────────────────────────────────────────
+// Input box in builder tab. Accepts a GRM code (GXXXXX) or full ?grm= link.
+// On load: fetches ticket, saves to Saved Tickets, switches to parley view.
+function GrmLoadPanel({ onLoaded }) {
+  const [input,   setInput]   = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState(null);
+  const [ok,      setOk]      = useState(false);
+
+  const extractCode = (raw) => {
+    const trimmed = raw.trim().toUpperCase();
+    // Direct code
+    if (/^G[A-Z0-9]{5}$/.test(trimmed)) return trimmed;
+    // From URL ?grm=GXXXXX
+    try {
+      const url = new URL(raw.trim());
+      const p = url.searchParams.get("grm");
+      if (p && /^G[A-Z0-9]{5}$/i.test(p)) return p.toUpperCase();
+    } catch {}
+    return null;
+  };
+
+  const handleLoad = async () => {
+    const code = extractCode(input);
+    if (!code) { setError("Enter a valid GRM code (e.g. GABCDE) or paste a GRM link."); return; }
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(`${SERVER}/api/ticket/${code}`);
+      if (res.status === 404) throw new Error("Ticket not found — check the code.");
+      if (res.status === 410) throw new Error("This link has expired (30 days).");
+      if (!res.ok) throw new Error("Failed to load ticket.");
+      const { ticket } = await res.json();
+      setOk(true);
+      setTimeout(() => setOk(false), 2000);
+      setInput("");
+      if (onLoaded) onLoaded(ticket, code);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop:16, padding:"14px 16px",
+                  background:C.faint, border:`1px solid ${C.border}`, borderRadius:10 }}>
+      <div style={{ fontSize:8, fontWeight:800, color:C.muted, letterSpacing:".1em",
+                    textTransform:"uppercase", marginBottom:10,
+                    display:"flex", alignItems:"center", gap:6 }}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+        Load Shared Ticket
+      </div>
+
+      <div style={{ display:"flex", gap:8, alignItems:"stretch" }}>
+        <input
+          className="gi"
+          value={input}
+          onChange={e => { setInput(e.target.value); setError(null); }}
+          onKeyDown={e => e.key === "Enter" && handleLoad()}
+          placeholder="Paste GRM code or link…"
+          style={{ flex:1, fontSize:11, padding:"9px 12px" }}
+        />
+        <button onClick={handleLoad} disabled={loading || !input.trim()} className="gb-primary"
+          style={{ padding:"0 16px", fontSize:10, fontWeight:800, borderRadius:8,
+                   opacity: loading || !input.trim() ? 0.5 : 1,
+                   minWidth:60, display:"flex", alignItems:"center", gap:6 }}>
+          {loading
+            ? <span className="pu" style={{ fontSize:9 }}>…</span>
+            : ok
+            ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            : "Load"
+          }
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ marginTop:7, fontSize:9, color:C.red, fontWeight:600 }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
+
 // C6-FIX (illegal hook): TicketActions extracted from a (() => { useState })() IIFE
 // inside TicketCard's JSX. Hooks called inside IIFE callbacks in JSX throw
 // "Invalid hook call" — React rules require hooks at the top of a component.
@@ -5847,6 +6240,31 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
   const accentBdr   = isJarvis ? C.edgeBorder : C.goldBorder;
   const isManual    = ticket.source === "card_add" || ticket.source === "custom_selection";
 
+  // P13-FIX: Correlation risk — detect legs from the same league or same match
+  const [corrOpen, setCorrOpen] = useState(false);
+  const corrRisks = (() => {
+    const legs = ticket.legs || [];
+    const leagueCounts = {};
+    const matchCounts  = {};
+    legs.forEach(l => {
+      if (l.league) leagueCounts[l.league] = (leagueCounts[l.league] || 0) + 1;
+      const matchKey = l.fixtureId || l.game;
+      if (matchKey) matchCounts[matchKey] = (matchCounts[matchKey] || 0) + 1;
+    });
+    const risks = [];
+    Object.entries(leagueCounts).forEach(([league, count]) => {
+      if (count >= 2) risks.push({ type: "league", label: league, count });
+    });
+    Object.entries(matchCounts).forEach(([key, count]) => {
+      if (count >= 2) {
+        const leg = legs.find(l => (l.fixtureId || l.game) === key);
+        risks.push({ type: "match", label: leg?.game || key, count });
+      }
+    });
+    return risks;
+  })();
+  const hasCorr = corrRisks.length > 0;
+
 
 
   return (
@@ -5884,6 +6302,46 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
           <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
+          {/* P13-FIX: Correlation risk badge */}
+          {hasCorr && (
+            <div style={{ position:"relative" }}>
+              <button onClick={() => setCorrOpen(o => !o)}
+                title="Correlation risk detected"
+                style={{ background:`${C.amber}15`, border:`1px solid ${C.amber}40`,
+                         borderRadius:7, padding:"3px 8px", cursor:"pointer",
+                         display:"flex", alignItems:"center", gap:4, fontFamily:C.font }}>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                  stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <span style={{ fontSize:8, fontWeight:800, color:C.amber }}>Corr</span>
+              </button>
+              {corrOpen && (
+                <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
+                              background:C.surface, border:`1px solid ${C.amber}40`,
+                              borderRadius:10, padding:"10px 14px", minWidth:200,
+                              boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
+                  <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
+                                textTransform:"uppercase", marginBottom:8 }}>
+                    Correlation Risk
+                  </div>
+                  {corrRisks.map((r, i) => (
+                    <div key={i} style={{ fontSize:9, color:C.text, marginBottom:5, lineHeight:1.5 }}>
+                      {r.type === "match"
+                        ? <><span style={{ color:C.red, fontWeight:700 }}>Same match</span>: {r.count} legs from <em>{r.label}</em> — outcomes are directly linked.</>
+                        : <><span style={{ color:C.amber, fontWeight:700 }}>Same league</span>: {r.count} legs from <em>{r.label}</em> — results may move together.</>
+                      }
+                    </div>
+                  ))}
+                  <div style={{ fontSize:8, color:C.muted, marginTop:6, lineHeight:1.5, borderTop:`1px solid ${C.border}`, paddingTop:6 }}>
+                    Correlated legs reduce the independence assumption that makes parlay math work.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          <GrmShareMenu ticket={ticket} bookieResult={null} />
           {savedCode
             ? <span className="grm-chip" style={{ color:C.green,borderColor:`${C.green}40`,background:C.greenDim }}>✓ {savedCode}</span>
             : onSaveInternal && !exhausted && (
@@ -6128,6 +6586,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
 // ── P11: Ask Jarvis footer — self-contained, sits at bottom of every TicketCard ──
 function _AskJarvisFooter({ ticket, SERVER }) {
   const [analysis,  setAnalysis]  = useState(null);
+  const [analysisMeta, setAnalysisMeta] = useState(null); // N4-FIX: { cached, ageH }
   const [analysing, setAnalysing] = useState(false);
   const [open,      setOpen]      = useState(false);
 
@@ -6142,6 +6601,7 @@ function _AskJarvisFooter({ ticket, SERVER }) {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Analysis failed");
       setAnalysis(data.analysis || data.message || "No analysis returned.");
+      setAnalysisMeta({ cached: data.cached || false, ageH: data.ageH || null });
     } catch(e) {
       const msg = (e.message || "").toLowerCase();
       setAnalysis(msg.includes("429") || msg.includes("rate")
@@ -6174,7 +6634,21 @@ function _AskJarvisFooter({ ticket, SERVER }) {
           </div>
           {analysing
             ? <div style={{ fontSize:9,color:C.muted }}><span className="pu">Analysing…</span></div>
-            : <div style={{ fontSize:9,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap" }}>{analysis}</div>
+            : <div>
+                {/* N4-FIX: cache indicator in footer */}
+                {analysisMeta?.cached && (
+                  <div style={{ display:"flex",alignItems:"center",gap:4,marginBottom:5 }}>
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                    <span style={{ fontSize:7,color:C.muted }}>
+                      Cached{analysisMeta.ageH != null ? ` · ${analysisMeta.ageH < 1 ? "<1h" : `${analysisMeta.ageH}h`} ago` : ""}
+                    </span>
+                  </div>
+                )}
+                <div style={{ fontSize:9,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap" }}>{analysis}</div>
+              </div>
           }
           {!analysing && (
             <div style={{ display:"flex", gap:6, marginTop:8 }}>
@@ -6197,6 +6671,7 @@ function _AskJarvisFooter({ ticket, SERVER }) {
 // ── JARVIS TICKET CARD ────────────────────────────────────────────────────
 function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInternal, savedCode, onRemix, onSwapLeg, onEditDraft, onAddLegs }) {
   const [analysis, setAnalysis] = useState(null);
+  const [analysisMeta, setAnalysisMeta] = useState(null); // N4-FIX
   const [analysing, setAnalysing] = useState(false);
 
   const handleAnalyse = async () => {
@@ -6211,6 +6686,7 @@ function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInterna
       });
       const data = await res.json();
       setAnalysis(data.analysis || "Analysis unavailable.");
+      setAnalysisMeta({ cached: data.cached || false, ageH: data.ageH || null }); // N4-FIX
     } catch(e) {
       setAnalysis(`Jarvis is busy right now — ${e.message?.toLowerCase().includes("429") || e.message?.toLowerCase().includes("rate") ? "rate limit hit, try again in a minute." : "tap Analyse to retry."}`);
     }
@@ -6245,9 +6721,22 @@ function JarvisTicketCard({ ticket, onOpenFixture, onRemove, date, onSaveInterna
           </button>
           {analysis && (
             <div style={{ marginTop:8,background:C.surface,border:`1px solid ${C.edgeBorder}`,
-                          borderRadius:"var(--r-lg)",padding:"12px 14px",
-                          fontSize:11,color:C.text,lineHeight:1.65 }}>
-              {analysis}
+                          borderRadius:"var(--r-lg)",padding:"12px 14px" }}>
+              {/* N4-FIX: cache indicator */}
+              {analysisMeta?.cached && (
+                <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:8,
+                              paddingBottom:8, borderBottom:`1px solid ${C.border}` }}>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+                    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                  </svg>
+                  <span style={{ fontSize:8, color:C.muted, fontWeight:600 }}>
+                    Cached analysis{analysisMeta.ageH != null ? ` · ${analysisMeta.ageH < 1 ? "<1h" : `${analysisMeta.ageH}h`} ago` : ""}
+                  </span>
+                </div>
+              )}
+              <div style={{ fontSize:11, color:C.text, lineHeight:1.65 }}>{analysis}</div>
             </div>
           )}
         </>
@@ -7048,12 +7537,18 @@ function ParlayExplainer() {
 //   • Legs list (game, pick, odds)
 //   • "Use This Ticket" CTA
 // C is passed as a prop — useTheme() does not exist as a standalone hook in this codebase
-function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
-  const [status, setStatus]   = useState("idle");  // idle | loading | ready | empty | error
-  const [strategies, setStrategies] = useState([]);
-  const [expanded, setExpanded]     = useState(null); // strategy id currently expanded
-  const [usedIds, setUsedIds]       = useState(new Set()); // tracks which strategies user added
-  const [fetchedDate, setFetchedDate] = useState(null);
+function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
+  // N29-FIX: persist across tab switches via sessionStorage — component unmounts on nav
+  const SS = `grm_taslate_v1_${date}`; // N30-FIX: key by date so past dates don't overwrite today
+  const loadSS = () => { try { const d = sessionStorage.getItem(SS); return d ? JSON.parse(d) : null; } catch { return null; } };
+  const saveSS = (v) => { try { sessionStorage.setItem(SS, JSON.stringify(v)); } catch {} };
+
+  const cached = loadSS();
+  const [status, setStatus]         = useState(cached?.status || "idle");
+  const [strategies, setStrategies] = useState(cached?.strategies || []);
+  const [expanded, setExpanded]     = useState(null);
+  const [usedIds, setUsedIds]       = useState(new Set());
+  const [fetchedDate, setFetchedDate] = useState(cached?.fetchedDate || null);
 
   // Fetch on mount and whenever date changes
   useEffect(() => {
@@ -7064,7 +7559,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     let cancelled = false;
     setStatus("loading");
 
-    fetch(`${SERVER}/api/engine-parlays/today`)
+    fetch(`${SERVER}/api/engine-parlays/today${date ? `?date=${date}` : ``}`)
       .then(r => {
         if (!r.ok) throw new Error(`Server ${r.status}`);
         return r.json();
@@ -7073,8 +7568,10 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
         if (cancelled) return;
         const strats = Array.isArray(data.strategies) ? data.strategies : [];
         setStrategies(strats);
-        setStatus(strats.length ? "ready" : "empty");
+        const newStatus = strats.length ? "ready" : "empty";
+        setStatus(newStatus);
         setFetchedDate(date);
+        saveSS({ strategies: strats, status: newStatus, fetchedDate: date }); // N29-FIX
       })
       .catch(err => {
         if (cancelled) return;
@@ -7087,6 +7584,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
 
   // Retry on demand
   const handleRetry = () => {
+    try { sessionStorage.removeItem(SS); } catch {}
     setFetchedDate(null);
     setStrategies([]);
     setStatus("idle");
@@ -7124,17 +7622,22 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
   // ── Empty ────────────────────────────────────────────────────────────────────
   if (status === "empty" || !strategies.length) {
     return (
-      <div style={{ padding:"24px 0",textAlign:"center" }}>
-        <div style={{ fontSize:10,color:C.muted,marginBottom:8,fontWeight:700 }}>
-          No pre-built tickets for today
+      <div style={{ padding:"32px 20px", textAlign:"center", display:"flex",
+                    flexDirection:"column", alignItems:"center", gap:10 }}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+          strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity:.5 }}>
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <div style={{ fontSize:10, fontWeight:700, color:C.muted }}>
+          No pre-built tickets yet for today
         </div>
-        <div style={{ fontSize:8,color:C.muted,lineHeight:1.6,marginBottom:14 }}>
-          Run <span style={{ fontFamily:"monospace",background:C.faint,padding:"1px 5px",borderRadius:3 }}>
-          node ticket-analyst.mjs --export</span> to generate today's picks.
+        <div style={{ fontSize:9, color:C.muted, opacity:.7, lineHeight:1.6, maxWidth:240 }}>
+          Tickets are generated automatically before kickoff. Check back soon or try refreshing.
         </div>
         <button onClick={handleRetry} className="gb"
-          style={{ fontSize:9,padding:"7px 18px",border:`1px solid ${C.border}`,color:C.text }}>
-          Check Again
+          style={{ fontSize:9, padding:"7px 18px", border:`1px solid ${C.border}`, color:C.text, marginTop:4 }}>
+          Refresh
         </button>
       </div>
     );
@@ -7189,8 +7692,18 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
 
       {/* Header */}
-      <div style={{ fontSize:8, color:C.muted, letterSpacing:".06em", marginBottom:2 }}>
-        {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap any to see legs
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+        <span style={{ fontSize:8, color:C.muted, letterSpacing:".06em" }}>
+          {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap any to see legs
+        </span>
+        {/* N30-FIX: show past date badge when not viewing today */}
+        {date && date !== new Date().toISOString().split("T")[0] && (
+          <span style={{ fontSize:7, fontWeight:800, color:C.amber, background:`${C.amber}15`,
+                         border:`1px solid ${C.amber}35`, borderRadius:5, padding:"2px 7px",
+                         letterSpacing:".06em", textTransform:"uppercase" }}>
+            {date}
+          </span>
+        )}
       </div>
 
       {strategies.map((strat, idx) => {
@@ -7259,16 +7772,33 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
 
                 {/* Legs */}
                 <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
-                  {(strat.legs || []).map((leg, li) => (
-                    <div key={li} style={{
-                      display:"flex", justifyContent:"space-between", alignItems:"center",
-                      padding:"7px 10px", background:C.bg, borderRadius:7,
-                      border:`1px solid ${C.border}`,
-                    }}>
+                  {(strat.legs || []).map((leg, li) => {
+                    const canOpen = !!(onFullModel && leg.fixtureId);
+                    return (
+                    <div key={li}
+                      onClick={canOpen ? () => onFullModel(leg.fixtureId) : undefined}
+                      style={{
+                        display:"flex", justifyContent:"space-between", alignItems:"center",
+                        padding:"7px 10px", background:C.bg, borderRadius:7,
+                        border:`1px solid ${canOpen ? C.border : C.border}`,
+                        cursor: canOpen ? "pointer" : "default",
+                        transition: canOpen ? "background .12s" : undefined,
+                      }}
+                      onMouseEnter={canOpen ? e => e.currentTarget.style.background = C.surface : undefined}
+                      onMouseLeave={canOpen ? e => e.currentTarget.style.background = C.bg : undefined}
+                    >
                       <div style={{ minWidth:0, flex:1 }}>
                         <div style={{ fontSize:9, color:C.text, fontWeight:700,
-                                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+                                      display:"flex", alignItems:"center", gap:5 }}>
                           {leg.game || `${leg.home||"?"} vs ${leg.away||"?"}`}
+                          {canOpen && (
+                            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+                              strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                              <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                            </svg>
+                          )}
                         </div>
                         <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
                           {leg.market}{leg.league ? ` · ${leg.league}` : ""}
@@ -7281,7 +7811,8 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
                         }
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {/* CTA */}
@@ -7299,7 +7830,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
@@ -7317,6 +7848,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     try { return JSON.parse(localStorage.getItem("grm_saved_codes_v15") || "{}"); } catch { return {}; }
   });
   const [maxSameMarket, setMaxSameMarket] = useState(null); // P8-FIX: null = no cap by default; user sets a cap if they want one
+  // H2-FIX: Market exclusion per Parley tab — excluded markets are filtered from pool before build
+  const [parlayExcludedMarkets, setParlayExcludedMarkets] = useState(new Set());
+  const toggleParlayExcludeMarket = (mkt) => setParlayExcludedMarkets(prev => {
+    const next = new Set(prev); next.has(mkt) ? next.delete(mkt) : next.add(mkt); return next;
+  });
   // League filter for pool — user can scope builds to specific leagues
   // Uses the same Set-based multi-select as the Live Model league filter
   const [parlayLeagueFilter, setParlayLeagueFilter] = useState(null);
@@ -7365,6 +7901,41 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     setView("parley"); // View Full → Builder tab with ticket active
     onJarvisBuiltTicketConsumed?.();
   }, [jarvisBuiltTicket]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // N19-FIX: Auto-load from ?grm= URL — fires once when code arrives
+  const [grmToast, setGrmToast] = useState(null);
+  const handleGrmLoaded = useCallback((ticket, code) => {
+    const newTicket = {
+      ...ticket,
+      id:        ticket.id || ("grm_" + code),
+      source:    "grm_share",
+      savedAt:   new Date().toISOString(),
+      slotLabel: ticket.label || `Shared ${code}`,
+    };
+    setSavedTickets(prev => {
+      // Don't duplicate if already loaded
+      if (prev.find(t => t.id === newTicket.id)) return prev;
+      const updated = [newTicket, ...prev];
+      persistTickets(updated);
+      return updated;
+    });
+    setView("saved");
+    setGrmToast(`Ticket ${code} loaded`);
+    setTimeout(() => setGrmToast(null), 3000);
+  }, [setSavedTickets]);
+
+  useEffect(() => {
+    if (!grmInboundCode) return;
+    (async () => {
+      try {
+        const res = await fetch(`${SERVER}/api/ticket/${grmInboundCode}`);
+        if (!res.ok) { setGrmToast("Could not load shared ticket."); setTimeout(()=>setGrmToast(null),3000); return; }
+        const { ticket } = await res.json();
+        handleGrmLoaded(ticket, grmInboundCode);
+      } catch { setGrmToast("Could not load shared ticket."); setTimeout(()=>setGrmToast(null),3000); }
+      finally { onGrmInboundConsumed?.(); }
+    })();
+  }, [grmInboundCode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Patch a specific leg in a loaded ticket by fixtureId
   const patchTicketLeg = useCallback((ticketId, fixtureId, newLeg) => {
@@ -7422,7 +7993,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     }
 
     // Build pool from available fixtures
-    const rawPool = buildUniversalPool(available, rates);
+    const rawPool = buildUniversalPool(available, rates).filter(e => !parlayExcludedMarkets.has(e.market));
     if (rawPool.length < 2) {
       setAutoMessage("Pool too thin to remix right now.");
       setTimeout(() => setAutoMessage(""), 3500);
@@ -7647,8 +8218,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     };
 
     if (builderMode === "jarvis") {
-      const rawPool = buildUniversalPool(parlayFixtures, rates);
-      if (parlayLeagueFilter && rawPool.length === 0) {
+      const rawPool = buildUniversalPool(parlayFixtures, rates).filter(e => !parlayExcludedMarkets.has(e.market));
+      if (rawPool.length === 0) {
         setAutoMessage("No qualifying games in selected leagues — try adding more leagues or clearing the filter.");
         setBuilding(false); return;
       }
@@ -7703,7 +8274,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const allCustomFixtures = customPool === "engine" && engineFixtureIds?.size
         ? parlayFixtures.filter(f => engineFixtureIds.has(f.id))
         : parlayFixtures;
-      const rawPool = buildUniversalPool(allCustomFixtures, rates);
+      const rawPool = buildUniversalPool(allCustomFixtures, rates).filter(e => !parlayExcludedMarkets.has(e.market));
       if (rawPool.length === 0) {
         setAutoMessage(customPool==="engine"
           ? "No qualifying games in engine pool — switch to All Fixtures or build the engine pool first."
@@ -7823,6 +8394,18 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
       <div style={{ padding:16 }}>
 
+        {/* N19-FIX: GRM inbound/load toast */}
+        {grmToast && (
+          <div style={{ marginBottom:12, padding:"9px 14px", background:`${C.green}12`,
+                        border:`1px solid ${C.green}35`, borderRadius:8,
+                        display:"flex", alignItems:"center", gap:8 }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <span style={{ fontSize:10, fontWeight:700, color:C.green }}>{grmToast}</span>
+          </div>
+        )}
+
         {/* PARLAY BUILDER */}
         {view === "parlay" && (
           <>
@@ -7887,6 +8470,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   date={date}
                   SERVER={SERVER}
                   C={C}
+                  onFullModel={onFullModel ? (fixtureId) => {
+                    const f = fixtures.find(x => x.id === fixtureId || String(x.id) === String(fixtureId));
+                    if (f) onFullModel(f);
+                  } : null}
                   onUseTicket={(strategy) => {
                     // Convert TA strategy into a ticket object compatible with TicketCard
                     const legs = (strategy.legs || []).map(l => ({
@@ -8017,6 +8604,39 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     </div>
                   )}
 
+                  {/* H2-FIX: Market exclusion per Parley tab */}
+                  {(() => {
+                    const mktList = ["1X2","BTTS","Over/Under","Double Chance","Draw No Bet","Asian Handicap"];
+                    return (
+                      <div style={{ marginBottom:12 }}>
+                        <div style={{ fontSize:8,color:C.text,marginBottom:6,textTransform:"uppercase",letterSpacing:".1em" }}>
+                          Exclude Markets
+                          {parlayExcludedMarkets.size > 0 && (
+                            <button onClick={() => setParlayExcludedMarkets(new Set())}
+                              style={{ marginLeft:8,fontSize:7,padding:"1px 6px",borderRadius:4,background:"transparent",
+                                       border:`1px solid ${C.border}`,color:C.muted,cursor:"pointer",fontFamily:C.font }}>
+                              clear
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
+                          {mktList.map(mkt => {
+                            const on = parlayExcludedMarkets.has(mkt);
+                            return (
+                              <button key={mkt} onClick={() => toggleParlayExcludeMarket(mkt)} className="gb"
+                                style={{ fontSize:8,padding:"3px 9px",borderRadius:6,fontFamily:C.font,
+                                         background:on?`${C.red}15`:"transparent",
+                                         color:on?C.red:C.muted,
+                                         border:`1px solid ${on?C.red+"50":C.border}` }}>
+                                {on ? "✕ " : ""}{mkt}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
                     style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
                              opacity:building||!fixtures.length?.5:1 }}>
@@ -8037,6 +8657,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 </>
               )}
             </div>{/* end gc div */}
+
+            {/* N19-FIX: Load shared GRM ticket */}
+            <GrmLoadPanel onLoaded={(ticket, code) => handleGrmLoaded(ticket, code)} />
 
             {tickets.length > 0 && (
               <>
@@ -9082,6 +9705,21 @@ export default function GRMPro() {
 
   const [parlayJarvisOpen, setParlayJarvisOpen] = useState(false);
 
+  // N19-FIX: On mount, check for ?grm=CODE in URL — open parley panel and queue ticket load
+  const [grmInboundCode, setGrmInboundCode] = useState(null);
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("grm");
+      if (code) {
+        setGrmInboundCode(code.toUpperCase());
+        setParlayJarvisOpen(true);
+        // Clean the URL so sharing the current page doesn't re-trigger
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+    } catch {}
+  }, []);
+
   // P16-FIX: Body scroll lock when overlay is open.
   // overscrollBehavior:contain on the overlay div is not enough on iOS/Android —
   // the OS-level rubber-band scroll still moves the background page.
@@ -9982,25 +10620,31 @@ export default function GRMPro() {
                  Shows a tap-to-refresh nudge instead of silent grey badge. */}
             {cached && (() => {
               const ageMs   = cachedAt ? (Date.now() - cachedAt) : null;
-              const isStale = ageMs !== null && ageMs < 5 * 60 * 1000; // < 5 min old = likely stale race
+              // P22-FIX: stale = older than 8 min (prev logic was inverted — fired when fresh, not stale)
+              const isStale = ageMs !== null && ageMs > 8 * 60 * 1000;
               const ageText = ageMs !== null
-                ? (ageMs < 60000 ? `${Math.round(ageMs/1000)}s ago` : `${Math.round(ageMs/60000)}m ago`)
+                ? (ageMs < 60000 ? `${Math.round(ageMs/1000)}s ago`
+                  : ageMs < 3600000 ? `${Math.round(ageMs/60000)}m ago`
+                  : `${Math.round(ageMs/3600000)}h ago`)
                 : null;
-              return isStale ? (
-                <button onClick={() => fetchData(false)} title="Data may be stale — tap to refresh"
-                  style={{ background:`${C.amber}18`, border:`1px solid ${C.amber}40`, borderRadius:5,
-                           padding:"2px 7px", fontSize:8, color:C.amber, fontWeight:700,
-                           cursor:"pointer", fontFamily:C.font, display:"flex", alignItems:"center", gap:4 }}>
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              return (
+                <button onClick={() => fetchData(false)}
+                  title={isStale ? "Data may be outdated — tap to refresh" : "Tap to refresh"}
+                  style={{ background: isStale ? `${C.amber}18` : `${C.muted}10`,
+                           border:`1px solid ${isStale ? C.amber+"50" : C.border}`,
+                           borderRadius:6, padding:"3px 9px", cursor:"pointer",
+                           fontFamily:C.font, display:"flex", alignItems:"center", gap:5 }}>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none"
+                    stroke={isStale ? C.amber : C.muted} strokeWidth="2.5"
+                    strokeLinecap="round" strokeLinejoin="round">
                     <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                   </svg>
-                  cached · refresh?
+                  <span style={{ fontSize:8, fontWeight:isStale?700:400,
+                                 color:isStale?C.amber:C.muted }}>
+                    {isStale ? "Tap to refresh" : `cached${ageText ? ` · ${ageText}` : ""}`}
+                  </span>
                 </button>
-              ) : (
-                <span style={{ fontSize:9, color:C.muted, fontWeight:400, opacity:.7 }}>
-                  cached{ageText ? ` · ${ageText}` : ""}
-                </span>
               );
             })()}
             {lastResultsRefresh && (
@@ -10622,6 +11266,8 @@ export default function GRMPro() {
           onFullModel={f => { setParlayJarvisOpen(false); setFullModelReturnTab("parlay"); setMainFocusFixture(f); }}
           jarvisBuiltTicket={jarvisBuiltTicket}
           onJarvisBuiltTicketConsumed={() => setJarvisBuiltTicket(null)}
+          grmInboundCode={grmInboundCode}
+          onGrmInboundConsumed={() => setGrmInboundCode(null)}
         />
       )}
 

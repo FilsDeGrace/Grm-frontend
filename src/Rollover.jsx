@@ -134,6 +134,7 @@ function injectRolloverStyles(C) {
     .rvl-wordmark {
       font-size:15px; font-weight:800; letter-spacing:-.05em;
       color:var(--text); line-height:1;
+      font-family:'Azeret Mono',monospace;
     }
     .rvl-wordmark-accent { color:var(--green); margin-left:4px; }
     .rvl-wordmark-meta {
@@ -224,6 +225,89 @@ function injectRolloverStyles(C) {
     }
     .rvl-roi-bar  { height:6px; border-radius:3px; overflow:hidden; background:var(--subtle-bg); }
     .rvl-roi-fill { height:100%; border-radius:3px; transition:width .8s cubic-bezier(.4,0,.2,1); }
+
+    /* ── Draft B: Hero strip ─────────────────────────────────────────── */
+    .rvlb-hero {
+      padding:24px 18px 20px;
+      border-bottom:1px solid var(--glass-border);
+      background:var(--bg);
+      position:relative; overflow:hidden;
+    }
+    .rvlb-hero-ghost {
+      position:absolute; right:-8px; top:-14px;
+      font-size:100px; font-weight:900; line-height:1;
+      font-family:'Azeret Mono',monospace;
+      color:var(--text); opacity:.04;
+      letter-spacing:-.08em; pointer-events:none; user-select:none;
+    }
+    .rvlb-hero-label {
+      font-size:8px; font-weight:800; letter-spacing:.2em;
+      text-transform:uppercase; color:var(--muted); margin-bottom:6px;
+    }
+    .rvlb-hero-number {
+      font-size:72px; font-weight:900; line-height:1;
+      font-family:'Azeret Mono',monospace; letter-spacing:-.06em;
+    }
+    .rvlb-hero-sub { font-size:10px; color:var(--muted); margin-top:8px; }
+    .rvlb-stat-tile {
+      flex:1; padding:10px 12px;
+      background:var(--surface);
+      border:1px solid var(--glass-border);
+      border-radius:var(--r-md);
+    }
+    .rvlb-stat-key {
+      font-size:7px; font-weight:700; color:var(--muted);
+      letter-spacing:.12em; text-transform:uppercase; margin-bottom:3px;
+    }
+    .rvlb-stat-val {
+      font-size:14px; font-weight:900;
+      font-family:'Azeret Mono',monospace; letter-spacing:-.03em; line-height:1;
+    }
+
+    /* ── Draft B: Timeline ───────────────────────────────────────────── */
+    .rvlb-tl-row { display:flex; gap:14px; }
+    .rvlb-tl-spine {
+      display:flex; flex-direction:column; align-items:center;
+      flex-shrink:0; width:32px;
+    }
+    .rvlb-tl-dot {
+      width:32px; height:32px; border-radius:50%;
+      display:flex; align-items:center; justify-content:center;
+      font-size:11px; font-weight:900; flex-shrink:0;
+      font-family:'Azeret Mono',monospace; transition:all .22s;
+    }
+    .rvlb-tl-dot-done    { background:rgba(34,197,94,.12); color:var(--green); border:2px solid var(--green); }
+    .rvlb-tl-dot-current { background:var(--accent); color:var(--accent-text); border:2px solid var(--accent); animation:rvl-glow 2.2s ease infinite; }
+    .rvlb-tl-dot-future  { background:var(--surface); color:var(--muted); border:1.5px solid var(--glass-border); }
+    .rvlb-tl-line        { width:2px; flex:1; min-height:24px; background:var(--glass-border); transition:background .3s; margin:0 auto; }
+    .rvlb-tl-line-done   { background:var(--green); }
+    .rvlb-tl-content     { flex:1; padding:6px 0 20px; }
+    .rvlb-tl-step-label  { font-size:8px; font-weight:700; color:var(--muted); letter-spacing:.12em; text-transform:uppercase; margin-bottom:2px; }
+    .rvlb-tl-target      { font-size:20px; font-weight:900; line-height:1; font-family:'Azeret Mono',monospace; letter-spacing:-.04em; }
+    .rvlb-tl-desc        { font-size:9px; color:var(--muted); margin-top:4px; line-height:1.55; }
+    .rvlb-gate-badge {
+      display:inline-flex; align-items:center; gap:4px;
+      border-radius:var(--r-sm); padding:3px 8px; margin-top:5px;
+      font-size:7px; font-weight:900; letter-spacing:.08em; text-transform:uppercase;
+    }
+
+    /* ── Draft B: tabs sit below hero strip, no icons ────────────────── */
+    .rvlb-tabs { display:flex; border-bottom:1px solid var(--glass-border); }
+    .rvlb-tab {
+      flex:1; padding:12px 0; text-align:center;
+      font-size:10px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+      color:var(--muted); cursor:pointer; border:none; background:none;
+      font-family:var(--font); position:relative; transition:color .18s;
+      -webkit-tap-highlight-color:transparent;
+    }
+    .rvlb-tab:hover { color:var(--text); }
+    .rvlb-tab.rvlb-active { color:var(--green); }
+    .rvlb-tab::after {
+      content:""; position:absolute; bottom:0; left:25%; right:25%;
+      height:2px; border-radius:1px; background:var(--green);
+      transform:scaleX(0); transition:transform .22s cubic-bezier(.34,1.56,.64,1);
+    }
+    .rvlb-tab.rvlb-active::after { transform:scaleX(1); }
   `;
   document.head.appendChild(s);
 }
@@ -330,6 +414,146 @@ function StepTracker({ chain, C }) {
   );
 }
 
+// ── TIMELINE STEP — Draft B dashboard ────────────────────────────────────────
+function TimelineStep({ row, state, stepData, isLast, C, pick, isPast, blocked, onBook, fixtures, onFullModel }) {
+  const isDone    = state === "done";
+  const isCurrent = state === "current";
+  const isGate    = GATE_STEPS.has(row.step);
+  const numCol    = isDone ? C.green : isCurrent ? (C.accent||C.gold) : C.muted;
+  const dotClass  = isDone ? "rvlb-tl-dot rvlb-tl-dot-done" : isCurrent ? "rvlb-tl-dot rvlb-tl-dot-current" : "rvlb-tl-dot rvlb-tl-dot-future";
+  const lineClass = "rvlb-tl-line" + (isDone ? " rvlb-tl-line-done" : "");
+
+  return (
+    <div className="rvlb-tl-row">
+      <div className="rvlb-tl-spine">
+        <div className={dotClass}>
+          {isDone ? (
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <path d="M2.5 6.5l3 3 5-5" stroke={C.green} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : row.step}
+        </div>
+        {!isLast && <div className={lineClass} />}
+      </div>
+
+      <div className="rvlb-tl-content">
+        <div className="rvlb-tl-step-label">Step {row.step}</div>
+        <div className="rvlb-tl-target" style={{ color:numCol }}>{row.target}</div>
+
+        {isGate && (
+          <div className="rvlb-gate-badge"
+               style={{ background:`${C.gold}18`, border:`1px solid ${C.gold}40`, color:C.gold }}>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
+            </svg>
+            {row.saveRate === 1 ? "Full cashout" : `${Math.round((row.saveRate||0)*100)}% saved`}
+          </div>
+        )}
+
+        <div className="rvlb-tl-desc">{row.desc}</div>
+
+        {/* Done step: compact result summary */}
+        {isDone && stepData && (
+          <div style={{ marginTop:6, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            {stepData.date && <span style={{ fontSize:8, color:C.muted }}>{stepData.date}</span>}
+            {stepData.odds && <span style={{ fontSize:9, fontWeight:800, color:C.green }}>×{stepData.odds}</span>}
+            <SBadge status={stepData.result==="WIN"?"WON":stepData.result==="LOSS"?"LOST":stepData.result==="VOID"?"VOID":"PENDING"} C={C} />
+          </div>
+        )}
+
+        {/* Current step: inline slip */}
+        {isCurrent && (
+          <div style={{ marginTop:14 }}>
+            {/* No pick */}
+            {!pick && (
+              <div style={{ padding:"14px", background:C.surface,
+                            border:`1.5px dashed ${C.border}`, borderRadius:10, textAlign:"center" }}>
+                <div style={{ fontSize:10, fontWeight:800, color:C.text, marginBottom:4 }}>
+                  {isPast ? "No Slip That Day" : "No Qualifying Slip Yet"}
+                </div>
+                <div style={{ fontSize:9, color:C.muted, lineHeight:1.6 }}>
+                  {isPast
+                    ? "Pool was too thin or this date wasn't active."
+                    : "Engine couldn't clear ≥2.0× today. Check back when new fixtures load."}
+                </div>
+              </div>
+            )}
+
+            {pick && (
+              <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:12, overflow:"hidden" }}>
+                {/* Below-target banner */}
+                {pick.belowTarget && (
+                  <div style={{ padding:"8px 14px", background:`${C.amber||C.gold}12`,
+                                borderBottom:`1px solid ${C.amber||C.gold}30` }}>
+                    <div style={{ fontSize:9, fontWeight:800, color:C.amber||C.gold }}>⚠ Below 2.0× target — thin pool day</div>
+                    <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.5 }}>
+                      Engine couldn't clear threshold. Booking is your call.
+                    </div>
+                  </div>
+                )}
+
+                {/* Slip header */}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 14px 0" }}>
+                  <div style={{ fontSize:9, fontWeight:800, color:C.green, letterSpacing:".08em", textTransform:"uppercase" }}>
+                    {isPast ? "Past Slip" : "Today's Engine Slip"}
+                  </div>
+                  <div style={{ textAlign:"right" }}>
+                    <div style={{ fontSize:18, fontWeight:900, fontFamily:"'Azeret Mono',monospace",
+                                  color:pick.belowTarget?(C.amber||C.gold):C.gold, letterSpacing:"-.03em" }}>
+                      ×{pick.totalOdds}
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted }}>{pick.combinedEmpiricalRate}% · {pick.legs?.length} legs</div>
+                  </div>
+                </div>
+
+                {/* Legs */}
+                <div style={{ padding:"0 14px" }}>
+                  {(pick.legs||[]).map((l,i) => {
+                    const fix = fixtures?.find(f => f.id === l.fixtureId) || null;
+                    return (
+                      <LegRow key={i} leg={l} index={i} C={C}
+                              onFullModel={fix && onFullModel ? () => onFullModel(fix) : null} />
+                    );
+                  })}
+                </div>
+
+                {/* Blocked banner */}
+                {blocked && (
+                  <div style={{ margin:"0 14px 14px", background:`${C.red}12`,
+                                border:`1px solid ${C.red}35`, borderRadius:8,
+                                padding:"10px 12px", textAlign:"center" }}>
+                    <div style={{ fontSize:10, fontWeight:900, color:C.red, marginBottom:4 }}>
+                      ⛔ {hasLiveLeg(pick.legs) ? "Match in progress" : "Match has finished"}
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted, lineHeight:1.6 }}>
+                      This slip can no longer be booked. Come back tomorrow.
+                    </div>
+                  </div>
+                )}
+
+                {/* CTA */}
+                {!isPast && !blocked && (
+                  <div style={{ padding:"0 14px 14px" }}>
+                    <button onClick={onBook} className="rvl-btn"
+                            style={{ width:"100%", padding:"15px 0", fontSize:12, marginTop:4,
+                                     background:C.accent, color:C.accentText,
+                                     boxShadow:`0 4px 18px ${C.accent}40` }}>
+                      Place {pick.totalOdds}× Slip
+                    </button>
+                    <div style={{ textAlign:"center", fontSize:8, color:C.muted, opacity:.5, marginTop:8 }}>
+                      Result tracked automatically
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── LEG ROW — shows both hit rate AND model confidence ────────────────────────
 function LegRow({ leg, index, C, showStatus = false }) {
   const conf = leg.conf || leg.modelConf || null;
@@ -430,6 +654,7 @@ function hasLiveLegs(legs = []) {
             "et","extratime","penaltyshootout"].includes(s);
   });
 }
+const hasLiveLeg = hasLiveLegs; // alias used in TimelineStep
 
 // ── BOOK MODAL ───────────────────────────────────────────────────────────────
 // N2-FIX: BOOKIE_META — LL discontinued/paused. Marked disabled with downtime subtext.
@@ -1124,13 +1349,13 @@ function HeroCard({ chain, C }) {
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
         <div>
           <Lbl style={{ marginBottom:4 }}>Engine Pot</Lbl>
-          <Val size={26} color={C.text}>${budget.toFixed(2)}</Val>
+          <Val size={26} color={C.text}>${budget.toLocaleString()}</Val>
           <div style={{ fontSize:8, color:C.muted, marginTop:3 }}>Current stake at risk</div>
         </div>
         <div style={{ textAlign:"right" }}>
           <Lbl style={{ marginBottom:4 }}>Locked Profit</Lbl>
           <Val size={21} color={locked>0?C.green:C.text}>
-            {locked>0?`+$${locked.toFixed(2)}`:"$0.00"}
+            {locked>0?`+$${locked.toLocaleString()}`:"$0"}
           </Val>
           <div style={{ fontSize:8, color:C.muted, marginTop:3 }}>
             {locked>0?"Secured at gates":"Locks at step 3"}
@@ -1515,39 +1740,213 @@ function SlipCard({ pick, date, C, SERVER, onRefresh, fixtures = [], onFullModel
   );
 }
 
-// ── DASHBOARD PAGE ────────────────────────────────────────────────────────────
+// ── DASHBOARD PAGE — Draft B ──────────────────────────────────────────────────
+// Hero strip (big multiplier) → tabs → vertical timeline with inline slip
 function DashboardPage({ chain, pick, date, C, SERVER, userId, onRefresh, loading, onDelete, fixtures, onFullModel }) {
   const [delOpen, setDelOpen] = useState(false);
+  const [modal,   setModal]   = useState(() => !!loadPersistedBooking());
 
   if (loading) {
     return (
-      <div style={{ display:"flex", flexDirection:"column", gap:14 }} className="rvl-fade">
-        <Skeleton C={C} height={140}/><Skeleton C={C} height={64}/><Skeleton C={C} height={220}/>
+      <div style={{ display:"flex", flexDirection:"column", gap:0 }} className="rvl-fade">
+        {/* Hero skeleton */}
+        <div style={{ padding:"24px 18px 20px", borderBottom:`1px solid ${C.border}` }}>
+          <Skeleton C={C} height={100} radius={10}/>
+        </div>
+        <div style={{ padding:14, display:"flex", flexDirection:"column", gap:14 }}>
+          <Skeleton C={C} height={64}/><Skeleton C={C} height={220}/>
+        </div>
       </div>
     );
   }
 
+  const completedSteps = chain?.step || 0;
+  const budget         = chain?.riskPot ?? chain?.startingPot ?? 0;
+  const startCap       = getStartingCapital(chain);
+  const locked         = chain?.lockedProfit ?? 0;
+  const multiplier     = startCap > 0 ? (budget / startCap) : 1;
+  const steps          = chain?.steps || [];
+  const blocked        = pick ? hasBlockedLegs(pick.legs || []) : false;
+  const today          = todayStr();
+  const isPast         = date < today;
+
+  const nextStepRow = GATE_TABLE[Math.min(Math.max(0, completedSteps), 9)];
+  const nextGateRow = GATE_TABLE.find(r => r.saveRate && r.step > completedSteps);
+
+  // Which steps to show in timeline: completed + current + 2 future, min 4
+  const visibleUpTo = Math.max(Math.min(completedSteps + 3, ROLLOVER_MAX), 4);
+  const timelineRows = GATE_TABLE.slice(0, visibleUpTo);
+
+  const getStepState = (stepNum) => {
+    const sd = steps.find(s => s.step === stepNum);
+    if (sd?.result === "WIN" || sd?.result === "LOSS" || sd?.result === "VOID") return "done";
+    if (completedSteps >= stepNum) return "done";
+    if (completedSteps + 1 === stepNum) return "current";
+    return "future";
+  };
+
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:14 }} className="rvl-fade">
-      <HeroCard chain={chain} C={C} />
-      <div className="rvl-card"
-           style={{ background:C.surface, border:`1px solid ${C.border}`, padding:"14px 14px 6px" }}>
-        <Lbl style={{ marginBottom:8 }}>Step Progress</Lbl>
-        <StepTracker chain={chain} C={C} />
+    <div style={{ display:"flex", flexDirection:"column" }} className="rvl-fade">
+
+      {/* ── HERO STRIP ── */}
+      <div className="rvlb-hero">
+        {completedSteps > 0 && (
+          <div className="rvlb-hero-ghost" aria-hidden="true">
+            {`${multiplier.toFixed(1)}×`}
+          </div>
+        )}
+
+        {!chain && (
+          <>
+            <div className="rvlb-hero-label">Current Multiplier</div>
+            <div className="rvlb-hero-number" style={{ color:C.muted, fontSize:48 }}>Not started</div>
+            <div className="rvlb-hero-sub">Set your capital below to begin</div>
+          </>
+        )}
+
+        {chain && completedSteps === 0 && (
+          <>
+            <div className="rvlb-hero-label">Current Target</div>
+            <div className="rvlb-hero-number"
+                 style={{ fontFamily:"'Azeret Mono',monospace",
+                          background:`linear-gradient(135deg, ${C.text} 40%, ${C.accent||C.gold})`,
+                          WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
+              {GATE_TABLE[0].target}
+            </div>
+            <div className="rvlb-hero-sub">Step 1 of {ROLLOVER_MAX} — win your first slip to start compounding</div>
+          </>
+        )}
+
+        {chain && completedSteps > 0 && completedSteps < ROLLOVER_MAX && (
+          <>
+            <div className="rvlb-hero-label">Current Target</div>
+            <div className="rvlb-hero-number"
+                 style={{ fontFamily:"'Azeret Mono',monospace",
+                          background:`linear-gradient(135deg, ${C.text} 40%, ${C.accent||C.gold})`,
+                          WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
+              {nextStepRow?.target || `${multiplier.toFixed(1)}×`}
+            </div>
+            <div className="rvlb-hero-sub">
+              Step {completedSteps + 1} of {ROLLOVER_MAX} · ${budget.toLocaleString()} from ${startCap.toLocaleString()}
+            </div>
+          </>
+        )}
+
+        {chain && completedSteps === ROLLOVER_MAX && (
+          <>
+            <div className="rvlb-hero-label">Chain Complete</div>
+            <div className="rvlb-hero-number" style={{ color:C.green }}>{multiplier.toFixed(1)}×</div>
+            <div className="rvlb-hero-sub">🏁 Full cashout — congratulations</div>
+          </>
+        )}
+
+        {/* Stat tiles */}
+        {chain && (
+          <div style={{ display:"flex", gap:8, marginTop:16 }}>
+            <div className="rvlb-stat-tile">
+              <div className="rvlb-stat-key">Next gate</div>
+              {nextGateRow
+                ? <div className="rvlb-stat-val" style={{ color:C.gold }}>
+                    {nextGateRow.target}
+                    <span style={{ fontSize:9, fontWeight:500, color:C.muted, marginLeft:4 }}>
+                      {Math.round((nextGateRow.saveRate||0)*100)}% locked
+                    </span>
+                  </div>
+                : <div className="rvlb-stat-val" style={{ color:C.muted }}>—</div>
+              }
+            </div>
+            <div className="rvlb-stat-tile">
+              <div className="rvlb-stat-key">Today's target</div>
+              <div className="rvlb-stat-val" style={{ color:C.green }}>
+                {nextStepRow?.target || "—"}
+                {budget > 0 && nextStepRow && (
+                  <span style={{ fontSize:9, fontWeight:500, color:C.muted, marginLeft:4 }}>
+                    +${(budget).toLocaleString()}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-      <SlipCard pick={pick} date={date} C={C} SERVER={SERVER} onRefresh={onRefresh}
-                fixtures={fixtures} onFullModel={onFullModel} />
-      <button onClick={() => setDelOpen(true)} className="rvl-btn"
-              style={{ width:"100%", padding:"12px 0", fontSize:10,
-                       background:"transparent", color:C.red,
-                       border:`1px solid ${C.red}40`, opacity:.75 }}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg> Delete Chain &amp; Start Fresh
-      </button>
+
+      {/* ── TIMELINE ── */}
+      {chain && (
+        <div style={{ padding:"18px 14px 0" }}>
+          <div style={{ fontSize:8, fontWeight:800, color:C.muted, letterSpacing:".14em",
+                        textTransform:"uppercase", marginBottom:14,
+                        display:"flex", alignItems:"center", gap:8 }}>
+            Journey
+            <span style={{ flex:1, height:1, background:C.border, display:"block" }} />
+            <span style={{ fontSize:8, color:C.muted, letterSpacing:".04em",
+                           textTransform:"none", fontWeight:500 }}>
+              {completedSteps} / {ROLLOVER_MAX}
+            </span>
+          </div>
+
+          {timelineRows.map((row, i) => {
+            const state    = getStepState(row.step);
+            const stepData = steps.find(s => s.step === row.step);
+            return (
+              <TimelineStep
+                key={row.step}
+                row={row}
+                state={state}
+                stepData={stepData}
+                isLast={i === timelineRows.length - 1}
+                C={C}
+                pick={state === "current" ? pick : null}
+                isPast={isPast}
+                blocked={blocked}
+                onBook={() => setModal(true)}
+                fixtures={fixtures}
+                onFullModel={onFullModel}
+              />
+            );
+          })}
+
+          {visibleUpTo < ROLLOVER_MAX && (
+            <div style={{ display:"flex", alignItems:"center", gap:12, padding:"4px 0 18px", opacity:.55 }}>
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", width:34, gap:2 }}>
+                <div style={{ width:2, height:8, background:C.border, borderRadius:1 }} />
+                <div style={{ width:2, height:8, background:C.border, borderRadius:1, opacity:.5 }} />
+              </div>
+              <div style={{ fontSize:9, color:C.muted }}>
+                +{ROLLOVER_MAX - visibleUpTo} more step{ROLLOVER_MAX-visibleUpTo!==1?"s":""}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Delete chain */}
+      {chain && (
+        <div style={{ padding:"4px 14px 8px" }}>
+          <button onClick={() => setDelOpen(true)} className="rvl-btn"
+                  style={{ width:"100%", padding:"12px 0", fontSize:10,
+                           background:"transparent", color:C.red,
+                           border:`1px solid ${C.red}40`, opacity:.75,
+                           display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+              <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+            </svg>
+            Delete Chain &amp; Start Fresh
+          </button>
+        </div>
+      )}
+
+      {modal && pick && (
+        <BookModal pick={pick} C={C} SERVER={SERVER}
+                   onClose={() => setModal(false)}
+                   onBooked={() => { onRefresh(); }} />
+      )}
       {delOpen && (
         <DeleteModal C={C} SERVER={SERVER} userId={userId}
                      onClose={() => setDelOpen(false)}
                      onDeleted={() => { setDelOpen(false); onDelete(); }} />
       )}
+      <div style={{ height:20 }} />
     </div>
   );
 }
@@ -1611,8 +2010,80 @@ function AnalyticsPage({ chain, C, SERVER, loading }) {
     );
   }
 
+  if (!chain) {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+                    gap:10, padding:"60px 20px", color:C.muted, textAlign:"center" }} className="rvl-fade">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <span style={{ fontSize:11, fontWeight:700 }}>No active chain to analyse</span>
+        <span style={{ fontSize:10 }}>Start a chain from the Dashboard to see analytics.</span>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }} className="rvl-fade">
+
+      {/* ── WIN RATE RING ── */}
+      <div className="rvl-card"
+           style={{ background:C.surface, border:`1px solid ${C.border}`, padding:20 }}>
+        {(() => {
+          const wins     = steps.filter(s => s.result === "WIN").length;
+          const played   = steps.filter(s => s.result === "WIN" || s.result === "LOSS").length;
+          const hitRate  = played > 0 ? Math.round((wins / played) * 100) : 0;
+          const r        = 50;
+          const circ     = 2 * Math.PI * r;
+          const dash     = circ * (hitRate / 100);
+          const ringCol  = hitRate >= 60 ? C.green : hitRate >= 40 ? C.gold : C.red;
+          return (
+            <div style={{ display:"flex", alignItems:"center", gap:20 }}>
+              {/* Ring */}
+              <div style={{ flexShrink:0 }}>
+                <svg width="120" height="120" viewBox="0 0 120 120">
+                  <circle cx="60" cy="60" r={r} fill="none"
+                    stroke={C.border} strokeWidth="10"/>
+                  <circle cx="60" cy="60" r={r} fill="none"
+                    stroke={ringCol} strokeWidth="10"
+                    strokeDasharray={`${dash} ${circ}`}
+                    strokeLinecap="round"
+                    transform="rotate(-90 60 60)"
+                    style={{ transition:"stroke-dasharray .8s cubic-bezier(.4,0,.2,1)" }}/>
+                  <text x="60" y="54" textAnchor="middle"
+                    fill={C.text} fontSize="22" fontWeight="900"
+                    fontFamily="'Azeret Mono',monospace">
+                    {hitRate}%
+                  </text>
+                  <text x="60" y="70" textAnchor="middle"
+                    fill={C.muted} fontSize="9"
+                    fontFamily="'JetBrains Mono',monospace">
+                    hit rate
+                  </text>
+                </svg>
+              </div>
+              {/* Breakdown bars beside ring */}
+              <div style={{ flex:1, display:"flex", flexDirection:"column", gap:10 }}>
+                {[
+                  { lbl:"Wins",    val:wins,           pct:played>0?(wins/played*100):0,    col:C.green },
+                  { lbl:"Losses",  val:played-wins,    pct:played>0?((played-wins)/played*100):0, col:C.red },
+                  { lbl:"Steps",   val:`${cur}/${ROLLOVER_MAX}`, pct:(cur/ROLLOVER_MAX)*100, col:C.gold },
+                ].map((it,i) => (
+                  <div key={i}>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                      <span style={{ fontSize:9, fontWeight:700, color:C.muted, letterSpacing:".08em", textTransform:"uppercase" }}>{it.lbl}</span>
+                      <span style={{ fontSize:11, fontWeight:900, color:it.col, fontFamily:"'Azeret Mono',monospace" }}>{it.val}</span>
+                    </div>
+                    <div className="rvl-bar" style={{ background:`${it.col}18` }}>
+                      <div className="rvl-fill" style={{ width:`${it.pct}%`, background:it.col }}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
 
       {/* ── ROI SUMMARY ── */}
       <div className="rvl-card"
@@ -1621,9 +2092,9 @@ function AnalyticsPage({ chain, C, SERVER, loading }) {
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
           {[
             { lbl:"Active Step",    val:cur===0?"—":`${nextStep} / ${ROLLOVER_MAX}`, col:C.gold },
-            { lbl:"Starting Capital", val:`$${startCap.toFixed(2)}`,                col:C.text },
-            { lbl:"Current Value",  val:`$${currentValue.toFixed(2)}`,              col:currentValue>startCap?C.green:C.text },
-            { lbl:"Locked Profit",  val:locked>0?`+$${locked.toFixed(2)}`:"$0.00", col:locked>0?C.green:C.text },
+            { lbl:"Starting Capital", val:`$${startCap.toLocaleString()}`,                col:C.text },
+            { lbl:"Current Value",  val:`$${currentValue.toLocaleString()}`,              col:currentValue>startCap?C.green:C.text },
+            { lbl:"Locked Profit",  val:locked>0?`+$${locked.toLocaleString()}`:"$0", col:locked>0?C.green:C.text },
           ].map((it,i) => (
             <div key={i} style={{ background:`${C.bg}60`, borderRadius:cr+2,
                                   padding:"10px 12px", border:`1px solid ${C.border}` }}>
@@ -1654,7 +2125,9 @@ function AnalyticsPage({ chain, C, SERVER, loading }) {
            style={{ background:C.surface, border:`1px solid ${C.border}`, overflow:"hidden" }}>
         <button className="rvl-coll-btn" onClick={askJarvis}
                 style={{ padding:"14px 16px", color:C.text }}>
-          <span style={{ fontSize:14 }}>⚡</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.gold} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
           <div style={{ flex:1, textAlign:"left" }}>
             <div style={{ fontSize:11, fontWeight:800, color:C.text }}>
               {jarvisTxt ? "Jarvis Analysis" : "Ask Jarvis to Analyse This Chain"}
@@ -1878,7 +2351,7 @@ function HistoryPage({ history, C, loading }) {
       {history.length > 0 && (
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
           {[
-            { lbl:"Total Profit",  val:`$${total.toFixed(2)}`, col:total>0?C.green:C.text },
+            { lbl:"Total Profit",  val:`$${total.toLocaleString()}`, col:total>0?C.green:C.text },
             { lbl:"Win Rate",      val:`${winRate}%`,          col:winRate>=60?C.green:C.text },
             { lbl:"Chains Run",    val:history.length,         col:C.text },
           ].map((it,i) => (
@@ -1945,7 +2418,7 @@ function HistoryPage({ history, C, loading }) {
             </div>
             <div style={{ textAlign:"right", flexShrink:0 }}>
               <Val size={15} color={col}>
-                {won ? `+$${(h.totalLocked||0).toFixed(2)}` : isVoid ? "VOID" : "Lost"}
+                {won ? `+$${(h.totalLocked||0).toLocaleString()}` : isVoid ? "VOID" : "Lost"}
               </Val>
               <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
                 {won ? "SECURED" : isVoid ? "SKIPPED" : "FAILED"}
@@ -1986,9 +2459,11 @@ const TABS = [
   { id:"history",   label:"History",   icon: ROLLOVER_SVG_ICONS.history },
 ];
 
+const RVL_PAGE_KEY = "rvl_active_page";
 // ── MAIN EXPORT ───────────────────────────────────────────────────────────────
 export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, date, buildRolloverPick, buildUniversalPool, onFullModel, onChainChange }) {
-  const [page,       setPage]       = useState("dashboard");
+  const [page,       setPage]       = useState(() => { try { return sessionStorage.getItem(RVL_PAGE_KEY) || "dashboard"; } catch { return "dashboard"; } });
+  const setPagePersist = (p) => { try { sessionStorage.setItem(RVL_PAGE_KEY, p); } catch {} setPage(p); };
   const [chain,      setChain]      = useState(null);
   const [history,    setHistory]    = useState([]);
   const [loading,    setLoading]    = useState(true);
@@ -1996,6 +2471,7 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
   const [pick,       setPick]       = useState(null);
   const [showWelcome, setShowWelcome] = useState(false);
   const [engineSyncError, setEngineSyncError] = useState(false);
+  const [showHeaderDelete, setShowHeaderDelete] = useState(false); // P25 - delete from header for failed/archived chains
   const pendingOnboardRef = useRef(false);
   const lockedDateRef = useRef(null);
 
@@ -2041,7 +2517,8 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
   }, []);
 
   // pickLoadedRef: once we have a confirmed server-locked slip for today, never rebuild
-  const pickLoadedRef = useRef(false);
+  const pickLoadedRef  = useRef(false);
+  const pickBuildingRef = useRef(false); // C5-FIX: mutex — prevent dual-tab concurrent builds
 
   // ── Slip build logic ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -2074,6 +2551,8 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
 
         // Not locked — only build if we haven't already shown a pick this session
         if (pickLoadedRef.current) return;
+        if (pickBuildingRef.current) return; // C5-FIX: another tab already building
+        pickBuildingRef.current = true;
 
         const pool = buildTodayPool();
         if (!pool.length) return;
@@ -2163,6 +2642,7 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
           if (lockData.parley?.legs?.length) setPick(lockData.parley);
           lockedDateRef.current = date;
           pickLoadedRef.current = true;
+          pickBuildingRef.current = false; // C5-FIX: release mutex
           // Register with engine chain
           return fetch(`${SERVER}/api/rollover/engine/pick`, {
             method:"POST", headers:{"Content-Type":"application/json", "X-User-ID": userId},
@@ -2200,6 +2680,7 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
                 totalOdds:fo, combinedEmpiricalRate:Math.round(cr), poolSize:pool.length, belowTarget:true };
         }
         if (p) setPick(p);
+        pickBuildingRef.current = false; // C5-FIX: release mutex on fallback path
       });
   }, [fixtures, historicalRates, date]);
 
@@ -2256,27 +2737,37 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
                           borderRadius:"var(--r-lg)",padding:"5px 12px" }}>
               <div style={{ width:6,height:6,borderRadius:"50%",background:C.green }} className="live-dot"/>
               <span style={{ fontSize:10,fontWeight:800,color:C.green,letterSpacing:".04em" }}>
-                STEP {chain.step} · ×{chain.currentAmount != null ? (chain.currentAmount / (getStartingCapital(chain)||chain.currentAmount)).toFixed(1) : "—"}
+                STEP {chain.step + 1} · {GATE_TABLE[Math.min(chain.step, ROLLOVER_MAX-1)]?.target || "—"}
               </span>
             </div>
           )}
           {chain && chain.status !== "active" && (
-            <span style={{ fontSize:9,fontWeight:700,color:C.muted,letterSpacing:".04em",textTransform:"uppercase" }}>
-              {chain.status || "no chain"}
-            </span>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <span style={{ fontSize:9,fontWeight:700,color:C.muted,letterSpacing:".04em",textTransform:"uppercase" }}>
+                {chain.status === "pending" ? "Archived" : chain.status === "failed" ? "Archived" : chain.status || "no chain"}
+              </span>
+              <button onClick={() => setShowHeaderDelete(true)}
+                style={{ fontSize:8, fontWeight:800, color:C.red, background:`${C.red}12`,
+                         border:`1px solid ${C.red}30`, borderRadius:6, padding:"3px 8px",
+                         cursor:"pointer", letterSpacing:".04em", textTransform:"uppercase" }}>
+                Start Fresh
+              </button>
+            </div>
+          )}
+          {showHeaderDelete && (
+            <DeleteModal C={C} SERVER={SERVER} userId={userId}
+                         onClose={() => setShowHeaderDelete(false)}
+                         onDeleted={() => {
+                           setShowHeaderDelete(false);
+                           pendingOnboardRef.current = true;
+                           pickLoadedRef.current = false;
+                           lockedDateRef.current = null;
+                           setPick(null); setChain(null); setShowWelcome(true);
+                         }} />
           )}
         </div>
 
-        {/* Tab bar */}
-        <div className="rvl-tab-bar">
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setPage(t.id)}
-              className={`rvl-tab${page===t.id?" rvl-active":""}`}>
-              <span className="rvl-tab-icon">{t.icon}</span>
-              {t.label}
-            </button>
-          ))}
-        </div>
+        {/* Draft B: NO tab bar in header — tabs live below the hero strip */}
       </div>
 
       {/* Offline banner */}
@@ -2295,6 +2786,16 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
           </button>
         </div>
       )}
+
+      {/* ── Tab bar — below hero strip, outside sticky header ── */}
+      <div className="rvlb-tabs">
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setPagePersist(t.id)}
+            className={`rvlb-tab${page===t.id?" rvlb-active":""}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       <div style={{ paddingTop:14 }}>
         {/* E6-FIX: non-blocking engine sync warning — parley is locked but engine
