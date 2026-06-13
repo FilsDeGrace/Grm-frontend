@@ -11232,6 +11232,7 @@ export default function GRMPro() {
       {mainFocusFixture && (
         <FullModelPage
           f={mainFocusFixture}
+          C={C}
           onBack={() => {
             setMainFocusFixture(null);
             // Return to wherever user came from
