@@ -228,7 +228,7 @@ function abbreviatePick(pick, home, away) {
 }
 
 // ── CUSTOM PICK HELPERS ───────────────────────────────────────────────────
-function getCustomPick(f, family) {
+function getCustomPick(f, family, C) {
   const m = f.markets, io = safeImpliedOdds;
   if (family === "theRead") {
     if (!f.theRead?.anchor) return null;
@@ -237,12 +237,12 @@ function getCustomPick(f, family) {
   }
   if (family === "theEdge") {
     if (!f.theEdge) return null;
-    return { label:f.theEdge.pick, prob:f.theEdge.prob, odds:f.theEdge.odds||io(f.theEdge.prob), color:C.edge, market:f.theEdge.market };
+    return { label:f.theEdge.pick, prob:f.theEdge.prob, odds:f.theEdge.odds||io(f.theEdge.prob), color:C?.edge, market:f.theEdge.market };
   }
   if (family === "goalRadar") {
     const best = f.goalRadar?.home?.prob >= f.goalRadar?.away?.prob ? f.goalRadar?.home : f.goalRadar?.away;
     if (!best) return null;
-    return { label:best.pick, prob:best.prob, odds:best.odds||io(best.prob), color:C.radar, market:"TeamTotal" };
+    return { label:best.pick, prob:best.prob, odds:best.odds||io(best.prob), color:C?.radar, market:"TeamTotal" };
   }
   // Legacy safeBet/valuePick compat for old snapshots
   if (family === "safeBet") {
@@ -251,23 +251,23 @@ function getCustomPick(f, family) {
     return { label:f.safeBet.pick, prob:f.safeBet.prob, odds:f.safeBet.odds||io(f.safeBet.prob), color:mst.color, market:f.safeBet.market };
   }
   const map = {
-    "over15":  { label:"Over 1.5",  prob:m.over15,   odds:io(m.over15),   color:C.green  },
-    "over25":  { label:"Over 2.5",  prob:m.over25,   odds:io(m.over25),   color:C.green  },
-    "over35":  { label:"Over 3.5",  prob:m.over35,   odds:io(m.over35),   color:C.green  },
-    "over45":  { label:"Over 4.5",  prob:m.over45,   odds:io(m.over45),   color:C.green  },
-    "under15": { label:"Under 1.5", prob:parseFloat((100-(m.over15||0)).toFixed(1)), odds:io(100-(m.over15||0)), color:C.blue },
-    "under25": { label:"Under 2.5", prob:m.under25,  odds:io(m.under25),  color:C.blue   },
-    "under35": { label:"Under 3.5", prob:m.under35,  odds:io(m.under35),  color:C.blue   },
-    "under45": { label:"Under 4.5", prob:m.under45,  odds:io(m.under45),  color:C.blue   },
-    "bttsyes": { label:"BTTS Yes",  prob:m.bttsYes,  odds:f.odds?.bttsYesOdds||io(m.bttsYes), color:C.purple },
-    "bttsno":  { label:"BTTS No",   prob:m.bttsNo,   odds:f.odds?.bttsNoOdds||io(m.bttsNo),   color:C.purple },
-    "homewin": { label:`${f.teams.home} Win`, prob:m.homeWin, odds:f.odds?.o1||io(m.homeWin), color:C.gold, market:"1X2" },
-    "draw":    { label:"Draw",      prob:m.draw,     odds:f.odds?.oX||io(m.draw), color:C.gold, market:"1X2" },
-    "awaywin": { label:`${f.teams.away} Win`, prob:m.awayWin, odds:f.odds?.o2||io(m.awayWin), color:C.gold, market:"1X2" },
-    "homeo05": { label:`${f.teams.home} O0.5`, prob:m.homeOver05, odds:io(m.homeOver05), color:C.radar, market:"TeamTotal" },
-    "homeo15": { label:`${f.teams.home} O1.5`, prob:m.homeOver15, odds:io(m.homeOver15), color:C.radar, market:"TeamTotal" },
-    "awayo05": { label:`${f.teams.away} O0.5`, prob:m.awayOver05, odds:io(m.awayOver05), color:C.radar, market:"TeamTotal" },
-    "awayo15": { label:`${f.teams.away} O1.5`, prob:m.awayOver15, odds:io(m.awayOver15), color:C.radar, market:"TeamTotal" },
+    "over15":  { label:"Over 1.5",  prob:m.over15,   odds:io(m.over15),   color:C?.green  },
+    "over25":  { label:"Over 2.5",  prob:m.over25,   odds:io(m.over25),   color:C?.green  },
+    "over35":  { label:"Over 3.5",  prob:m.over35,   odds:io(m.over35),   color:C?.green  },
+    "over45":  { label:"Over 4.5",  prob:m.over45,   odds:io(m.over45),   color:C?.green  },
+    "under15": { label:"Under 1.5", prob:parseFloat((100-(m.over15||0)).toFixed(1)), odds:io(100-(m.over15||0)), color:C?.blue },
+    "under25": { label:"Under 2.5", prob:m.under25,  odds:io(m.under25),  color:C?.blue   },
+    "under35": { label:"Under 3.5", prob:m.under35,  odds:io(m.under35),  color:C?.blue   },
+    "under45": { label:"Under 4.5", prob:m.under45,  odds:io(m.under45),  color:C?.blue   },
+    "bttsyes": { label:"BTTS Yes",  prob:m.bttsYes,  odds:f.odds?.bttsYesOdds||io(m.bttsYes), color:C?.purple },
+    "bttsno":  { label:"BTTS No",   prob:m.bttsNo,   odds:f.odds?.bttsNoOdds||io(m.bttsNo),   color:C?.purple },
+    "homewin": { label:`${f.teams.home} Win`, prob:m.homeWin, odds:f.odds?.o1||io(m.homeWin), color:C?.gold, market:"1X2" },
+    "draw":    { label:"Draw",      prob:m.draw,     odds:f.odds?.oX||io(m.draw), color:C?.gold, market:"1X2" },
+    "awaywin": { label:`${f.teams.away} Win`, prob:m.awayWin, odds:f.odds?.o2||io(m.awayWin), color:C?.gold, market:"1X2" },
+    "homeo05": { label:`${f.teams.home} O0.5`, prob:m.homeOver05, odds:io(m.homeOver05), color:C?.radar, market:"TeamTotal" },
+    "homeo15": { label:`${f.teams.home} O1.5`, prob:m.homeOver15, odds:io(m.homeOver15), color:C?.radar, market:"TeamTotal" },
+    "awayo05": { label:`${f.teams.away} O0.5`, prob:m.awayOver05, odds:io(m.awayOver05), color:C?.radar, market:"TeamTotal" },
+    "awayo15": { label:`${f.teams.away} O1.5`, prob:m.awayOver15, odds:io(m.awayOver15), color:C?.radar, market:"TeamTotal" },
   };
   return map[family] || null;
 }
@@ -3730,7 +3730,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const getFallbackPick = (f) => {
       for (const fam of ALL_FAMILY_IDS) {
         if (fam === family) continue; // already tried primary
-        const p = getCustomPick(f, fam);
+        const p = getCustomPick(f, fam, C);
         if (p && p.prob > 0 && !excludedMarkets.has(p.market) && !excludedMarkets.has(fam)) return p;
       }
       return null;
@@ -3750,7 +3750,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const sf=STAT_FILTERS.find(x=>x.id===id); return sf?sf.fn(f):true;
       }))
       .map(f => {
-        const primaryPick = getCustomPick(f, family);
+        const primaryPick = getCustomPick(f, family, C);
         if (!primaryPick || primaryPick.prob <= 0) return null;
         // If primary pick's market is excluded, try fallback
         const isExcluded = excludedMarkets.size > 0 &&
