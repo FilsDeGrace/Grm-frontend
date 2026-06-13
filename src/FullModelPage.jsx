@@ -23,6 +23,7 @@ import {
 } from "./explainers.js";
 
 import {
+  C,
   SERVER,
   STRATEGY_LABELS,
   StatusBadge,
@@ -30,15 +31,9 @@ import {
   FixtureBookNow,
   AskJarvis,
 } from "./App.jsx";
-import { loadSavedTheme } from "./themes.js";
-
-// Module-level theme reference — seeded from localStorage so sub-components
-// that use C as a free variable don't crash before FullModelPage mounts.
-// FullModelPage overwrites this with the live prop on every render.
-let C = loadSavedTheme();
 
 // mktStyle not exported from App.jsx — inlined
-const mktStyle = (m) => {
+const mktStyle = m => {
   const map = {
     "Over 2.5":  { color: C.green,  bg: C.greenDim  },
     "Over 1.5":  { color: C.green,  bg: C.greenDim  },
@@ -1018,10 +1013,10 @@ function TipIcon({ text }) {
     <>
       <button ref={btnRef} className={shaking ? "grm-tip-icon grm-tip-shaking" : "grm-tip-icon"} onClick={toggle} style={{
         width:15, height:15, borderRadius:"50%",
-        border:"1px solid rgba(255,255,255,0.18)",
-        background:"rgba(255,255,255,0.07)",
+        border:`1px solid ${C.border}`,
+        background:C.surface,
         cursor:"pointer", fontSize:8, fontWeight:900,
-        color:"rgba(255,255,255,0.55)", flexShrink:0,
+        color:C.muted, flexShrink:0,
         display:"inline-flex", alignItems:"center", justifyContent:"center",
         lineHeight:1, padding:0,
       }}>
@@ -1037,9 +1032,7 @@ function TipIcon({ text }) {
 }
 
 
-export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, backtestSummary, C: CProp }) {
-  // Keep module-level C in sync so all sub-components get the live theme
-  if (CProp) C = CProp;
+export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, backtestSummary }) {
   const m         = f.markets;
   const scrollRef = useRef(null);
 
@@ -1190,12 +1183,12 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
         .grm-tip-icon:hover{animation:grmShake .4s ease}.grm-tip-shaking{animation:grmShake .5s ease!important}
         .grm-tip-box{
           position:fixed;z-index:99999;
-          background:#1a1a2e;
-          border:1px solid rgba(255,255,255,0.15);
+          background:var(--modal-bg);
+          border:1px solid var(--glass-border);
           border-radius:8px;padding:10px 13px;
           width:210px;max-width:88vw;
-          box-shadow:0 8px 32px rgba(0,0,0,0.7);
-          font-size:11px;line-height:1.6;color:#e8e8f0;
+          box-shadow:0 8px 32px rgba(0,0,0,0.5);
+          font-size:11px;line-height:1.6;color:var(--text);
           pointer-events:none;
         }
         .grm-jarvis-pulse{animation:grmPulse 3s ease-in-out infinite}

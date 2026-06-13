@@ -6923,16 +6923,39 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
       {open && ReactDOM.createPortal(
         <>
           <div onClick={() => setOpen(false)}
-            style={{ position:"fixed",inset:0,zIndex:8998 }}/>
-          <div style={{
+            style={{ position:"fixed",inset:0,zIndex:8998,
+                     background: window.innerWidth < 600 ? "rgba(0,0,0,.45)" : "transparent" }}/>
+          {/* P2-FIX: bottom sheet on mobile, dropdown on desktop */}
+          <div style={window.innerWidth < 600 ? {
+            position:"fixed", bottom:0, left:0, right:0, zIndex:8999,
+            maxHeight:"75vh", display:"flex", flexDirection:"column",
+            background:C.modalBg, borderRadius:"16px 16px 0 0",
+            boxShadow:"0 -4px 32px rgba(0,0,0,.5)",
+            border:`1px solid ${C.border}`,
+            animation:"slideUp .22s ease",
+          } : {
             position:"fixed",
             top: btnRect ? btnRect.bottom + 3 : 60,
-            left: btnRect ? btnRect.left : 16,
+            left: btnRect ? Math.min(btnRect.left, window.innerWidth - 290) : 16,
             zIndex:8999,
-            width:280,maxHeight:400,overflowY:"auto",
-            background:C.modalBg,border:`1px solid ${C.border}`,
-            borderRadius:8,boxShadow:"0 4px 24px rgba(0,0,0,0.5)"
+            width:280, maxHeight:400, overflowY:"auto",
+            background:C.modalBg, border:`1px solid ${C.border}`,
+            borderRadius:8, boxShadow:"0 4px 24px rgba(0,0,0,0.5)"
           }}>
+          {/* Bottom sheet drag handle — mobile only */}
+          {window.innerWidth < 600 && (
+            <div style={{ display:"flex", justifyContent:"center", padding:"10px 0 4px" }}>
+              <div style={{ width:36, height:4, borderRadius:2, background:C.border }} />
+            </div>
+          )}
+          {window.innerWidth < 600 && (
+            <div style={{ padding:"4px 14px 10px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:11, fontWeight:800, color:C.text }}>Select Leagues</span>
+              <button onClick={() => setOpen(false)}
+                style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:18, padding:0 }}>✕</button>
+            </div>
+          )}
+          <div style={{ flex:1, overflowY:"auto" }}>
           <div style={{ padding:"8px 10px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
             <input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…"
               style={{ width:"100%",background:C.faint,border:`1px solid ${C.border}`,borderRadius:5,padding:"4px 8px",fontSize:9,color:C.text,outline:"none",boxSizing:"border-box" }}/>
@@ -6974,7 +6997,8 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
               </div>
             );
           })}
-          </div>
+          </div>{/* end scroll wrapper */}
+          </div>{/* end sheet/dropdown */}
         </>,
         document.body
       )}
@@ -7490,30 +7514,128 @@ function PoolPerformanceTab({ serverUrl }) {
 // at the top level of a component, not inside callbacks or IIFEs in JSX.
 function ParlayExplainer() {
   const [open, setOpen] = useState(() => {
-    try { return !localStorage.getItem("grm_parley_explainer_v2"); } catch { return true; }
+    try { return !localStorage.getItem("grm_parley_explainer_v3"); } catch { return true; }
   });
+  const [tab, setTab] = useState("what"); // "what" | "modes" | "how"
+
+  const dismiss = () => {
+    setOpen(false);
+    try { localStorage.setItem("grm_parley_explainer_v3","1"); } catch {}
+  };
+
   if (!open) return (
     <button onClick={() => setOpen(true)} className="gb"
       style={{ width:"100%",background:"transparent",border:`1px solid ${C.faint}`,
-               color:C.muted,padding:"5px 0",fontSize:8,marginBottom:10 }}>
-      ℹ How the Parley System works
+               color:C.muted,padding:"6px 0",fontSize:8,marginBottom:10,
+               display:"flex",alignItems:"center",justifyContent:"center",gap:5 }}>
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      How the Parley System works
     </button>
   );
+
+  const tabs = [
+    { id:"what",  label:"What is a Parley?" },
+    { id:"modes", label:"Jarvis Modes" },
+    { id:"how",   label:"How to Use" },
+  ];
+
   return (
-    <div style={{ background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:10,
-                  padding:"12px 14px",marginBottom:14,fontSize:9,color:C.text,lineHeight:1.7 }}>
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-        <span style={{ fontWeight:800,color:C.gold,fontSize:10 }}>How the Parley System works</span>
-        <button onClick={() => {
-          setOpen(false);
-          try { localStorage.setItem("grm_parley_explainer_v2","1"); } catch {}
-        }} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0 }}>✕</button>
+    <div style={{ border:`1px solid ${C.gold}30`, borderRadius:12, marginBottom:14, overflow:"hidden" }}>
+
+      {/* Header */}
+      <div style={{ background:`${C.gold}0c`, padding:"10px 14px",
+                    display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <span style={{ fontSize:10, fontWeight:800, color:C.gold }}>Parley System Guide</span>
+        <button onClick={dismiss}
+          style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,padding:0,lineHeight:1 }}>✕</button>
       </div>
-      <div style={{ display:"flex",flexDirection:"column",gap:7 }}>
-        <div><span style={{ color:C.gold,fontWeight:800 }}>Jarvis tab</span> — AI builds a ticket for you. Choose Safe, Value, or Longshot style. Hit Build, then <span style={{ fontWeight:700 }}>Remix ↺</span> to get a different set of picks from the same pool.</div>
-        <div><span style={{ color:C.gold,fontWeight:800 }}>Custom tab</span> — Build N non-overlapping tickets from all fixtures or the engine pool. Set your target odds and stake.</div>
-        <div><span style={{ color:C.gold,fontWeight:800 }}>Tapping a game in a built ticket</span> opens its Full Model page — this does <span style={{ fontWeight:700 }}>not</span> edit your ticket. To swap a leg, tap <span style={{ fontWeight:700 }}>↺ Swap</span> on that leg. To edit the whole ticket, tap <span style={{ fontWeight:700 }}>Edit</span> — this copies all legs to your draft for manual adjustment.</div>
-        <div><span style={{ color:C.amber,fontWeight:800 }}>⚠ Bookmaker cross-check</span> — Our booking code is automated. Always verify your selections in the bookmaker app before placing. Occasionally a game name may differ and a leg won't resolve correctly.</div>
+
+      {/* Tab bar */}
+      <div style={{ display:"flex", borderBottom:`1px solid ${C.border}` }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ flex:1, padding:"7px 4px", border:"none", cursor:"pointer",
+                     background:"transparent", fontFamily:C.font,
+                     fontSize:8, fontWeight:tab===t.id?800:500,
+                     color:tab===t.id?C.gold:C.muted,
+                     borderBottom:`2px solid ${tab===t.id?C.gold:"transparent"}`,
+                     transition:"all .15s" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ padding:"12px 14px", fontSize:9, color:C.text, lineHeight:1.75 }}>
+
+        {tab === "what" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            <div>
+              A <span style={{ fontWeight:800, color:C.gold }}>parley</span> is a multi-leg bet where every selection must win. The odds multiply — a 5-leg ticket with average odds of 1.8× per leg compounds to <span style={{ fontWeight:700 }}>~19×</span>. Higher reward, higher risk.
+            </div>
+            <div>
+              GRM's model scores each fixture on probability, historical hit rate, and pattern signals. The best-scoring games form your ticket pool. The engine picks legs that <span style={{ fontWeight:700 }}>don't overlap</span> — no two tickets share a leg unless the pool is exhausted.
+            </div>
+            <div style={{ background:`${C.amber}0e`, border:`1px solid ${C.amber}25`,
+                          borderRadius:7, padding:"8px 10px" }}>
+              <span style={{ color:C.amber, fontWeight:800 }}>Always verify</span> — our booking code is automated. Check selections in your bookmaker app before placing. Game name mismatches can cause a leg to fail silently.
+            </div>
+          </div>
+        )}
+
+        {tab === "modes" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {[
+              { label:"Safe", color:C.green, odds:"~2–3×", legs:"2–5 legs", desc:"High-confidence picks only (≥62% model prob). Lower odds, more likely to land. Best for consistent staking." },
+              { label:"Value", color:C.gold, odds:"~3–6×", legs:"5–10 legs", desc:"Broader pool, min 55% prob. Balances odds vs probability. The default for most users." },
+              { label:"Longshot", color:C.red, odds:"6×+", legs:"10–17 legs", desc:"Wide pool, 48%+ threshold. High odds, lower hit rate. Think of it as a weekly lottery ticket — not your main stake." },
+            ].map(m => (
+              <div key={m.label} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                <div style={{ flexShrink:0, marginTop:2, background:`${m.color}15`,
+                              border:`1px solid ${m.color}40`, borderRadius:6,
+                              padding:"2px 8px", fontSize:8, fontWeight:800, color:m.color }}>
+                  {m.label}
+                </div>
+                <div>
+                  <div style={{ fontSize:8, color:C.muted, marginBottom:2 }}>{m.odds} · {m.legs}</div>
+                  <div>{m.desc}</div>
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize:8, color:C.muted, marginTop:4 }}>
+              You can select multiple modes at once — GRM builds one ticket per mode from the same pool.
+            </div>
+          </div>
+        )}
+
+        {tab === "how" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
+            {[
+              { n:"1", title:"Pick a tab", body:"Jarvis tab = AI builds for you. Custom tab = you control odds target, stake, and pool." },
+              { n:"2", title:"Research Mode", body:"Toggle Research before building. Jarvis pre-scores the top 8 candidates with live web context — injuries, form, lineup news. Boosted or penalised legs show a reason on the ticket." },
+              { n:"3", title:"Remix or Swap", body:"Don't like a ticket? Tap ↺ Remix for a different combination from the same pool. To swap one leg, tap ↺ on that leg row." },
+              { n:"4", title:"Edit Draft", body:"Tap Edit on a ticket to copy all legs to your Draft for manual adjustments. Tap a game to open Full Model — this does not edit the ticket." },
+              { n:"5", title:"Book it", body:"Tap Book Now, choose a bookmaker, confirm. The code is generated automatically. Save your ticket first if you want to reference it later." },
+            ].map(s => (
+              <div key={s.n} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                <div style={{ flexShrink:0, width:18, height:18, borderRadius:"50%",
+                              background:`${C.gold}20`, border:`1px solid ${C.gold}40`,
+                              display:"flex", alignItems:"center", justifyContent:"center",
+                              fontSize:8, fontWeight:900, color:C.gold, marginTop:1 }}>
+                  {s.n}
+                </div>
+                <div>
+                  <div style={{ fontWeight:800, color:C.text, marginBottom:2 }}>{s.title}</div>
+                  <div style={{ color:C.muted }}>{s.body}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -7612,7 +7734,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
           Make sure the server is running and TA has exported for today.
         </div>
         <button onClick={handleRetry} className="gb"
-          style={{ fontSize:9,padding:"7px 18px",border:`1px solid ${C.border}`,color:C.text }}>
+          style={{ fontSize:9,padding:"7px 18px",border:`1px solid ${C.border}`,color:C.muted,background:C.surface }}>
           Retry
         </button>
       </div>
@@ -7636,7 +7758,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
           Tickets are generated automatically before kickoff. Check back soon or try refreshing.
         </div>
         <button onClick={handleRetry} className="gb"
-          style={{ fontSize:9, padding:"7px 18px", border:`1px solid ${C.border}`, color:C.text, marginTop:4 }}>
+          style={{ fontSize:9, padding:"7px 18px", border:`1px solid ${C.border}`, color:C.muted, background:C.surface, marginTop:4 }}>
           Refresh
         </button>
       </div>
@@ -7718,10 +7840,19 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
           : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
         const { name, rationale } = getStrategyLabel(strat, idx);
 
+        // N41-FIX: richer signal badges
+        const hasDA   = (strat.learnedHR || 0) > 0;
+        const hasSA   = (strat.saPositive || 0) > 0;
+        const hrGrade = hasDA
+          ? strat.learnedHR >= 70 ? { col:C.green, label:`${strat.learnedHR}% HR` }
+          : strat.learnedHR >= 55 ? { col:C.gold,  label:`${strat.learnedHR}% HR` }
+          : { col:C.muted, label:`${strat.learnedHR}% HR` }
+          : null;
+
         return (
           <div key={strat.id} style={{
             background: C.surface,
-            border: `1px solid ${isOpen ? C.accent+"80" : C.border}`,
+            border: `1px solid ${isOpen ? C.accent+"80" : isUsed ? C.green+"40" : C.border}`,
             borderRadius: 10,
             overflow: "hidden",
             transition: "border-color .15s",
@@ -7731,12 +7862,37 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
             <div onClick={() => setExpanded(isOpen ? null : strat.id)}
               style={{ padding:"12px 14px", cursor:"pointer" }}>
 
-              {/* Strategy name + chevron */}
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
-                <span style={{
-                  fontSize:8, fontWeight:800, letterSpacing:".06em", textTransform:"uppercase",
-                  color:C.accent, background:`${C.accent}14`, borderRadius:5, padding:"2px 8px"
-                }}>{name}</span>
+              {/* Top row: name pill + signal badges + chevron */}
+              <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:7,
+                            justifyContent:"space-between" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:5, flex:1, minWidth:0, flexWrap:"wrap" }}>
+                  <span style={{
+                    fontSize:8, fontWeight:800, letterSpacing:".06em", textTransform:"uppercase",
+                    color:C.accent, background:`${C.accent}14`, borderRadius:5, padding:"2px 8px", flexShrink:0
+                  }}>{name}</span>
+                  {/* Signal badges */}
+                  {hrGrade && (
+                    <span style={{ fontSize:7, fontWeight:700, color:hrGrade.col,
+                                   background:`${hrGrade.col}12`, border:`1px solid ${hrGrade.col}30`,
+                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
+                      {hrGrade.label}
+                    </span>
+                  )}
+                  {hasSA && (
+                    <span style={{ fontSize:7, fontWeight:700, color:C.edge,
+                                   background:`${C.edge}12`, border:`1px solid ${C.edge}30`,
+                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
+                      {strat.saPositive} pattern{strat.saPositive!==1?"s":""}
+                    </span>
+                  )}
+                  {isUsed && (
+                    <span style={{ fontSize:7, fontWeight:800, color:C.green,
+                                   background:`${C.green}12`, border:`1px solid ${C.green}30`,
+                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
+                      ✓ Added
+                    </span>
+                  )}
+                </div>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
                   strokeLinecap="round" strokeLinejoin="round"
                   style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", flexShrink:0 }}>
@@ -7744,31 +7900,55 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                 </svg>
               </div>
 
-              {/* Odds — big and primary */}
-              <div style={{ fontSize:20, fontWeight:800, color: isUsed ? C.green : C.text, lineHeight:1, marginBottom:4 }}>
-                {odds ? `${odds}×` : "—"}
-                {isUsed && (
-                  <svg style={{ marginLeft:6, verticalAlign:"middle" }} width="13" height="13" viewBox="0 0 24 24"
-                    fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
+              {/* Odds + probability */}
+              <div style={{ display:"flex", alignItems:"baseline", gap:10, marginBottom:5 }}>
+                <div style={{ fontSize:22, fontWeight:900, color: isUsed ? C.green : C.text, lineHeight:1 }}>
+                  {odds ? `${odds}×` : "—"}
+                </div>
+                {pct != null && (
+                  <div style={{ fontSize:9, color:C.muted }}>
+                    <span style={{ fontWeight:700, color: pct>=60?C.green:pct>=40?C.gold:C.muted }}>{pct}%</span>
+                    {" "}chance
+                  </div>
                 )}
               </div>
 
-              {/* Rationale — one line, plain English */}
-              <div style={{ fontSize:9, color:C.muted, marginBottom:3, lineHeight:1.4 }}>
+              {/* Probability bar */}
+              {pct != null && (
+                <div style={{ height:3, background:C.faint, borderRadius:2, marginBottom:7, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:`${Math.min(pct,100)}%`,
+                                background: pct>=60?C.green:pct>=40?C.gold:C.muted,
+                                borderRadius:2, transition:"width .3s" }} />
+                </div>
+              )}
+
+              {/* Rationale */}
+              <div style={{ fontSize:9, color:C.muted, marginBottom:3, lineHeight:1.5 }}>
                 {rationale}
               </div>
 
-              {/* Leg count · market · parlay % */}
+              {/* Leg count · markets */}
               <div style={{ fontSize:8, color:C.muted, opacity:.7 }}>
-                {legCount} leg{legCount!==1?"s":""} · {mktStr}{pct != null ? ` · ${pct}% probability` : ""}
+                {legCount} leg{legCount!==1?"s":""} · {mktStr}
               </div>
             </div>
 
             {/* ── Expanded legs + CTA ── */}
             {isOpen && (
               <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
+
+                {/* N41-FIX: Why this ticket blurb */}
+                {(hasDA || hasSA) && (
+                  <div style={{ background:C.faint, borderRadius:7, padding:"8px 10px",
+                                marginBottom:10, fontSize:8, color:C.muted, lineHeight:1.6 }}>
+                    {hasDA && hasSA
+                      ? `Two independent signals agree on these picks: ${strat.learnedHR}% historical hit rate on this market pattern, plus ${strat.saPositive} situational confirmation${strat.saPositive!==1?"s":""} from form and context.`
+                      : hasDA
+                      ? `This market pattern has landed ${strat.learnedHR}% of the time in GRM's historical data — the picks are drawn from the highest-scoring games in that pattern.`
+                      : `${strat.saPositive} situational pattern${strat.saPositive!==1?"s":""} aligned — team form, fixture context, and market behaviour all pointing the same way.`
+                    }
+                  </div>
+                )}
 
                 {/* Legs */}
                 <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
@@ -8219,7 +8399,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
     if (builderMode === "jarvis") {
       const rawPool = buildUniversalPool(parlayFixtures, rates).filter(e => !parlayExcludedMarkets.has(e.market));
-      if (rawPool.length === 0) {
         setAutoMessage("No qualifying games in selected leagues — try adding more leagues or clearing the filter.");
         setBuilding(false); return;
       }
@@ -9555,6 +9734,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           100%{box-shadow:0 0 0 0 transparent}
         }
         @keyframes grm-fade-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
       `}</style>
 
       {/* Single wrapper div — this is the ONLY element that owns position.
@@ -9588,7 +9768,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
             pointerEvents: "none",
             animation: "grm-fade-in .2s ease",
           }}>
-          🌚 I'm your co-pilot
+          🌟 Ask Jarvis anything
             <div style={{
               position: "absolute", bottom: -5,
               [isRightEdge ? "right" : "left"]: 18,
@@ -9602,39 +9782,61 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           </div>
         )}
 
+        {/* Pulse ring — subtle ambient glow behind the FAB */}
+        {!dragging && (
+          <div style={{
+            position:"absolute", inset:-5, borderRadius:"50%",
+            background:`radial-gradient(circle, ${C.accent}22 0%, transparent 70%)`,
+            pointerEvents:"none",
+          }}/>
+        )}
+
         <button
           onPointerDown={onPointerDown}
           aria-label="Open Jarvis"
           style={{
             width: SIZE, height: SIZE,
             borderRadius: "50%",
-            background: `${C.surface}f0`,
-            border: `1.5px solid ${C.accent}55`,
-            backdropFilter: "blur(14px)",
-            WebkitBackdropFilter: "blur(14px)",
+            // Redesigned FAB: solid gradient fill for visual weight on any theme
+            background: dragging
+              ? `linear-gradient(135deg, ${C.accent}, ${C.edge || C.accent})`
+              : `linear-gradient(135deg, ${C.accent}ee, ${C.edge || C.accent}cc)`,
+            border: `2px solid ${C.accent}`,
             boxShadow: dragging
-              ? `0 0 0 6px ${C.accent}30, 0 12px 36px rgba(0,0,0,0.55)`
-              : `0 0 0 3px ${C.accent}18, 0 4px 20px rgba(0,0,0,0.30)`,
-            color: C.accent,
+              ? `0 0 0 5px ${C.accent}28, 0 14px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15)`
+              : `0 0 0 3px ${C.accent}14, 0 6px 24px ${C.accent}35, inset 0 1px 0 rgba(255,255,255,0.12)`,
+            color: C.accentText,
             cursor: dragging ? "grabbing" : "grab",
             display: "flex", alignItems: "center", justifyContent: "center",
-            // Only transition non-position properties — position is handled by DOM mutation
+            flexDirection: "column", gap: 1,
             transition: dragging
-              ? "box-shadow .08s, border-color .08s"
-              : "box-shadow .2s, transform .2s, border-color .2s",
-            transform: dragging ? "scale(1.12)" : "scale(1)",
+              ? "box-shadow .08s, transform .08s"
+              : "box-shadow .2s, transform .2s",
+            transform: dragging ? "scale(1.14)" : "scale(1)",
             animation: shaking ? "grm-fab-shake .6s ease" : "none",
             WebkitTapHighlightColor: "transparent",
-            touchAction: "none",        // prevent browser scroll hijack during drag
+            touchAction: "none",
             outline: "none",
+            position: "relative",
+            overflow: "hidden",
           }}
         >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-            <circle cx="9"  cy="10" r=".8" fill="currentColor" stroke="none"/>
-            <circle cx="12" cy="10" r=".8" fill="currentColor" stroke="none"/>
-            <circle cx="15" cy="10" r=".8" fill="currentColor" stroke="none"/>
+          {/* Sheen overlay */}
+          <div style={{
+            position:"absolute", top:0, left:0, right:0, height:"50%",
+            background:"rgba(255,255,255,0.10)", borderRadius:"50% 50% 0 0",
+            pointerEvents:"none",
+          }}/>
+          {/* Jarvis sparkle icon */}
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ position:"relative", zIndex:1 }}>
+            <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z" fill="currentColor" stroke="none" opacity=".9"/>
+            <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/>
           </svg>
+          <span style={{ fontSize:6, fontWeight:900, letterSpacing:".06em",
+                          textTransform:"uppercase", opacity:.85, position:"relative", zIndex:1,
+                          lineHeight:1, marginTop:1 }}>
+            Jarvis
+          </span>
         </button>
       </div>
     </>
@@ -11232,7 +11434,6 @@ export default function GRMPro() {
       {mainFocusFixture && (
         <FullModelPage
           f={mainFocusFixture}
-          C={C}
           onBack={() => {
             setMainFocusFixture(null);
             // Return to wherever user came from
