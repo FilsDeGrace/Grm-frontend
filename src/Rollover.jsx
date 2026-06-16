@@ -1795,6 +1795,16 @@ function DashboardPage({ chain, pick, date, C, SERVER, userId, onRefresh, loadin
             {`${multiplier.toFixed(1)}×`}
           </div>
         )}
+        {completedSteps > 0 && (
+          <div style={{
+            position:"absolute", right:14, top:10,
+            fontSize:7, fontWeight:800, letterSpacing:".14em",
+            textTransform:"uppercase", color:"var(--muted)", opacity:.5,
+            fontFamily:"var(--font)",
+          }}>
+            Achieved
+          </div>
+        )}
 
         {!chain && (
           <>
