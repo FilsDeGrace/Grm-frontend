@@ -3,13 +3,55 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://b5218b993ebaa3.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://1383757a6cc277.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
+// Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
+// trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
+// sec-fetch-* + Origin are what a real browser XHR sends to same-origin APIs.
+// Rotating User-Agents are in SS_USER_AGENTS below — ssGet picks one per request.
 export const SS_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-  "Accept": "application/json",
-  "Referer": "https://www.sofascore.com/",
+  "Accept":           "application/json, text/plain, */*",
+  "Accept-Language":  "en-GB,en;q=0.9",
+  "Accept-Encoding":  "gzip, deflate, br",
+  "Referer":          "https://www.sofascore.com/",
+  "Origin":           "https://www.sofascore.com",
+  "x-requested-with": "XMLHttpRequest",
+  "sec-fetch-dest":   "empty",
+  "sec-fetch-mode":   "cors",
+  "sec-fetch-site":   "same-origin",
+  "Cache-Control":    "no-cache",
+  "Pragma":           "no-cache",
 };
+
+// Rotating User-Agent pool — mobile + desktop mix.
+// ssGet picks one per request using a round-robin index.
+// SofaScore tracks UA fingerprints — repeating the same UA across 700 requests
+// is as bad as a static header.
+export const SS_USER_AGENTS = [
+  // Chrome on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  // Chrome on Mac
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  // Safari on iPhone
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+  // Chrome on Android
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+  // Firefox on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  // Edge on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+  // Safari on iPad
+  "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+  // Chrome on Android (another model)
+  "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+];
+
+// Rotate UA every N requests — proactive not reactive
+export const SS_ROTATE_UA_EVERY = 15;
+
+// Scheduled-events response cache TTL (ms) — the bulk fixture list only needs
+// one fetch per session. 30 min prevents redundant re-fetches during testing.
+export const SS_SCHEDULED_TTL = 30 * 60_000;
 
 // ── Schema ───────────────────────────────────────────────────────────────
 export const SCHEMA_VERSION     = 15;
@@ -317,8 +359,9 @@ export const LEAGUE_TIERS = {
 
 // ── Request Delays ────────────────────────────────────────────────────────
 export const SS_TEAM_EVENTS_DELAY = 800;  // legacy — Stage 4 now uses TEAM_BATCH_DELAY (600ms) with 3-team batches
-export const SS_RETRY_DELAY       = 1500;
+export const SS_RETRY_DELAY       = 2500; // was 1500 — give SS more breathing room before retry
 export const SS_RETRIES           = 2;
+export const SS_JITTER_MAX        = 120;  // ms — max random jitter added per request inside batches
 
 // ── PARLEY BUILDER ────────────────────────────────────────────────────────────
 export const MAX_SAME_MARKET_PER_TICKET = 2; // max legs of same market in one ticket; user-tunable in UI

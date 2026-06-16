@@ -283,6 +283,79 @@ const CUSTOM_FAMILIES = [
   { id:"homeo05",label:"H O0.5" }, { id:"homeo15",label:"H O1.5" }, { id:"awayo05",label:"A O0.5" }, { id:"awayo15",label:"A O1.5" },
 ];
 
+// ── EXCLUDE SELECTION GROUPS ─────────────────────────────────────────────
+// Same two-tier shape as Custom Pick (market family → individual line/option),
+// but used for exclusion: each option gets its own toggle so a single line
+// (e.g. "Draw" or "Home or Away") can be excluded without nuking the whole family.
+const EXCLUDE_SELECTION_GROUPS = [
+  { label:"1X2", options:[
+      { id:"homewin", label:"Home Win" },
+      { id:"draw",    label:"Draw" },
+      { id:"awaywin", label:"Away Win" },
+  ]},
+  { label:"Double Chance", options:[
+      { id:"dc_1x", label:"Home or Draw" },
+      { id:"dc_x2", label:"Away or Draw" },
+      { id:"dc_12", label:"Home or Away" },
+  ]},
+  { label:"BTTS", options:[
+      { id:"bttsyes", label:"BTTS Yes" },
+      { id:"bttsno",  label:"BTTS No" },
+  ]},
+  { label:"Goals O/U", options:[
+      { id:"Over 1.5",  label:"Over 1.5" },
+      { id:"Over 2.5",  label:"Over 2.5" },
+      { id:"Over 3.5",  label:"Over 3.5" },
+      { id:"Under 2.5", label:"Under 2.5" },
+      { id:"Under 3.5", label:"Under 3.5" },
+      { id:"Under 4.5", label:"Under 4.5" },
+  ]},
+  { label:"Team Total", options:[
+      { id:"home_tt", label:"Home Team O/U" },
+      { id:"away_tt", label:"Away Team O/U" },
+  ]},
+];
+
+// Classifies a pick (label + market, optionally a fixture for team names) into one
+// of the granular ids above. Falls back to the raw market string for goals O/U
+// (those market values — "Over 2.5", "Under 3.5", etc — are already line-specific).
+function getExcludeSelectionId(pick, f) {
+  const label  = (pick?.label ?? pick?.pick ?? "").trim();
+  const market = pick?.market || "";
+  const pLow   = label.toLowerCase();
+  const home = f?.teams?.home, away = f?.teams?.away;
+
+  if (market === "1X2" || pLow === "draw" || /\bwin\b/.test(pLow)) {
+    if (pLow === "draw") return "draw";
+    if (home && label === `${home} Win`) return "homewin";
+    if (away && label === `${away} Win`) return "awaywin";
+    if (pLow.endsWith(" win")) {
+      const teamPart = label.slice(0, -4);
+      if (home && home.startsWith(teamPart)) return "homewin";
+      if (away && away.startsWith(teamPart)) return "awaywin";
+    }
+    return "homewin";
+  }
+  if (market === "DC" || /home or|away or|or away|or draw|^1x$|^x2$|^12$/.test(pLow)) {
+    if (pLow.includes("home or draw") || pLow.startsWith("home win or draw") || pLow === "1x") return "dc_1x";
+    if (pLow.includes("away or draw") || pLow.includes("draw or away") || pLow === "x2") return "dc_x2";
+    return "dc_12";
+  }
+  if (market === "BTTS" || /btts|both teams/.test(pLow)) {
+    return pLow.includes("no") ? "bttsno" : "bttsyes";
+  }
+  if (market === "TeamTotal" || /to score|o0\.5|o1\.5/i.test(label)) {
+    if (home && label.startsWith(home)) return "home_tt";
+    if (away && label.startsWith(away)) return "away_tt";
+    return "home_tt";
+  }
+  // Goals O/U — market is already "Over X.5" / "Under X.5"
+  if (market) return market;
+  const m = label.match(/(Over|Under)\s*([\d.]+)/i);
+  if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]}`;
+  return label || market;
+}
+
 export const STRATEGY_LABELS = {
   home_win:"Home Win", away_win:"Away Win", btts_value:"BTTS Value",
   home_goalfest:"H Goalfest", away_goalfest:"A Goalfest",
@@ -3731,7 +3804,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       for (const fam of ALL_FAMILY_IDS) {
         if (fam === family) continue; // already tried primary
         const p = getCustomPick(f, fam, C);
-        if (p && p.prob > 0 && !excludedMarkets.has(p.market) && !excludedMarkets.has(fam)) return p;
+        if (p && p.prob > 0 && !excludedMarkets.has(getExcludeSelectionId(p, f))) return p;
       }
       return null;
     };
@@ -3752,9 +3825,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .map(f => {
         const primaryPick = getCustomPick(f, family, C);
         if (!primaryPick || primaryPick.prob <= 0) return null;
-        // If primary pick's market is excluded, try fallback
+        // If primary pick's selection is excluded, try fallback
         const isExcluded = excludedMarkets.size > 0 &&
-          (excludedMarkets.has(primaryPick.market) || excludedMarkets.has(family));
+          excludedMarkets.has(getExcludeSelectionId(primaryPick, f));
         if (isExcluded) {
           const fallback = getFallbackPick(f);
           if (!fallback) return null; // no non-excluded alternative — hide
@@ -4183,26 +4256,26 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ fontSize:8,color:C.muted,marginBottom:6,lineHeight:1.4 }}>
                 Fixtures with excluded picks show their next-best market instead.
               </div>
-              <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
-                {[
-                  { id:"DC",        label:"Double Chance" },
-                  { id:"1X2",       label:"1X2 / Home Win" },
-                  { id:"BTTS",      label:"BTTS" },
-                  { id:"Over 2.5",  label:"Over 2.5" },
-                  { id:"Under 2.5", label:"Under 2.5" },
-                  { id:"Over 3.5",  label:"Over 3.5" },
-                  { id:"Under 3.5", label:"Under 3.5" },
-                  { id:"TeamTotal", label:"Team Total" },
-                ].map(({ id, label }) => {
-                  const on = excludedMarkets.has(id);
-                  return (
-                    <button key={id} onClick={() => toggleExcludeMarket(id)} className="gb"
-                      style={{ padding:"4px 10px", fontSize:9, textTransform:"none",
-                               ...(on ? chipOn(C.red) : chipOff) }}>
-                      {on ? `✕ ${label}` : label}
-                    </button>
-                  );
-                })}
+              <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                {EXCLUDE_SELECTION_GROUPS.map(group => (
+                  <div key={group.label}>
+                    <div style={{ fontSize:7,color:C.muted,letterSpacing:".08em",fontWeight:700,textTransform:"uppercase",marginBottom:4 }}>
+                      {group.label}
+                    </div>
+                    <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
+                      {group.options.map(({ id, label }) => {
+                        const on = excludedMarkets.has(id);
+                        return (
+                          <button key={id} onClick={() => toggleExcludeMarket(id)} className="gb"
+                            style={{ padding:"4px 10px", fontSize:9, textTransform:"none",
+                                     ...(on ? chipOn(C.red) : chipOff) }}>
+                            {on ? `✕ ${label}` : label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
@@ -5887,40 +5960,36 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
   const hasBookie = !!(bookieResult?.code);
 
   return (
-    <div ref={menuRef} style={{ position:"relative", display:"inline-flex", alignItems:"center", gap:5 }}>
-      {/* Label + code pill */}
-      {grmCode && (
-        <span style={{ fontSize:8, fontWeight:800, color:C.muted, letterSpacing:".06em",
-                       background:C.faint, border:`1px solid ${C.border}`, borderRadius:5,
-                       padding:"2px 7px", fontFamily:C.font }}>
-          {grmCode}
-        </span>
-      )}
-      {generating && (
-        <span style={{ fontSize:8, color:C.muted, fontFamily:C.font }}>…</span>
-      )}
-
-      {/* 3-dot trigger */}
-      <button onClick={handleOpen} title="Share options"
-        style={{ background:"transparent", border:`1px solid ${C.border}`, borderRadius:7,
-                 padding:"3px 7px", cursor:"pointer", display:"flex", alignItems:"center",
-                 gap:2, color:C.muted }}>
-        {[0,1,2].map(i => (
-          <span key={i} style={{ width:3, height:3, borderRadius:"50%",
-                                  background:open ? C.text : C.muted, display:"block",
-                                  transition:"background .15s" }} />
-        ))}
+    <div ref={menuRef} style={{ position:"relative", display:"inline-flex", alignItems:"center" }}>
+      {/* Share SVG button — replaces horizontal 3-dot */}
+      <button onClick={handleOpen} title="Share ticket"
+        style={{ background: open ? `${C.accent}15` : "transparent",
+                 border:`1px solid ${open ? C.accentBorder : C.border}`,
+                 borderRadius:7, padding:"4px 9px", cursor:"pointer",
+                 display:"flex", alignItems:"center", gap:5,
+                 color: open ? C.accent : C.muted,
+                 transition:"all .15s", fontFamily:C.font }}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
+          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+        </svg>
+        <span style={{ fontSize:8, fontWeight:700 }}>Share</span>
       </button>
 
-      {/* Popover */}
+      {/* Share popover */}
       {open && (
         <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
                       background:C.surface, border:`1px solid ${C.border}`, borderRadius:10,
-                      padding:"6px 0", minWidth:168, boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
+                      padding:"6px 0", minWidth:198, boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
 
           {/* GRM section */}
-          <div style={{ padding:"3px 12px 5px", fontSize:7, fontWeight:800, color:C.muted,
+          <div style={{ padding:"6px 12px 4px", fontSize:7, fontWeight:800, color:C.muted,
                         letterSpacing:".1em", textTransform:"uppercase" }}>GRM Link</div>
+          <div style={{ padding:"2px 12px 8px", fontSize:8, color:C.muted, lineHeight:1.5 }}>
+            Share this ticket with another GRM user.
+          </div>
 
           <button onClick={copyGrmCode}
             style={{ width:"100%", padding:"8px 14px", background:copied==="code"?`${C.green}10`:"transparent",
@@ -5947,15 +6016,15 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
             </span>
           </button>
 
-          {/* Bookie section — only if booked */}
-          {hasBookie && (
-            <>
-              <div style={{ margin:"5px 12px", borderTop:`1px solid ${C.border}` }} />
-              <div style={{ padding:"3px 12px 5px", fontSize:7, fontWeight:800, color:C.muted,
-                            letterSpacing:".1em", textTransform:"uppercase" }}>
-                {BOOKMAKERS.find(b=>b.id===bookieResult.bookieId)?.label || "Bookie"}
-              </div>
+          {/* Bookie section */}
+          <div style={{ margin:"5px 12px", borderTop:`1px solid ${C.border}` }} />
+          <div style={{ padding:"6px 12px 4px", fontSize:7, fontWeight:800, color:C.muted,
+                        letterSpacing:".1em", textTransform:"uppercase" }}>
+            {hasBookie ? (BOOKMAKERS.find(b=>b.id===bookieResult.bookieId)?.label || "Bookie") : "Bookie Code"}
+          </div>
 
+          {hasBookie ? (
+            <>
               <button onClick={copyBookieCode}
                 style={{ width:"100%", padding:"8px 14px", background:copied==="bcode"?`${C.gold}10`:"transparent",
                          border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
@@ -5967,7 +6036,6 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
                   {copied==="bcode" ? "Copied!" : "Copy Bookie Code"}
                 </span>
               </button>
-
               <button onClick={copyBookieLink}
                 style={{ width:"100%", padding:"8px 14px", background:copied==="blink"?`${C.gold}10`:"transparent",
                          border:"none", textAlign:"left", cursor:"pointer", fontFamily:C.font,
@@ -5981,6 +6049,105 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
                 </span>
               </button>
             </>
+          ) : (
+            <div style={{ padding:"6px 14px 10px", fontSize:9, color:C.muted, lineHeight:1.6 }}>
+              Book this ticket first — then tap Share to copy your booking code or link.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── EXCLUDE MARKETS PANEL ────────────────────────────────────────────────
+// Collapsible panel in the Custom Parley tab. Engine pool markets only —
+// no DNB or Asian Handicap which don't appear in engine output.
+// Chevron + active count make it obvious it's tappable.
+function ExcludeMarketsPanel({ excluded, toggle, clear }) {
+  const [open, setOpen] = useState(false);
+  const activeCount = excluded.size;
+
+  return (
+    <div style={{ marginBottom:12, borderRadius:10,
+      border:`1px solid ${activeCount > 0 ? C.red+"50" : C.border}`,
+      background: activeCount > 0 ? `${C.red}05` : C.surface,
+      overflow:"hidden", transition:"border-color .15s" }}>
+
+      {/* Header — always visible, tap to expand */}
+      <button onClick={() => setOpen(o => !o)}
+        style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between",
+          padding:"10px 12px", background:"transparent", border:"none",
+          cursor:"pointer", fontFamily:C.font }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={activeCount > 0 ? C.red : C.muted}
+            strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="8" y1="12" x2="16" y2="12"/>
+          </svg>
+          <span style={{ fontSize:9, fontWeight:700, color: activeCount > 0 ? C.red : C.text }}>
+            Exclude Markets
+          </span>
+          {activeCount > 0 && (
+            <span style={{ fontSize:7, fontWeight:800, color:C.red,
+              background:`${C.red}15`, border:`1px solid ${C.red}30`,
+              borderRadius:4, padding:"1px 6px" }}>
+              {activeCount} active
+            </span>
+          )}
+        </div>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+          strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: open ? "rotate(180deg)" : "none", transition:"transform .2s", flexShrink:0 }}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      {/* Expandable content */}
+      {open && (
+        <div style={{ padding:"0 12px 12px" }}>
+          <div style={{ fontSize:8, color:C.muted, marginBottom:8, lineHeight:1.5 }}>
+            Picks using excluded selections won't be used when building tickets.
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {EXCLUDE_SELECTION_GROUPS.map(group => (
+              <div key={group.label}>
+                <div style={{ fontSize:7, color:C.muted, letterSpacing:".08em", fontWeight:700, textTransform:"uppercase", marginBottom:4 }}>
+                  {group.label}
+                </div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {group.options.map(({ id, label }) => {
+                    const on = excluded.has(id);
+                    return (
+                      <button key={id} onClick={() => toggle(id)}
+                        style={{ padding:"5px 12px", borderRadius:7, cursor:"pointer",
+                          fontFamily:C.font, fontSize:9, fontWeight: on ? 700 : 500,
+                          background: on ? `${C.red}15` : "transparent",
+                          color: on ? C.red : C.muted,
+                          border:`1px solid ${on ? C.red+"50" : C.border}`,
+                          display:"flex", alignItems:"center", gap:5,
+                          transition:"all .12s" }}>
+                        {on && (
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                          </svg>
+                        )}
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+          {activeCount > 0 && (
+            <button onClick={clear}
+              style={{ marginTop:8, fontSize:8, color:C.muted, background:"transparent",
+                border:`1px solid ${C.border}`, borderRadius:6, padding:"3px 10px",
+                cursor:"pointer", fontFamily:C.font }}>
+              Clear all
+            </button>
           )}
         </div>
       )}
@@ -6079,8 +6246,9 @@ function GrmLoadPanel({ onLoaded }) {
 // "Invalid hook call" — React rules require hooks at the top of a component.
 // Extracted as a named component so useState is legal here.
 function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remixing, accentBdr }) {
-  const [addLegsOpen, setAddLegsOpen] = useState(false);
-  const [selectedLegs, setSelectedLegs] = useState(new Set());
+  const [addLegsOpen,      setAddLegsOpen]      = useState(false);
+  const [makeChangesOpen,  setMakeChangesOpen]  = useState(false);
+  const [selectedLegs,     setSelectedLegs]     = useState(new Set());
 
   const toggleLegSelect = (id) => setSelectedLegs(prev => {
     const next = new Set(prev);
@@ -6092,10 +6260,10 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
     candidates.filter(({ f }) => selectedLegs.has(f.id))
               .forEach(({ f, pick }) => onAddLegs.addLeg(f, pick));
     setAddLegsOpen(false);
+    setMakeChangesOpen(false);
     setSelectedLegs(new Set());
   };
 
-  // Build add-legs candidates here so we only compute when panel is open
   const candidates = addLegsOpen && onAddLegs ? (() => {
     const ticketIds = new Set((ticket.legs||[]).map(l => l.fixtureId));
     return (onAddLegs.fixtures || [])
@@ -6115,115 +6283,219 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   })() : [];
 
   const noneSelected = selectedLegs.size === 0;
+  const hasMakeChanges = onEditDraft || onAddLegs;
 
   return (
     <>
-      <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:addLegsOpen?8:12,paddingBottom:10,borderBottom:addLegsOpen?`1px solid ${accentBdr}`:undefined }}>
-        {onEditDraft && (
-          <button onClick={() => onEditDraft(ticket.legs||[])} className="gb-ghost"
-            style={{ padding:"5px 12px",fontSize:10,color:C.accent,borderColor:`${C.accent}40`,
-                     display:"flex",alignItems:"center",gap:5 }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      {/* Action row */}
+      <div style={{ display:"flex", gap:6, alignItems:"center",
+        marginBottom: addLegsOpen ? 8 : 12,
+        paddingBottom:10,
+        borderBottom: addLegsOpen ? `1px solid ${accentBdr}` : undefined }}>
+
+        {/* Make Changes — collapses Edit + Add More Legs */}
+        {hasMakeChanges && (
+          <button onClick={() => setMakeChangesOpen(true)}
+            style={{ padding:"5px 11px", fontSize:10, fontWeight:700,
+                     background:"transparent", border:`1px solid ${C.accent}40`,
+                     borderRadius:7, color:C.accent, cursor:"pointer",
+                     fontFamily:C.font, display:"flex", alignItems:"center", gap:5 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
             </svg>
-            Edit
+            Make Changes
           </button>
         )}
-        {onAddLegs && (
-          <button onClick={() => { setAddLegsOpen(v => !v); setSelectedLegs(new Set()); }} className="gb-ghost"
-            style={{ padding:"4px 10px",fontSize:9,color:addLegsOpen?C.green:C.gold,
-                     borderColor:`${addLegsOpen?C.green:C.gold}40`,
-                     display:"flex",alignItems:"center",gap:4 }}>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            {addLegsOpen ? "Done" : "Add more legs"}
-          </button>
-        )}
+
+        {/* Remix — stays independent */}
         {onRemix && (
-          <button onClick={remixing ? undefined : onRemix} className="gb-ghost"
-            style={{ padding:"5px 12px",fontSize:10,color:remixing?C.muted:C.radar,
-                     borderColor:`${C.radar}35`,opacity:remixing?0.6:1,
-                     cursor:remixing?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:5 }}>
+          <button onClick={remixing ? undefined : onRemix}
+            style={{ padding:"5px 11px", fontSize:10, fontWeight:700,
+                     background:"transparent", border:`1px solid ${C.radar}35`,
+                     borderRadius:7, color: remixing ? C.muted : C.radar,
+                     cursor: remixing ? "not-allowed" : "pointer", opacity: remixing ? 0.6 : 1,
+                     fontFamily:C.font, display:"flex", alignItems:"center", gap:5 }}>
             {remixing
-              ? <span className="pu">Remixing…</span>
+              ? <span className="pu" style={{ fontSize:9 }}>Remixing…</span>
               : <>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
                     <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
                   </svg>
-                  {`Remix${ticket._remixed?" ✓":""}`}
+                  Remix
                 </>
             }
           </button>
         )}
+
         <div style={{ flex:1 }}/>
+
+        {/* Remove — SVG X */}
         <button onClick={onRemove}
-          style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 2px",lineHeight:1 }}>✕</button>
+          style={{ background:"none", border:"none", color:C.muted, cursor:"pointer",
+                   padding:4, display:"flex", alignItems:"center" }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
 
-      {/* Add more legs — checkbox multi-select panel */}
-      {addLegsOpen && onAddLegs && (
-        <div style={{ marginBottom:12,padding:"10px 12px",background:`${C.gold}07`,
-                      border:`1px solid ${C.gold}25`,borderRadius:8 }}>
-          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
-            <div style={{ fontSize:8,fontWeight:800,color:C.gold,letterSpacing:".1em",textTransform:"uppercase" }}>
-              Select legs to add
-            </div>
-            {!noneSelected && (
-              <button onClick={() => confirmAddLegs(candidates)}
-                style={{ padding:"4px 14px",fontSize:9,fontWeight:800,background:C.gold,
-                         color:C.bg,border:"none",borderRadius:6,cursor:"pointer",fontFamily:C.font }}>
-                Add {selectedLegs.size} leg{selectedLegs.size !== 1 ? "s" : ""}
-              </button>
+      {/* Make Changes — bottom sheet */}
+      {makeChangesOpen && (
+        <div style={{ position:"fixed", inset:0, zIndex:9000,
+                      background:"rgba(0,0,0,.55)", backdropFilter:"blur(4px)",
+                      display:"flex", alignItems:"flex-end" }}
+          onClick={() => { setMakeChangesOpen(false); setAddLegsOpen(false); setSelectedLegs(new Set()); }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width:"100%", background:C.surface,
+            borderRadius:"20px 20px 0 0",
+            border:`1px solid ${C.border}`,
+            padding:"20px 20px 36px",
+            fontFamily:C.font,
+            boxShadow:"0 -8px 32px rgba(0,0,0,.28)",
+          }}>
+            {/* Handle */}
+            <div style={{ width:36, height:4, borderRadius:2, background:C.faint, margin:"0 auto 18px" }} />
+
+            {!addLegsOpen ? (
+              <>
+                <div style={{ fontSize:12, fontWeight:800, color:C.text, marginBottom:4 }}>Make Changes</div>
+                <div style={{ fontSize:9, color:C.muted, marginBottom:18, lineHeight:1.5 }}>
+                  Edit legs or add more matches to this ticket.
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {onEditDraft && (
+                    <button onClick={() => { onEditDraft(ticket.legs||[]); setMakeChangesOpen(false); }}
+                      style={{ width:"100%", padding:"13px 16px", borderRadius:12, cursor:"pointer",
+                               background:C.surface, border:`1px solid ${C.border}`,
+                               fontFamily:C.font, display:"flex", alignItems:"center", gap:12,
+                               transition:"background .12s" }}
+                      onMouseEnter={e => e.currentTarget.style.background = C.faint}
+                      onMouseLeave={e => e.currentTarget.style.background = C.surface}>
+                      <div style={{ width:36, height:36, borderRadius:10,
+                        background:`${C.accent}12`, border:`1px solid ${C.accent}25`,
+                        display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={C.accent}
+                          strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                        </svg>
+                      </div>
+                      <div style={{ textAlign:"left" }}>
+                        <div style={{ fontSize:12, fontWeight:800, color:C.text }}>Edit Legs</div>
+                        <div style={{ fontSize:9, color:C.muted, marginTop:2 }}>
+                          Send legs back to your builder to swap or remove picks
+                        </div>
+                      </div>
+                    </button>
+                  )}
+                  {onAddLegs && (
+                    <button onClick={() => setAddLegsOpen(true)}
+                      style={{ width:"100%", padding:"13px 16px", borderRadius:12, cursor:"pointer",
+                               background:C.surface, border:`1px solid ${C.border}`,
+                               fontFamily:C.font, display:"flex", alignItems:"center", gap:12,
+                               transition:"background .12s" }}
+                      onMouseEnter={e => e.currentTarget.style.background = C.faint}
+                      onMouseLeave={e => e.currentTarget.style.background = C.surface}>
+                      <div style={{ width:36, height:36, borderRadius:10,
+                        background:`${C.gold}12`, border:`1px solid ${C.gold}25`,
+                        display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={C.gold}
+                          strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                      </div>
+                      <div style={{ textAlign:"left" }}>
+                        <div style={{ fontSize:12, fontWeight:800, color:C.text }}>Add More Legs</div>
+                        <div style={{ fontSize:9, color:C.muted, marginTop:2 }}>
+                          Pick additional matches from today's qualified pool
+                        </div>
+                      </div>
+                    </button>
+                  )}
+                  <button onClick={() => setMakeChangesOpen(false)}
+                    style={{ width:"100%", padding:"11px 0", borderRadius:10, cursor:"pointer",
+                             background:"transparent", border:`1px solid ${C.border}`,
+                             fontFamily:C.font, fontSize:11, color:C.muted }}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              /* Add legs picker — shown after tapping Add More Legs */
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
+                  <button onClick={() => { setAddLegsOpen(false); setSelectedLegs(new Set()); }}
+                    style={{ background:"transparent", border:"none", color:C.muted, cursor:"pointer",
+                             padding:4, display:"flex", alignItems:"center" }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+                    </svg>
+                  </button>
+                  <div>
+                    <div style={{ fontSize:12, fontWeight:800, color:C.text }}>Add More Legs</div>
+                    <div style={{ fontSize:8, color:C.muted }}>Select from today's qualified pool</div>
+                  </div>
+                  {!noneSelected && (
+                    <button onClick={() => confirmAddLegs(candidates)}
+                      style={{ marginLeft:"auto", padding:"6px 14px", fontSize:10, fontWeight:800,
+                               background:C.gold, color:C.bg, border:"none", borderRadius:8,
+                               cursor:"pointer", fontFamily:C.font }}>
+                      Add {selectedLegs.size}
+                    </button>
+                  )}
+                </div>
+                {candidates.length === 0 ? (
+                  <div style={{ padding:"24px 0", textAlign:"center", fontSize:9, color:C.muted }}>
+                    No qualifying fixtures available to add.
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:5,
+                    maxHeight:"40vh", overflowY:"auto" }}>
+                    {candidates.map(({ f, pick }) => {
+                      const checked = selectedLegs.has(f.id);
+                      return (
+                        <div key={f.id} onClick={() => toggleLegSelect(f.id)}
+                          style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px",
+                                   background: checked ? `${C.gold}12` : C.faint,
+                                   border:`1px solid ${checked ? C.gold : C.border}`,
+                                   borderRadius:8, cursor:"pointer", transition:"all .12s" }}>
+                          <div style={{ flexShrink:0, width:16, height:16, borderRadius:4,
+                                        border:`1.5px solid ${checked ? C.gold : C.faint}`,
+                                        background: checked ? C.gold : "transparent",
+                                        display:"flex", alignItems:"center", justifyContent:"center" }}>
+                            {checked && (
+                              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={C.bg}
+                                strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12"/>
+                              </svg>
+                            )}
+                          </div>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:9, fontWeight:700, color:C.text,
+                              overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                              {f.teams.home} vs {f.teams.away}
+                            </div>
+                            <div style={{ fontSize:8, color:pick.color||C.gold, marginTop:1 }}>
+                              {pick.pick} · {pick.odds ? `@${parseFloat(pick.odds).toFixed(2)}` : ""}
+                            </div>
+                          </div>
+                          <div style={{ fontSize:11, fontWeight:800, color:C.gold, flexShrink:0 }}>
+                            {Math.round(pick.prob)}%
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
             )}
           </div>
-          {candidates.length === 0 ? (
-            <div style={{ fontSize:9,color:C.muted }}>No qualifying fixtures available to add.</div>
-          ) : (
-            <div style={{ display:"flex",flexDirection:"column",gap:4 }}>
-              {candidates.map(({ f, pick }) => {
-                const checked = selectedLegs.has(f.id);
-                return (
-                  <div key={f.id} onClick={() => toggleLegSelect(f.id)}
-                    style={{ display:"flex",alignItems:"center",gap:8,padding:"7px 10px",
-                             background: checked ? `${C.gold}12` : C.surface,
-                             border:`1px solid ${checked ? C.gold : C.border}`,
-                             borderRadius:6,cursor:"pointer",transition:"all .12s" }}>
-                    <div style={{ flexShrink:0,width:14,height:14,borderRadius:3,
-                                  border:`1.5px solid ${checked ? C.gold : C.faint}`,
-                                  background: checked ? C.gold : "transparent",
-                                  display:"flex",alignItems:"center",justifyContent:"center" }}>
-                      {checked && (
-                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={C.bg} strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="20 6 9 17 4 12"/>
-                        </svg>
-                      )}
-                    </div>
-                    <div style={{ flex:1,minWidth:0 }}>
-                      <div style={{ fontSize:9,fontWeight:700,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-                        {f.teams.home} vs {f.teams.away}
-                      </div>
-                      <div style={{ fontSize:8,color:pick.color||C.gold,marginTop:1 }}>
-                        {pick.pick} · {pick.odds ? `@${parseFloat(pick.odds).toFixed(2)}` : ""}
-                      </div>
-                    </div>
-                    <div style={{ fontSize:11,fontWeight:800,color:C.gold,flexShrink:0 }}>
-                      {Math.round(pick.prob)}%
-                    </div>
-                  </div>
-                );
-              })}
-              {!noneSelected && (
-                <button onClick={() => confirmAddLegs(candidates)}
-                  style={{ marginTop:4,padding:"7px",fontSize:10,fontWeight:800,background:C.gold,
-                           color:C.bg,border:"none",borderRadius:6,cursor:"pointer",fontFamily:C.font,width:"100%" }}>
-                  OK — Add {selectedLegs.size} leg{selectedLegs.size !== 1 ? "s" : ""}
-                </button>
-              )}
-            </div>
-          )}
         </div>
       )}
     </>
@@ -6302,11 +6574,11 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
           <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
-          {/* P13-FIX: Correlation risk badge */}
+          {/* P13-FIX: Correlation risk badge — renamed "Risk" for clarity */}
           {hasCorr && (
             <div style={{ position:"relative" }}>
               <button onClick={() => setCorrOpen(o => !o)}
-                title="Correlation risk detected"
+                title="Tap to see which legs share a match or league"
                 style={{ background:`${C.amber}15`, border:`1px solid ${C.amber}40`,
                          borderRadius:7, padding:"3px 8px", cursor:"pointer",
                          display:"flex", alignItems:"center", gap:4, fontFamily:C.font }}>
@@ -6315,27 +6587,33 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                   <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
                   <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                 </svg>
-                <span style={{ fontSize:8, fontWeight:800, color:C.amber }}>Corr</span>
+                <span style={{ fontSize:8, fontWeight:800, color:C.amber }}>Risk</span>
               </button>
               {corrOpen && (
                 <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
                               background:C.surface, border:`1px solid ${C.amber}40`,
-                              borderRadius:10, padding:"10px 14px", minWidth:200,
+                              borderRadius:10, padding:"10px 14px", minWidth:210,
                               boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
                   <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
-                                textTransform:"uppercase", marginBottom:8 }}>
-                    Correlation Risk
+                                textTransform:"uppercase", marginBottom:6 }}>
+                    Leg Risk — what this means
+                  </div>
+                  <div style={{ fontSize:9, color:C.muted, lineHeight:1.6, marginBottom:8 }}>
+                    Some legs in this ticket share a match or league. When legs are connected, one outcome can cancel another — parlay math assumes they're independent.
                   </div>
                   {corrRisks.map((r, i) => (
-                    <div key={i} style={{ fontSize:9, color:C.text, marginBottom:5, lineHeight:1.5 }}>
+                    <div key={i} style={{ fontSize:9, color:C.text, marginBottom:5, lineHeight:1.5,
+                      padding:"5px 8px", background:`${C.amber}08`, borderRadius:6,
+                      border:`1px solid ${C.amber}20` }}>
                       {r.type === "match"
-                        ? <><span style={{ color:C.red, fontWeight:700 }}>Same match</span>: {r.count} legs from <em>{r.label}</em> — outcomes are directly linked.</>
-                        : <><span style={{ color:C.amber, fontWeight:700 }}>Same league</span>: {r.count} legs from <em>{r.label}</em> — results may move together.</>
+                        ? <><span style={{ color:C.red, fontWeight:700 }}>Same match</span> — {r.count} legs from <em>{r.label}</em>. Their outcomes are directly linked.</>
+                        : <><span style={{ color:C.amber, fontWeight:700 }}>Same league</span> — {r.count} legs from <em>{r.label}</em>. Results can move together.</>
                       }
                     </div>
                   ))}
-                  <div style={{ fontSize:8, color:C.muted, marginTop:6, lineHeight:1.5, borderTop:`1px solid ${C.border}`, paddingTop:6 }}>
-                    Correlated legs reduce the independence assumption that makes parlay math work.
+                  <div style={{ fontSize:8, color:C.muted, marginTop:6, lineHeight:1.5,
+                    borderTop:`1px solid ${C.border}`, paddingTop:6 }}>
+                    Not a block — just a flag. You can still build and book the ticket.
                   </div>
                 </div>
               )}
@@ -7341,12 +7619,27 @@ function PoolAccordion({ data, C }) {
   );
 }
 
-// ── POOL PERFORMANCE TAB ─────────────────────────────────────────────────
+// ── POOL PERFORMANCE TAB — N40 redesign ──────────────────────────────────
+// Sub-tab architecture: Overview · Markets · History · Parleys
+// All data fetched once at top level and passed down — sub-tab switches never re-fetch.
+// Parleys sub-tab: unified Jarvis engine parleys + Rollover chain steps (N33/N39).
 function PoolPerformanceTab({ serverUrl }) {
-  const [data, setData]         = useState(null);
-  const [loading, setLoading]   = useState(true);
-  const [days, setDays]         = useState(30);
+  const [data,           setData]          = useState(null);
+  const [loading,        setLoading]       = useState(true);
+  const [days,           setDays]          = useState(30);
+  const [perfTab,        setPerfTab]       = useState("overview");
+  const [parlaysData,    setParlaysData]   = useState(null);
+  const [parlaysLoading, setParlaysLoading] = useState(false);
+  const parlaysFetchedDays = useRef(null);
 
+  // Read userId the same way Rollover does — localStorage → sessionStorage
+  const userId = (() => {
+    try { const id = localStorage.getItem("rvl_user_uuid"); if (id && id.length >= 10 && id !== "anon") return id; } catch {}
+    try { const id = sessionStorage.getItem("rvl_user_uuid_session"); if (id && id.length >= 10) return id; } catch {}
+    return null;
+  })();
+
+  // Fetch pool performance when days changes
   useEffect(() => {
     setLoading(true);
     Promise.all([
@@ -7354,163 +7647,1137 @@ function PoolPerformanceTab({ serverUrl }) {
       fetch(`${serverUrl}/api/pool/performance/enhanced?days=${days}`).then(r => r.json()).catch(() => null),
     ]).then(([base, enhanced]) => {
       if (!base || base.empty) { setData(null); setLoading(false); return; }
-
-      // Build a map of enhanced picks keyed by date.
-      // enhanced.dailyTrend only exists for dates that have a results file —
-      // dates without results are absent entirely, not present with empty picks.
-      // The old merge used picksMap.get(d.date) || [] which silently zeroed out
-      // the per-pick list for any pool-only date (no results file yet).
-      const enhancedByDate = new Map(
-        (enhanced?.dailyTrend || []).map(d => [d.date, d])
-      );
-
-      // Walk every date from the base (pool) endpoint — this is the authoritative
-      // set of dates where picks were made. For each day:
-      //   • Keep base stats (total/wins/rate) — these are pool-scored, no double-count
-      //   • Overlay picks[] from enhanced if available (richer per-pick detail)
-      //   • If enhanced also has readTotal/readWins for that day, carry those over
+      const enhancedByDate = new Map((enhanced?.dailyTrend || []).map(d => [d.date, d]));
       const mergedTrend = (base.dailyTrend || []).map(d => {
         const enh = enhancedByDate.get(d.date);
         return {
           ...d,
-          picks:      enh?.picks      || d.picks      || [],
-          readTotal:  enh?.total      ?? d.readTotal   ?? d.total,
-          readWins:   enh?.wins       ?? d.readWins    ?? d.wins,
+          picks:     enh?.picks     || d.picks     || [],
+          readTotal: enh?.total     ?? d.readTotal  ?? d.total,
+          readWins:  enh?.wins      ?? d.readWins   ?? d.wins,
         };
       });
-
-      // Append any enhanced dates that have no corresponding base entry
-      // (e.g. days where results arrived but the pool file was missing).
       (enhanced?.dailyTrend || []).forEach(enh => {
-        if (!mergedTrend.find(d => d.date === enh.date)) {
+        if (!mergedTrend.find(d => d.date === enh.date))
           mergedTrend.push({ ...enh, readTotal: enh.total, readWins: enh.wins });
-        }
       });
-
       mergedTrend.sort((a, b) => a.date.localeCompare(b.date));
       setData({ ...base, dailyTrend: mergedTrend });
       setLoading(false);
     });
   }, [days]);
 
-  if (loading) return <div style={{ padding:40,textAlign:"center",color:C.text,fontSize:10 }}>Loading performance data…</div>;
+  // Fetch unified parlay performance — lazily on first Parleys visit, re-fetch when days changes
+  useEffect(() => {
+    if (perfTab !== "parleys") return;
+    if (parlaysFetchedDays.current === days) return;
+    parlaysFetchedDays.current = days;
+    setParlaysLoading(true);
+    const uidParam = userId ? `&userId=${encodeURIComponent(userId)}` : "";
+    fetch(`${serverUrl}/api/performance/parleys?days=${days}${uidParam}`)
+      .then(r => r.json())
+      .catch(() => null)
+      .then(d => { setParlaysData(d); setParlaysLoading(false); });
+  }, [perfTab, days]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Sub-tab strip ─────────────────────────────────────────────────────────
+  const PERF_TABS = [
+    { id:"overview", label:"Overview" },
+    { id:"markets",  label:"Markets"  },
+    { id:"history",  label:"History"  },
+    { id:"parleys",  label:"Parleys"  },
+    { id:"analyst",  label:"Analyst"  },
+  ];
 
   return (
-    <div style={{ paddingBottom:40 }}>
+    <div style={{ paddingBottom:48 }}>
 
-      {!data && (
-        <div style={{ padding:40,textAlign:"center",color:C.text,opacity:.3,fontSize:10 }}>
-          No scored pools yet.<br/>
-          <span style={{ fontSize:8,marginTop:8,display:"block",color:C.text,opacity:.45 }}>
-            Pool data is saved each time you build a ticket. After results come in the engine auto-scores each pick.
-          </span>
+      {/* Sticky header — sub-tab strip + day range selector */}
+      <div style={{
+        position:"sticky", top:0, zIndex:10,
+        background: `color-mix(in srgb, ${C.bg} 96%, transparent)`,
+        backdropFilter:"blur(16px)", WebkitBackdropFilter:"blur(16px)",
+        borderBottom:`1px solid ${C.border}`,
+        padding:"10px 16px 0",
+        marginBottom:14,
+      }}>
+        {/* Sub-tabs */}
+        <div style={{ display:"flex", gap:0, marginBottom:10 }}>
+          {PERF_TABS.map(t => {
+            const on = perfTab === t.id;
+            return (
+              <button key={t.id} onClick={() => setPerfTab(t.id)}
+                style={{
+                  flex:1, padding:"7px 4px", border:"none", background:"transparent",
+                  fontFamily:C.font, fontSize:10, fontWeight: on ? 800 : 500,
+                  color: on ? C.accent : C.muted,
+                  borderBottom:`2px solid ${on ? C.accent : "transparent"}`,
+                  cursor:"pointer", transition:"all .15s",
+                  WebkitTapHighlightColor:"transparent",
+                }}>
+                {t.label}
+              </button>
+            );
+          })}
         </div>
-      )}
-
-      {data && (<>
-      {/* Day selector */}
-      <div style={{ display:"flex",gap:6,marginBottom:16 }}>
-        {[7,14,30,60].map(d => (
-          <button key={d} onClick={() => setDays(d)} className="gb"
-            style={{ padding:"4px 12px",fontSize:9,background:days===d?C.edge:"transparent",color:days===d?C.accentText:C.muted,border:`1px solid ${days===d?C.edge:C.faint}` }}>
-            {d}d
-          </button>
-        ))}
+        {/* Day range */}
+        <div style={{ display:"flex", gap:5, paddingBottom:10 }}>
+          {[7,14,30,60].map(d => (
+            <button key={d} onClick={() => setDays(d)} className="gb"
+              style={{
+                padding:"3px 11px", fontSize:9,
+                background: days===d ? C.accent : "transparent",
+                color:      days===d ? C.accentText : C.muted,
+                border:`1px solid ${days===d ? C.accent : C.faint}`,
+                borderRadius:6,
+              }}>
+              {d}d
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Overall */}
-      {data.overall && (
-        <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          {/* Engine Pool — picks that passed all quality thresholds */}
-          <div style={{ fontSize:7,color:C.edge,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:2 }}>Engine Pool · {data.period}</div>
-          <div style={{ fontSize:7,color:C.muted,marginBottom:8 }}>Picks that cleared all confidence + data thresholds</div>
-          <div style={{ display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:8 }}>
-            {[["Picks",data.overall.total],["Wins",data.overall.wins],["Hit Rate",`${data.overall.rate}%`],["Avg Odds",data.overall.avgOdds != null ? data.overall.avgOdds.toFixed(2)+"×" : "—"]].map(([l,v])=>(
-              <div key={l} style={{ textAlign:"center" }}>
-                <div style={{ fontSize:16,fontWeight:800,color:parseFloat(v)>60?C.green:parseFloat(v)<45?C.red:C.gold }}>{v}</div>
-                <div style={{ fontSize:7,color:C.text,marginTop:2 }}>{l}</div>
-              </div>
-            ))}
-          </div>
-          {/* Decay weighting notice — rate is decay-weighted (14d half-life), counts are raw */}
-          <div style={{ fontSize:7,color:C.muted,marginBottom:14,lineHeight:1.5 }}>
-            Hit Rate is decay-weighted (14-day half-life) — recent results count more than older ones.
-            Picks and Wins are raw counts. A pick from 28 days ago contributes ~25% of a pick from today.
-          </div>
-          {/* All-Read Overall — summed from daily pick report */}
-          {(() => {
-            const trend = data.dailyTrend || [];
-            const allReadTotal = trend.reduce((s, d) => s + (d.readTotal || d.total || 0), 0);
-            const allReadWins  = trend.reduce((s, d) => s + (d.readWins  || d.wins  || 0), 0);
-            const allReadRate  = allReadTotal ? Math.round(allReadWins / allReadTotal * 100) : 0;
-            if (!allReadTotal) return null;
-            return (
-              <div style={{ borderTop:`1px solid ${C.border}`,paddingTop:10 }}>
-                <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:800,marginBottom:2 }}>All Read Picks · same period</div>
-                <div style={{ fontSize:7,color:C.muted,marginBottom:8 }}>Every fixture with any model pick (includes low-confidence)</div>
-                <div style={{ display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8 }}>
-                  {[["Picks",allReadTotal],["Wins",allReadWins],["Hit Rate",`${allReadRate}%`]].map(([l,v])=>(
+      {/* ── OVERVIEW ────────────────────────────────────────────────────── */}
+      {perfTab === "overview" && (
+        <div style={{ padding:"0 14px" }}>
+          {loading && (
+            <div style={{ padding:40, textAlign:"center", color:C.muted, fontSize:10 }}>Loading…</div>
+          )}
+          {!loading && !data && (
+            <div style={{ padding:40, textAlign:"center", color:C.text, opacity:.3, fontSize:10 }}>
+              No scored pools yet.
+              <span style={{ display:"block", fontSize:8, marginTop:8, opacity:.6 }}>
+                Build a ticket first — pool data is saved automatically. After results come in the engine scores each pick.
+              </span>
+            </div>
+          )}
+          {!loading && data?.overall && (
+            <>
+              {/* Engine Pool headline stats */}
+              <div className="gc" style={{ padding:16, marginBottom:12 }}>
+                <div style={{ fontSize:7, color:C.edge, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:1 }}>
+                  Engine Pool · {data.period}
+                </div>
+                <div style={{ fontSize:7, color:C.muted, marginBottom:14 }}>
+                  Picks that cleared all confidence + data thresholds
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom:14 }}>
+                  {[
+                    ["Picks",    data.overall.total,                                        C.text],
+                    ["Wins",     data.overall.wins,                                         C.green],
+                    ["Hit Rate", `${data.overall.rate}%`,                                   data.overall.rate>=65?C.green:data.overall.rate>=50?C.gold:C.red],
+                    ["Avg Odds", data.overall.avgOdds!=null?`${data.overall.avgOdds.toFixed(2)}×`:"—", C.gold],
+                  ].map(([l, v, col]) => (
                     <div key={l} style={{ textAlign:"center" }}>
-                      <div style={{ fontSize:14,fontWeight:800,color:parseFloat(v)>60?C.green:parseFloat(v)<45?C.red:C.gold }}>{v}</div>
-                      <div style={{ fontSize:7,color:C.text,marginTop:2 }}>{l}</div>
+                      <div style={{ fontSize:20, fontWeight:900, color:col, lineHeight:1 }}>{v}</div>
+                      <div style={{ fontSize:7, color:C.muted, marginTop:4, letterSpacing:".06em", textTransform:"uppercase" }}>{l}</div>
                     </div>
                   ))}
                 </div>
+                <div style={{ fontSize:7, color:C.muted, lineHeight:1.6, borderTop:`1px solid ${C.border}`, paddingTop:10 }}>
+                  Hit Rate is decay-weighted (14-day half-life) — recent results count more.
+                  Picks and Wins are raw counts.
+                </div>
               </div>
+
+              {/* All-Read summary */}
+              {(() => {
+                const trend        = data.dailyTrend || [];
+                const allReadTotal = trend.reduce((s, d) => s + (d.readTotal || d.total || 0), 0);
+                const allReadWins  = trend.reduce((s, d) => s + (d.readWins  || d.wins  || 0), 0);
+                const allReadRate  = allReadTotal ? Math.round(allReadWins / allReadTotal * 100) : 0;
+                if (!allReadTotal) return null;
+                const col = allReadRate >= 65 ? C.green : allReadRate >= 50 ? C.gold : C.red;
+                return (
+                  <div className="gc" style={{ padding:16, marginBottom:12 }}>
+                    <div style={{ fontSize:7, color:C.text, opacity:.55, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:1 }}>
+                      All Read Picks · {data.period}
+                    </div>
+                    <div style={{ fontSize:7, color:C.muted, marginBottom:14 }}>
+                      Every fixture with any model pick (includes low-confidence signals)
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+                      {[["Picks", allReadTotal, C.text], ["Wins", allReadWins, C.green], ["Hit Rate", `${allReadRate}%`, col]].map(([l, v, c]) => (
+                        <div key={l} style={{ textAlign:"center" }}>
+                          <div style={{ fontSize:18, fontWeight:900, color:c, lineHeight:1 }}>{v}</div>
+                          <div style={{ fontSize:7, color:C.muted, marginTop:4, letterSpacing:".06em", textTransform:"uppercase" }}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Mini sparkline — last 14 days */}
+              {data.dailyTrend?.length > 0 && (
+                <div className="gc" style={{ padding:14, marginBottom:12 }}>
+                  <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700, marginBottom:10 }}>
+                    Last 14 days — hit rate
+                  </div>
+                  <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:40 }}>
+                    {data.dailyTrend.slice(-14).map((d, i) => {
+                      const h  = Math.max(5, (d.rate || 0) * 0.4);
+                      const bg = d.rate >= 65 ? C.green : d.rate >= 50 ? C.gold : C.red;
+                      return (
+                        <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
+                          <div style={{ width:"100%", borderRadius:2, background:bg, height:`${h}px`, opacity:.8 }}
+                            title={`${d.date}: ${d.wins}/${d.total} · ${d.rate}%`} />
+                          <div style={{ fontSize:6, color:C.text, opacity:.3,
+                            writingMode:"vertical-rl", textOrientation:"mixed",
+                            transform:"rotate(180deg)", height:16, overflow:"hidden", whiteSpace:"nowrap" }}>
+                            {d.date?.slice(5)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── MARKETS ─────────────────────────────────────────────────────── */}
+      {/* N37: by-market fixture drill-down  N38: by-strategy fixture drill-down */}
+      {perfTab === "markets" && (
+        <div style={{ padding:"0 14px" }}>
+          {loading && <div style={{ padding:40, textAlign:"center", color:C.muted, fontSize:10 }}>Loading…</div>}
+          {!loading && !data && (
+            <div style={{ padding:40, textAlign:"center", color:C.text, opacity:.3, fontSize:10 }}>No data yet.</div>
+          )}
+          {!loading && data && (() => {
+            // Derive all-read aggregates from dailyTrend picks[] — every pick regardless of pool status
+            const allReadByMarket = {};
+            const allReadByTag = {};
+            (data.dailyTrend || []).forEach(day => {
+              (day.picks || []).forEach(p => {
+                const mkt = p.market;
+                if (mkt) {
+                  if (!allReadByMarket[mkt]) allReadByMarket[mkt] = { wins:0, total:0 };
+                  allReadByMarket[mkt].total++;
+                  if (p.result === "WIN") allReadByMarket[mkt].wins++;
+                }
+                (p.tags || []).forEach(tag => {
+                  if (!allReadByTag[tag]) allReadByTag[tag] = { wins:0, total:0 };
+                  allReadByTag[tag].total++;
+                  if (p.result === "WIN") allReadByTag[tag].wins++;
+                });
+              });
+            });
+            // Add rate to aggregates
+            Object.values(allReadByMarket).forEach(d => d.rate = d.total ? Math.round(d.wins/d.total*100) : 0);
+            Object.values(allReadByTag).forEach(d => d.rate = d.total ? Math.round(d.wins/d.total*100) : 0);
+
+            return (
+              <>
+                {/* Engine Pool section */}
+                <div style={{ fontSize:7, color:C.edge, textTransform:"uppercase", letterSpacing:".14em",
+                  fontWeight:800, marginBottom:8, paddingTop:2 }}>
+                  Engine Pool — qualified picks only
+                </div>
+                <FixtureDrillSection
+                  title="By Market"
+                  subtitle="Tap a market to see every individual pick"
+                  accentColor={C.edge}
+                  aggregates={data.byMarket || {}}
+                  dailyTrend={data.dailyTrend || []}
+                  bucketKey="market"
+                  labelFn={k => k}
+                  pickFilter={p => p.type === "engine" || p.enginePool}
+                />
+                <FixtureDrillSection
+                  title="By Strategy"
+                  subtitle="Tap a strategy to see every fixture it fired on"
+                  accentColor={C.accent}
+                  aggregates={data.byTag || {}}
+                  dailyTrend={data.dailyTrend || []}
+                  bucketKey="tags"
+                  labelFn={k => k.replace(/_/g," ")}
+                  pickFilter={p => p.type === "engine" || p.enginePool}
+                />
+
+                {/* Divider */}
+                <div style={{ height:1, background:C.border, margin:"4px 0 16px" }} />
+
+                {/* All Read section */}
+                <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".14em",
+                  fontWeight:800, marginBottom:8 }}>
+                  All Read Picks — includes low confidence
+                </div>
+                {Object.keys(allReadByMarket).length > 0 ? (
+                  <FixtureDrillSection
+                    title="By Market"
+                    subtitle="All fixtures with any model pick"
+                    accentColor={C.muted}
+                    aggregates={allReadByMarket}
+                    dailyTrend={data.dailyTrend || []}
+                    bucketKey="market"
+                    labelFn={k => k}
+                    pickFilter={null}
+                  />
+                ) : (
+                  <div style={{ fontSize:9, color:C.muted, textAlign:"center", padding:"16px 0" }}>
+                    No all-read pick data for this range.
+                  </div>
+                )}
+              </>
             );
           })()}
         </div>
       )}
 
-      {/* By Market */}
-      {data.byMarket && Object.keys(data.byMarket).length > 0 && (
-        <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".1em",marginBottom:2,fontWeight:800 }}>Engine Pool · By Market</div>
-          <div style={{ fontSize:7,color:C.muted,marginBottom:10 }}>Picks that cleared all confidence + data thresholds</div>
-          {Object.entries(data.byMarket).sort((a,b)=>b[1].total-a[1].total).map(([mkt,d]) => (
-            <div key={mkt} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7 }}>
-              <div style={{ fontSize:9,color:C.text,minWidth:100 }}>{mkt}</div>
-              <div style={{ flex:1,height:4,background:C.faint,borderRadius:4,margin:"0 10px",overflow:"hidden" }}>
-                <div style={{ height:"100%",width:`${d.rate}%`,background:d.rate>=65?C.green:d.rate>=50?C.gold:C.red,borderRadius:4,transition:"width .4s" }}/>
+      {/* ── HISTORY ─────────────────────────────────────────────────────── */}
+      {perfTab === "history" && (
+        <div style={{ padding:"0 14px" }}>
+          {loading && <div style={{ padding:40, textAlign:"center", color:C.muted, fontSize:10 }}>Loading…</div>}
+          {!loading && !data && (
+            <div style={{ padding:40, textAlign:"center", color:C.text, opacity:.3, fontSize:10 }}>No data yet.</div>
+          )}
+          {!loading && data && (
+            <>
+              {data.dailyTrend?.some(d => (d.engineTotal || d.total) > 0) && (
+                <PoolAccordion data={data} C={C} />
+              )}
+              {data.dailyTrend?.length > 0 && (
+                <DailyBreakdownTable dailyTrend={data.dailyTrend} />
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── PARLEYS ─────────────────────────────────────────────────────── */}
+      {perfTab === "parleys" && (
+        <div style={{ padding:"0 14px" }}>
+          <ParlayPerformancePanel
+            days={days}
+            data={parlaysData}
+            loading={parlaysLoading}
+            hasUserId={!!userId}
+          />
+        </div>
+      )}
+
+      {/* ── ANALYST ─────────────────────────────────────────────────────── */}
+      {/* N35: interactive combinable query builder on all read picks */}
+      {perfTab === "analyst" && (
+        <div style={{ padding:"0 14px" }}>
+          <DataAnalystPanel
+            data={data}
+            loading={loading}
+            days={days}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PARLAY PERFORMANCE PANEL ──────────────────────────────────────────────
+// N33: Jarvis engine parley history with per-strategy HR breakdown
+// N39: Rollover chain step history with per-step win rate
+function ParlayPerformancePanel({ days, data, loading, hasUserId }) {
+  const [stream, setStream] = useState("jarvis"); // "jarvis" | "rollover"
+
+  if (loading) return (
+    <div style={{ padding:40, textAlign:"center", color:C.muted, fontSize:10 }}>
+      Loading parley history…
+    </div>
+  );
+
+  if (!data) return (
+    <div style={{ padding:40, textAlign:"center", color:C.text, opacity:.3, fontSize:10 }}>
+      No parley history yet.
+      <span style={{ display:"block", fontSize:8, marginTop:8, opacity:.6, lineHeight:1.6 }}>
+        Build and use Jarvis tickets daily. Rollover steps are tracked automatically.
+      </span>
+    </div>
+  );
+
+  const jarvis   = data.jarvis   || {};
+  const rollover = data.rollover || {};
+
+  // Jarvis aggregate
+  const jParlays   = (jarvis.byDate || []).flatMap(d => d.strategies || []);
+  const jTotal     = jParlays.length;
+  const jWins      = jParlays.filter(s => s.parlayResult === "WIN").length;
+  const jLosses    = jParlays.filter(s => s.parlayResult === "LOSS").length;
+  const jPending   = jTotal - jWins - jLosses;
+  const jResolved  = jWins + jLosses;
+  const jHR        = jResolved ? Math.round(jWins / jResolved * 100) : null;
+
+  // Rollover aggregate
+  const rvlTotal   = rollover.total    || 0;
+  const rvlWins    = rollover.wins     || 0;
+  const rvlHR      = rollover.hitRate  ?? null;
+  const rvlResolved = rollover.resolved || 0;
+  const rvlPending = rvlTotal - rvlResolved;
+
+  const hrColor = hr => hr == null ? C.muted : hr >= 50 ? C.green : hr >= 30 ? C.gold : C.red;
+
+  return (
+    <div>
+      {/* Stream toggle */}
+      <div style={{ display:"flex", background:C.faint, borderRadius:10, padding:3, gap:2, marginBottom:14 }}>
+        {[
+          { id:"jarvis",   label:"Jarvis Parleys",  count:jTotal   },
+          { id:"rollover", label:"Rollover Steps",  count:rvlTotal },
+        ].map(s => {
+          const on = stream === s.id;
+          return (
+            <button key={s.id} onClick={() => setStream(s.id)}
+              style={{
+                flex:1, padding:"7px 8px", borderRadius:8,
+                border: on ? `1px solid ${C.border}` : "1px solid transparent",
+                background: on ? C.surface : "transparent",
+                color: on ? C.accent : C.muted,
+                fontSize:10, fontWeight: on ? 800 : 500,
+                cursor:"pointer", fontFamily:C.font,
+                boxShadow: on ? "0 1px 4px rgba(0,0,0,.18)" : "none",
+                transition:"all .15s",
+                display:"flex", flexDirection:"column", alignItems:"center", gap:2,
+              }}>
+              <span>{s.label}</span>
+              <span style={{ fontSize:8, opacity:.6, fontWeight:500 }}>{s.count} total</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── JARVIS stream ──────────────────────────────────────────────── */}
+      {stream === "jarvis" && (
+        <>
+          {/* Headline */}
+          {jTotal > 0 && (
+            <div className="gc" style={{ padding:16, marginBottom:12 }}>
+              <div style={{ fontSize:7, color:C.gold, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:14 }}>
+                Jarvis Parleys · last {days}d
               </div>
-              <div style={{ fontSize:9,fontWeight:700,color:d.rate>=65?C.green:d.rate>=50?C.gold:C.red,minWidth:36,textAlign:"right" }}>{d.rate}%</div>
-              <div style={{ fontSize:8,color:C.text,minWidth:30,textAlign:"right",marginLeft:6 }}>{d.total}</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom: jHR != null ? 14 : 0 }}>
+                {[["Total",jTotal,C.text],["Won",jWins,C.green],["Lost",jLosses,C.red],["Pending",jPending,C.muted]].map(([l,v,col]) => (
+                  <div key={l} style={{ textAlign:"center" }}>
+                    <div style={{ fontSize:20, fontWeight:900, color:col, lineHeight:1 }}>{v}</div>
+                    <div style={{ fontSize:7, color:C.muted, marginTop:4, letterSpacing:".06em", textTransform:"uppercase" }}>{l}</div>
+                  </div>
+                ))}
+              </div>
+              {jHR != null && (
+                <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:7, color:C.muted, marginBottom:5 }}>Parley hit rate — resolved only</div>
+                    <div style={{ height:5, background:C.faint, borderRadius:3, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${jHR}%`, background:hrColor(jHR), borderRadius:3, transition:"width .4s" }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize:24, fontWeight:900, color:hrColor(jHR), lineHeight:1, flexShrink:0 }}>{jHR}%</div>
+                </div>
+              )}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {/* By Tag */}
-      {data.byTag && Object.keys(data.byTag).length > 0 && (
-        <div className="gc" style={{ padding:14,marginBottom:12 }}>
-          <div style={{ fontSize:8,color:C.edge,textTransform:"uppercase",letterSpacing:".1em",marginBottom:2,fontWeight:800 }}>Engine Pool · By Strategy</div>
-          <div style={{ fontSize:7,color:C.muted,marginBottom:10 }}>Strategy tag hit rates — engine pool games only</div>
-          {Object.entries(data.byTag).sort((a,b)=>b[1].total-a[1].total).map(([tag,d]) => (
-            <div key={tag} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6 }}>
-              <div style={{ fontSize:9,color:C.text,minWidth:120 }}>{tag.replace(/_/g," ")}</div>
-              <div style={{ fontSize:9,fontWeight:700,color:d.rate>=65?C.green:d.rate>=50?C.gold:C.red }}>{d.rate}%</div>
-              <div style={{ fontSize:8,color:C.text,marginLeft:8 }}>{d.wins}/{d.total}</div>
+          {/* N33: Per-strategy HR breakdown */}
+          {jarvis.strategyBreakdown?.length > 0 && (
+            <div className="gc" style={{ padding:14, marginBottom:12 }}>
+              <div style={{ fontSize:7, color:C.edge, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:1 }}>
+                By Strategy Label
+              </div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:12 }}>
+                Hit rate per Jarvis ticket type — resolved parleys only
+              </div>
+              {jarvis.strategyBreakdown.map(s => {
+                const col = hrColor(s.hitRate);
+                const resolved = s.wins + s.losses;
+                if (!resolved && !s.pending) return null;
+                return (
+                  <div key={s.label} style={{ marginBottom:10 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:4 }}>
+                      <span style={{ fontSize:9, fontWeight:700, color:C.text }}>{s.label}</span>
+                      <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                        <span style={{ fontSize:9, fontWeight:800, color:col }}>
+                          {s.hitRate != null ? `${s.hitRate}%` : "—"}
+                        </span>
+                        <span style={{ fontSize:7, color:C.muted }}>
+                          {s.wins}W {s.losses}L{s.pending ? ` ${s.pending}P` : ""}
+                        </span>
+                      </div>
+                    </div>
+                    {s.hitRate != null && (
+                      <div style={{ height:4, background:C.faint, borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${s.hitRate}%`, background:col, borderRadius:2, transition:"width .4s" }} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          )}
+
+          {/* Per-date accordion */}
+          {jarvis.byDate?.length > 0
+            ? <ParlayHistoryAccordion byDate={jarvis.byDate} />
+            : <div style={{ padding:"32px 0", textAlign:"center", color:C.muted, fontSize:9 }}>No Jarvis parley history in this range.</div>
+          }
+        </>
       )}
 
-      {/* Daily Engine Pool — collapsible accordion by date (Issue 3.2) */}
-      {data.dailyTrend?.some(d => (d.engineTotal || d.total) > 0) && (
-        <PoolAccordion data={data} C={C} />
-      )}
+      {/* ── ROLLOVER stream ────────────────────────────────────────────── */}
+      {stream === "rollover" && (
+        <>
+          {!hasUserId && (
+            <div style={{ padding:"20px 0 12px", textAlign:"center", fontSize:9, color:C.muted, lineHeight:1.7 }}>
+              Start a Rollover chain to track step-by-step results here.
+            </div>
+          )}
 
-      {/* Daily Pick Report — all Read + Edge picks incl. low-confidence — SECOND */}
-      {data.dailyTrend?.length > 0 && (
-        <DailyBreakdownTable dailyTrend={data.dailyTrend} />
+          {/* Headline */}
+          {rvlTotal > 0 && (
+            <div className="gc" style={{ padding:16, marginBottom:12 }}>
+              <div style={{ fontSize:7, color:C.green, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:14 }}>
+                Rollover Steps · last {days}d
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom: rvlHR != null ? 14 : 0 }}>
+                {[["Total",rvlTotal,C.text],["Won",rvlWins,C.green],["Lost",rvlTotal-rvlWins-(rvlTotal-rvlResolved),C.red],["Pending",rvlPending,C.muted]].map(([l,v,col]) => (
+                  <div key={l} style={{ textAlign:"center" }}>
+                    <div style={{ fontSize:20, fontWeight:900, color:col, lineHeight:1 }}>{v}</div>
+                    <div style={{ fontSize:7, color:C.muted, marginTop:4, letterSpacing:".06em", textTransform:"uppercase" }}>{l}</div>
+                  </div>
+                ))}
+              </div>
+              {rvlHR != null && (
+                <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:7, color:C.muted, marginBottom:5 }}>Step win rate — resolved only</div>
+                    <div style={{ height:5, background:C.faint, borderRadius:3, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${rvlHR}%`, background:hrColor(rvlHR), borderRadius:3, transition:"width .4s" }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize:24, fontWeight:900, color:hrColor(rvlHR), lineHeight:1, flexShrink:0 }}>{rvlHR}%</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* N39: Per-step breakdown */}
+          {rollover.byStep && Object.keys(rollover.byStep).length > 0 && (
+            <div className="gc" style={{ padding:14, marginBottom:12 }}>
+              <div style={{ fontSize:7, color:C.edge, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:1 }}>
+                By Chain Step
+              </div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:12 }}>
+                Where in the chain wins and losses happen most
+              </div>
+              {Object.entries(rollover.byStep).sort((a,b) => Number(a[0])-Number(b[0])).map(([step, d]) => {
+                const resolved = d.wins + d.losses;
+                const rate     = resolved ? Math.round(d.wins / resolved * 100) : null;
+                const col      = hrColor(rate);
+                return (
+                  <div key={step} style={{ marginBottom:9 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:3 }}>
+                      <span style={{ fontSize:9, fontWeight:700, color:C.text }}>Step {step}</span>
+                      <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                        <span style={{ fontSize:9, fontWeight:800, color:col }}>{rate != null ? `${rate}%` : "—"}</span>
+                        <span style={{ fontSize:7, color:C.muted }}>{d.wins}W {d.losses}L{d.pending ? ` ${d.pending}P` : ""}</span>
+                      </div>
+                    </div>
+                    {rate != null && (
+                      <div style={{ height:4, background:C.faint, borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${rate}%`, background:col, borderRadius:2, transition:"width .4s" }} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Rollover step list */}
+          {rollover.steps?.length > 0
+            ? <RolloverStepList steps={rollover.steps} />
+            : rvlTotal === 0 && <div style={{ padding:"32px 0", textAlign:"center", color:C.muted, fontSize:9 }}>No rollover steps in this range.</div>
+          }
+        </>
       )}
-      </>)}
+    </div>
+  );
+}
+
+// ── PARLAY HISTORY ACCORDION — Jarvis ────────────────────────────────────
+function ParlayHistoryAccordion({ byDate }) {
+  const [openDate, setOpenDate] = useState(null);
+  const rows = [...byDate].sort((a, b) => b.date.localeCompare(a.date));
+
+  return (
+    <div className="gc" style={{ padding:14, marginBottom:12 }}>
+      <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700, marginBottom:10 }}>
+        By Date
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+        {rows.map(day => {
+          const strats  = day.strategies || [];
+          const wins    = strats.filter(s => s.parlayResult === "WIN").length;
+          const losses  = strats.filter(s => s.parlayResult === "LOSS").length;
+          const pending = strats.filter(s => !s.parlayResult || s.parlayResult === "PENDING" || s.parlayResult === "PARTIAL").length;
+          const resolved = wins + losses;
+          const dayRate  = resolved ? Math.round(wins / resolved * 100) : null;
+          const rateCol  = dayRate == null ? C.muted : dayRate >= 50 ? C.green : dayRate >= 30 ? C.gold : C.red;
+          const isOpen   = openDate === day.date;
+
+          return (
+            <div key={day.date}>
+              <button onClick={() => strats.length && setOpenDate(isOpen ? null : day.date)}
+                style={{
+                  width:"100%", display:"grid",
+                  gridTemplateColumns:"90px 1fr 48px 48px 18px",
+                  gap:6, alignItems:"center",
+                  padding:"8px 8px", borderRadius:7,
+                  background: isOpen ? C.surface : "transparent",
+                  border:`1px solid ${isOpen ? C.border : "transparent"}`,
+                  cursor: strats.length ? "pointer" : "default",
+                  fontFamily:C.font, textAlign:"left",
+                }}>
+                <span style={{ fontSize:9, fontWeight:700, color:C.text }}>{day.date}</span>
+                <div style={{ display:"flex", gap:4, alignItems:"center" }}>
+                  {wins > 0    && <span style={{ fontSize:8, fontWeight:800, color:C.green  }}>{wins}W</span>}
+                  {losses > 0  && <span style={{ fontSize:8, fontWeight:800, color:C.red    }}>{losses}L</span>}
+                  {pending > 0 && <span style={{ fontSize:8, fontWeight:600, color:C.muted  }}>{pending}P</span>}
+                </div>
+                <span style={{ fontSize:9, fontWeight:800, color:rateCol, textAlign:"right" }}>
+                  {dayRate != null ? `${dayRate}%` : "—"}
+                </span>
+                <span style={{ fontSize:7, color:C.muted, textAlign:"right" }}>{strats.length} tkt</span>
+                {strats.length
+                  ? <span style={{ fontSize:9, color:C.muted, textAlign:"right" }}>{isOpen ? "▲" : "▼"}</span>
+                  : <span />}
+              </button>
+
+              {isOpen && (
+                <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderTop:"none",
+                  borderRadius:"0 0 7px 7px", padding:"6px 10px 10px", marginBottom:2 }}>
+                  {strats.map((s, si) => {
+                    const vc = s.parlayResult === "WIN" ? C.green : s.parlayResult === "LOSS" ? C.red : C.muted;
+                    const vl = s.parlayResult === "WIN" ? "WIN" : s.parlayResult === "LOSS" ? "LOSS" : s.parlayResult === "PARTIAL" ? "PARTIAL" : "PENDING";
+                    const legCount = (s.legs || []).length;
+                    return (
+                      <div key={si} style={{ padding:"8px 0", borderBottom: si < strats.length-1 ? `1px solid ${C.border}` : "none" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:5 }}>
+                          <div>
+                            <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{s.label || `Ticket ${si+1}`}</span>
+                            <span style={{ fontSize:7, color:C.muted, marginLeft:6 }}>
+                              {legCount} leg{legCount!==1?"s":""} · {s.combinedOdds ? `${s.combinedOdds}×` : "—"}
+                            </span>
+                          </div>
+                          <span style={{ fontSize:8, fontWeight:800, color:vc, background:`${vc}15`, border:`1px solid ${vc}35`, borderRadius:4, padding:"1px 7px" }}>
+                            {vl}
+                          </span>
+                        </div>
+                        <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+                          {(s.legs || []).map((leg, li) => {
+                            const lc = leg.result === "WIN" ? C.green : leg.result === "LOSS" ? C.red : C.muted;
+                            return (
+                              <span key={li} style={{ fontSize:7, color:lc, background:`${lc}10`, border:`1px solid ${lc}30`,
+                                borderRadius:4, padding:"1px 6px", whiteSpace:"nowrap",
+                                maxWidth:140, overflow:"hidden", textOverflow:"ellipsis" }}>
+                                {leg.market || leg.pick || "Pick"}
+                                {leg.result && leg.result !== "PENDING" ? ` · ${leg.result === "WIN" ? "W" : "L"}` : ""}
+                                {leg.score ? ` ${leg.score}` : ""}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── ROLLOVER STEP LIST ────────────────────────────────────────────────────
+// N39: compact step-by-step result log for Rollover stream in Parleys tab
+function RolloverStepList({ steps }) {
+  const [openIdx, setOpenIdx] = useState(null);
+
+  return (
+    <div className="gc" style={{ padding:14, marginBottom:12 }}>
+      <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700, marginBottom:10 }}>
+        Step Log
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+        {steps.map((s, i) => {
+          const rc      = s.result === "WIN" ? C.green : s.result === "LOSS" ? C.red : C.muted;
+          const isOpen  = openIdx === i;
+          const hasLegs = s.legs?.length > 0;
+          return (
+            <div key={i}>
+              <button
+                onClick={() => hasLegs && setOpenIdx(isOpen ? null : i)}
+                style={{
+                  width:"100%", display:"grid",
+                  gridTemplateColumns:"90px 36px 1fr 52px 18px",
+                  gap:6, alignItems:"center",
+                  padding:"7px 8px", borderRadius:7,
+                  background: isOpen ? C.surface : "transparent",
+                  border:`1px solid ${isOpen ? C.border : "transparent"}`,
+                  cursor: hasLegs ? "pointer" : "default",
+                  fontFamily:C.font, textAlign:"left",
+                }}>
+                <span style={{ fontSize:8, color:C.muted }}>{s.date}</span>
+                <span style={{ fontSize:8, fontWeight:700, color:C.text }}>S{s.step}</span>
+                <span style={{ fontSize:8, color:C.text, opacity:.6 }}>
+                  {s.potBefore != null ? `$${parseFloat(s.potBefore).toFixed(0)}` : ""}
+                  {s.odds ? ` · ×${parseFloat(s.odds).toFixed(2)}` : ""}
+                </span>
+                <span style={{ fontSize:9, fontWeight:800, color:rc, textAlign:"right" }}>
+                  {s.result === "WIN" ? "WIN" : s.result === "LOSS" ? "LOSS" : "PENDING"}
+                </span>
+                {hasLegs
+                  ? <span style={{ fontSize:9, color:C.muted, textAlign:"right" }}>{isOpen ? "▲" : "▼"}</span>
+                  : <span />}
+              </button>
+              {isOpen && hasLegs && (
+                <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderTop:"none",
+                  borderRadius:"0 0 7px 7px", padding:"6px 10px 8px", marginBottom:1 }}>
+                  {s.legs.map((leg, li) => {
+                    const lc = leg.result === "WIN" ? C.green : leg.result === "LOSS" ? C.red : C.muted;
+                    return (
+                      <div key={li} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                        padding:"4px 0", borderBottom: li < s.legs.length-1 ? `1px solid ${C.border}` : "none" }}>
+                        <div style={{ minWidth:0, flex:1 }}>
+                          <div style={{ fontSize:8, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {leg.game || `${leg.home||"?"} vs ${leg.away||"?"}`}
+                          </div>
+                          <div style={{ fontSize:7, color:C.muted }}>{leg.market || leg.pick || "—"}</div>
+                        </div>
+                        <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, marginLeft:8 }}>
+                          {leg.score && <span style={{ fontSize:7, color:C.muted }}>{leg.score}</span>}
+                          <span style={{ fontSize:9, fontWeight:800, color:lc }}>
+                            {leg.result === "WIN" ? "W" : leg.result === "LOSS" ? "L" : "–"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 
-// C6-FIX (illegal hook): extracted from ParlayJarvisTab IIFE — hooks must live
+// ── FIXTURE DRILL SECTION — N37 / N38 ────────────────────────────────────
+// Reusable component for both By Market and By Strategy.
+// Each aggregate bar is tappable — expands to show every individual pick
+// in that bucket with date, game, pick, odds, result.
+// bucketKey "market" → groups by pick.market
+// bucketKey "tags"   → groups by pick.tags[] (strategy can tag a pick multiple times)
+function FixtureDrillSection({ title, subtitle, accentColor, aggregates, dailyTrend, bucketKey, labelFn, pickFilter }) {
+  const [openBucket, setOpenBucket] = useState(null);
+
+  if (!Object.keys(aggregates).length) return null;
+
+  // Build per-bucket pick lists — apply pickFilter if provided
+  const bucketMap = {};
+  for (const day of dailyTrend) {
+    for (const pick of (day.picks || [])) {
+      if (pickFilter && !pickFilter(pick)) continue;
+      const keys = bucketKey === "tags"
+        ? (pick.tags || [pick.market]).filter(Boolean)
+        : [pick[bucketKey]].filter(Boolean);
+      for (const k of keys) {
+        if (!bucketMap[k]) bucketMap[k] = [];
+        bucketMap[k].push({ ...pick, date: day.date });
+      }
+    }
+  }
+
+  const sorted = Object.entries(aggregates)
+    .sort((a, b) => b[1].total - a[1].total);
+
+  return (
+    <div className="gc" style={{ padding:14, marginBottom:12 }}>
+      <div style={{ fontSize:7, color:accentColor, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800, marginBottom:1 }}>
+        {title}
+      </div>
+      <div style={{ fontSize:7, color:C.muted, marginBottom:12 }}>{subtitle}</div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+        {sorted.map(([key, d]) => {
+          const col    = d.rate >= 65 ? C.green : d.rate >= 50 ? C.gold : C.red;
+          const isOpen = openBucket === key;
+          const picks  = (bucketMap[key] || []).sort((a, b) => b.date.localeCompare(a.date));
+
+          return (
+            <div key={key}>
+              {/* Bar row — tappable header */}
+              <button
+                onClick={() => setOpenBucket(isOpen ? null : key)}
+                style={{
+                  width:"100%", background:"transparent", border:"none",
+                  padding:"8px 6px", cursor:"pointer", fontFamily:C.font,
+                  borderRadius:7,
+                  background: isOpen ? `${col}08` : "transparent",
+                  transition:"background .12s",
+                }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:5 }}>
+                  <span style={{ fontSize:9, fontWeight:700, color:C.text, textAlign:"left" }}>
+                    {labelFn(key)}
+                  </span>
+                  <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                    <span style={{ fontSize:9, fontWeight:800, color:col }}>{d.rate}%</span>
+                    <span style={{ fontSize:7, color:C.muted }}>{d.wins}/{d.total}</span>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+                      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0deg)", transition:"transform .2s", flexShrink:0 }}>
+                      <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                  </div>
+                </div>
+                {/* Progress bar */}
+                <div style={{ height:4, background:C.faint, borderRadius:2, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:`${Math.min(d.rate,100)}%`,
+                    background:col, borderRadius:2, transition:"width .4s" }} />
+                </div>
+              </button>
+
+              {/* Drill-down fixture list */}
+              {isOpen && (
+                <div style={{
+                  background:C.surface, border:`1px solid ${C.border}`,
+                  borderRadius:"0 0 8px 8px", padding:"6px 10px 10px",
+                  marginBottom:4,
+                }}>
+                  {picks.length === 0 ? (
+                    <div style={{ padding:"12px 0", textAlign:"center", fontSize:8, color:C.muted }}>
+                      No individual pick data — enhanced stats not yet available for this range.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Mini sub-header: pick count + quick W/L tally */}
+                      {(() => {
+                        const w = picks.filter(p => p.result === "WIN").length;
+                        const l = picks.filter(p => p.result === "LOSS").length;
+                        const p = picks.filter(p => p.result === "PENDING" || !p.result).length;
+                        return (
+                          <div style={{ display:"flex", gap:10, padding:"4px 0 8px", borderBottom:`1px solid ${C.border}`, marginBottom:6 }}>
+                            <span style={{ fontSize:7, color:C.green, fontWeight:700 }}>{w}W</span>
+                            <span style={{ fontSize:7, color:C.red,   fontWeight:700 }}>{l}L</span>
+                            {p > 0 && <span style={{ fontSize:7, color:C.muted }}>{p}P</span>}
+                            <span style={{ fontSize:7, color:C.muted, marginLeft:"auto" }}>{picks.length} picks</span>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Pick rows */}
+                      {picks.slice(0, 60).map((pick, i) => {
+                        const rc = pick.result === "WIN" ? C.green : pick.result === "LOSS" ? C.red : C.muted;
+                        return (
+                          <div key={i} style={{
+                            display:"grid", gridTemplateColumns:"68px 1fr auto auto",
+                            gap:6, alignItems:"center",
+                            padding:"5px 0",
+                            borderBottom: i < Math.min(picks.length, 60) - 1 ? `1px solid ${C.border}` : "none",
+                          }}>
+                            <span style={{ fontSize:7, color:C.muted }}>{pick.date}</span>
+                            <div style={{ minWidth:0 }}>
+                              <div style={{ fontSize:8, color:C.text, fontWeight:600,
+                                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                {pick.game}
+                              </div>
+                              <div style={{ fontSize:7, color:C.muted, marginTop:1 }}>
+                                {pick.pick}
+                                {pick.league ? ` · ${pick.league}` : ""}
+                                {pick.type === "value" && (
+                                  <span style={{ color:C.edge, marginLeft:4, fontWeight:600 }}>Edge</span>
+                                )}
+                              </div>
+                            </div>
+                            <span style={{ fontSize:8, color:C.gold, fontWeight:700, textAlign:"right" }}>
+                              {pick.odds ? `${pick.odds}×` : "—"}
+                            </span>
+                            <div style={{ textAlign:"right", minWidth:28 }}>
+                              <span style={{ fontSize:8, fontWeight:800, color:rc }}>
+                                {pick.result === "WIN" ? "W" : pick.result === "LOSS" ? "L" : pick.score || "–"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {picks.length > 60 && (
+                        <div style={{ textAlign:"center", fontSize:7, color:C.muted, paddingTop:8 }}>
+                          Showing 60 of {picks.length} — use Analyst tab for full filtering
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── DATA ANALYST PANEL — N35 ─────────────────────────────────────────────
+// Combinable filter query builder on all read picks from enhanced pool data.
+// No server round-trip per query — filters run client-side on already-fetched data.
+// Filters: market, pick type (safe/value), league, result, min confidence.
+function DataAnalystPanel({ data, loading, days }) {
+  const [filters, setFilters] = useState({
+    market:  "all",
+    type:    "all",
+    league:  "all",
+    result:  "all",
+    minConf: 0,
+  });
+  const [sortBy, setSortBy] = useState("date");
+
+  if (loading) return (
+    <div style={{ padding:40, textAlign:"center", color:C.muted, fontSize:10 }}>Loading…</div>
+  );
+  if (!data?.dailyTrend?.length) return (
+    <div style={{ padding:"48px 0", textAlign:"center", color:C.text, opacity:.3, fontSize:10 }}>
+      No pick data yet for this range.
+    </div>
+  );
+
+  // Flatten all picks across the window with date attached
+  const allPicks = data.dailyTrend.flatMap(d =>
+    (d.picks || []).map(p => ({ ...p, date: d.date }))
+  ).filter(p => p.result !== undefined);
+
+  // Build filter option lists from data
+  const markets  = ["all", ...new Set(allPicks.map(p => p.market).filter(Boolean))].sort();
+  const leagues  = ["all", ...new Set(allPicks.map(p => p.league).filter(Boolean))].sort();
+
+  // Apply filters
+  const filtered = allPicks.filter(p => {
+    if (filters.market !== "all" && p.market !== filters.market) return false;
+    if (filters.type   !== "all" && p.type   !== filters.type)   return false;
+    if (filters.league !== "all" && p.league !== filters.league)  return false;
+    if (filters.result !== "all" && p.result !== filters.result)  return false;
+    if (filters.minConf > 0 && (p.conf == null || p.conf < filters.minConf)) return false;
+    return true;
+  });
+
+  // Sort
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "conf") return (b.conf || 0) - (a.conf || 0);
+    if (sortBy === "odds") return (b.odds || 0) - (a.odds || 0);
+    return b.date.localeCompare(a.date);
+  });
+
+  // Compute stats on filtered set
+  const resolved  = filtered.filter(p => p.result === "WIN" || p.result === "LOSS");
+  const wins      = filtered.filter(p => p.result === "WIN").length;
+  const hitRate   = resolved.length ? Math.round(wins / resolved.length * 100) : null;
+  const avgOdds   = filtered.filter(p => p.odds).length
+    ? (filtered.reduce((s, p) => s + (p.odds || 0), 0) / filtered.filter(p => p.odds).length).toFixed(2)
+    : null;
+  const avgConf   = filtered.filter(p => p.conf).length
+    ? Math.round(filtered.reduce((s, p) => s + (p.conf || 0), 0) / filtered.filter(p => p.conf).length)
+    : null;
+
+  const hrCol = hitRate == null ? C.muted : hitRate >= 65 ? C.green : hitRate >= 50 ? C.gold : C.red;
+
+  const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+  const hasFilters = filters.market !== "all" || filters.type !== "all" ||
+    filters.league !== "all" || filters.result !== "all" || filters.minConf > 0;
+
+  return (
+    <div>
+      {/* Filter panel — always open, filters ARE the feature */}
+      <div className="gc" style={{ padding:14, marginBottom:12 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+          <div style={{ fontSize:7, color:C.edge, textTransform:"uppercase", letterSpacing:".14em", fontWeight:800 }}>
+            Data Analyst
+          </div>
+          {hasFilters && (
+            <button onClick={() => setFilters({ market:"all", type:"all", league:"all", result:"all", minConf:0 })}
+              style={{ fontSize:7, color:C.muted, background:"transparent", border:`1px solid ${C.faint}`,
+                borderRadius:5, padding:"2px 8px", cursor:"pointer", fontFamily:C.font }}>
+              Clear filters
+            </button>
+          )}
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          {/* Row 1: Market + Type */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            <div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>Market</div>
+              <select value={filters.market} onChange={e => setF("market", e.target.value)}
+                style={{ width:"100%", padding:"6px 8px", fontSize:9, borderRadius:6, fontFamily:C.font,
+                  background:C.surface, color:C.text, border:`1px solid ${C.border}` }}>
+                {markets.map(m => <option key={m} value={m}>{m === "all" ? "All markets" : m}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>Pick Type</div>
+              <div style={{ display:"flex", gap:3 }}>
+                {[["all","All"],["safe","Safe"],["value","Edge"]].map(([v,l]) => (
+                  <button key={v} onClick={() => setF("type", v)}
+                    style={{ flex:1, padding:"6px 0", fontSize:8, borderRadius:5, cursor:"pointer",
+                      fontFamily:C.font, fontWeight: filters.type===v ? 700 : 400,
+                      background: filters.type===v ? C.accent : "transparent",
+                      color: filters.type===v ? C.accentText : C.muted,
+                      border:`1px solid ${filters.type===v ? C.accent : C.faint}` }}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: League + Result */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            <div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>League</div>
+              <select value={filters.league} onChange={e => setF("league", e.target.value)}
+                style={{ width:"100%", padding:"6px 8px", fontSize:9, borderRadius:6, fontFamily:C.font,
+                  background:C.surface, color:C.text, border:`1px solid ${C.border}` }}>
+                {leagues.map(l => <option key={l} value={l}>{l === "all" ? "All leagues" : l}</option>)}
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>Result</div>
+              <div style={{ display:"flex", gap:3 }}>
+                {[["all","All"],["WIN","W"],["LOSS","L"],["PENDING","P"]].map(([v,l]) => {
+                  const col = v === "WIN" ? C.green : v === "LOSS" ? C.red : v === "PENDING" ? C.gold : C.text;
+                  const on  = filters.result === v;
+                  return (
+                    <button key={v} onClick={() => setF("result", v)}
+                      style={{ flex:1, padding:"6px 0", fontSize:8, borderRadius:5, cursor:"pointer",
+                        fontFamily:C.font, fontWeight: on ? 800 : 400,
+                        background: on ? `${col}20` : "transparent",
+                        color: on ? col : C.muted,
+                        border:`1px solid ${on ? col+"60" : C.faint}` }}>
+                      {l}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Min confidence slider */}
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+              <span style={{ fontSize:7, color:C.muted, fontWeight:600 }}>Min Confidence</span>
+              <span style={{ fontSize:8, fontWeight:700, color: filters.minConf > 0 ? C.accent : C.muted }}>
+                {filters.minConf > 0 ? `${filters.minConf}%+` : "Any"}
+              </span>
+            </div>
+            <input type="range" min={0} max={95} step={5} value={filters.minConf}
+              onChange={e => setF("minConf", Number(e.target.value))}
+              style={{ width:"100%", accentColor:C.accent }} />
+            <div style={{ display:"flex", justifyContent:"space-between", marginTop:1 }}>
+              <span style={{ fontSize:6, color:C.muted }}>0%</span>
+              <span style={{ fontSize:6, color:C.muted }}>95%</span>
+            </div>
+          </div>
+
+          {/* Sort */}
+          <div>
+            <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>Sort by</div>
+            <div style={{ display:"flex", gap:4 }}>
+              {[["date","Date"],["conf","Confidence"],["odds","Odds"]].map(([v,l]) => (
+                <button key={v} onClick={() => setSortBy(v)}
+                  style={{ flex:1, padding:"6px 0", fontSize:8, borderRadius:5, cursor:"pointer",
+                    fontFamily:C.font, fontWeight: sortBy===v ? 700 : 400,
+                    background: sortBy===v ? C.accent : "transparent",
+                    color: sortBy===v ? C.accentText : C.muted,
+                    border:`1px solid ${sortBy===v ? C.accent : C.faint}` }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Stats on filtered set */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8,
+          borderTop:`1px solid ${C.border}`, paddingTop:12, marginTop:12 }}>
+          {[
+            ["Picks",    filtered.length,                     C.text],
+            ["Hit Rate", hitRate != null ? `${hitRate}%`:"—", hrCol],
+            ["Avg Odds", avgOdds ? `${avgOdds}×`:"—",         C.gold],
+            ["Avg Conf", avgConf ? `${avgConf}%`:"—",         C.accent],
+          ].map(([l,v,col]) => (
+            <div key={l} style={{ textAlign:"center" }}>
+              <div style={{ fontSize:16, fontWeight:900, color:col, lineHeight:1 }}>{v}</div>
+              <div style={{ fontSize:7, color:C.muted, marginTop:3, textTransform:"uppercase", letterSpacing:".06em" }}>{l}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Pick list */}
+      {sorted.length === 0 ? (
+        <div style={{ padding:"24px 0", textAlign:"center", color:C.muted, fontSize:9 }}>
+          No picks match these filters.
+        </div>
+      ) : (
+        <div className="gc" style={{ padding:14, marginBottom:12 }}>
+          <div style={{ fontSize:7, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700, marginBottom:10 }}>
+            {sorted.length} pick{sorted.length!==1?"s":""} · last {days}d
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            {sorted.slice(0, 120).map((p, i) => {
+              const rc = p.result === "WIN" ? C.green : p.result === "LOSS" ? C.red : C.muted;
+              return (
+                <div key={i} style={{ display:"grid", gridTemplateColumns:"78px 1fr auto auto auto",
+                  gap:6, alignItems:"center", padding:"6px 8px", borderRadius:6,
+                  background: i % 2 === 0 ? C.surface : "transparent",
+                  border:`1px solid ${p.result==="WIN"?C.green+"20":p.result==="LOSS"?C.red+"15":"transparent"}` }}>
+                  <span style={{ fontSize:7, color:C.muted }}>{p.date}</span>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:8, color:C.text, fontWeight:600,
+                      overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {p.game}
+                    </div>
+                    <div style={{ fontSize:7, color:C.muted, marginTop:1 }}>
+                      {p.market}{p.league ? ` · ${p.league}` : ""}
+                      {p.type === "value" && (
+                        <span style={{ color:C.edge, marginLeft:4, fontWeight:600 }}>Edge</span>
+                      )}
+                    </div>
+                  </div>
+                  <span style={{ fontSize:7, color:C.muted, textAlign:"right" }}>
+                    {p.conf ? `${p.conf}%` : "—"}
+                  </span>
+                  <span style={{ fontSize:8, fontWeight:700, color:C.gold, textAlign:"right" }}>
+                    {p.odds ? `${p.odds}×` : "—"}
+                  </span>
+                  <span style={{ fontSize:8, fontWeight:800, color:rc, minWidth:32, textAlign:"right" }}>
+                    {p.result === "WIN" ? "W" : p.result === "LOSS" ? "L" : p.score || "–"}
+                  </span>
+                </div>
+              );
+            })}
+            {sorted.length > 120 && (
+              <div style={{ textAlign:"center", fontSize:7, color:C.muted, paddingTop:6 }}>
+                Showing 120 of {sorted.length} — narrow filters to see specific picks
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 // at the top level of a component, not inside callbacks or IIFEs in JSX.
 function ParlayExplainer() {
   const [open, setOpen] = useState(() => {
@@ -7589,25 +8856,11 @@ function ParlayExplainer() {
 
         {tab === "modes" && (
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {[
-              { label:"Safe", color:C.green, odds:"~2–3×", legs:"2–5 legs", desc:"High-confidence picks only (≥62% model prob). Lower odds, more likely to land. Best for consistent staking." },
-              { label:"Value", color:C.gold, odds:"~3–6×", legs:"5–10 legs", desc:"Broader pool, min 55% prob. Balances odds vs probability. The default for most users." },
-              { label:"Longshot", color:C.red, odds:"6×+", legs:"10–17 legs", desc:"Wide pool, 48%+ threshold. High odds, lower hit rate. Think of it as a weekly lottery ticket — not your main stake." },
-            ].map(m => (
-              <div key={m.label} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
-                <div style={{ flexShrink:0, marginTop:2, background:`${m.color}15`,
-                              border:`1px solid ${m.color}40`, borderRadius:6,
-                              padding:"2px 8px", fontSize:8, fontWeight:800, color:m.color }}>
-                  {m.label}
-                </div>
-                <div>
-                  <div style={{ fontSize:8, color:C.muted, marginBottom:2 }}>{m.odds} · {m.legs}</div>
-                  <div>{m.desc}</div>
-                </div>
-              </div>
-            ))}
-            <div style={{ fontSize:8, color:C.muted, marginTop:4 }}>
-              You can select multiple modes at once — GRM builds one ticket per mode from the same pool.
+            <div style={{ fontSize:9, color:C.muted, lineHeight:1.65, marginBottom:4 }}>
+              Jarvis tickets are <span style={{ color:C.accent, fontWeight:700 }}>pre-built by the TA engine</span> before kickoff — not generated on demand. The engine uses learned patterns from Data Analysis (DA) and Situational Analysis (SA) to select and rank legs. You see the result when you open the Jarvis tab.
+            </div>
+            <div style={{ fontSize:8, color:C.muted, marginTop:4, lineHeight:1.6 }}>
+              The engine exports one ticket per mode each day. Past dates show WIN/LOSS/PENDING per leg once results are in.
             </div>
           </div>
         )}
@@ -7616,7 +8869,7 @@ function ParlayExplainer() {
           <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
             {[
               { n:"1", title:"Pick a tab", body:"Jarvis tab = AI builds for you. Custom tab = you control odds target, stake, and pool." },
-              { n:"2", title:"Research Mode", body:"Toggle Research before building. Jarvis pre-scores the top 8 candidates with live web context — injuries, form, lineup news. Boosted or penalised legs show a reason on the ticket." },
+              { n:"2", title:"Research Mode", body:"In the Custom tab, toggle Research Mode before building. Jarvis pre-scores the top 8 candidates with live web context — injuries, form, lineup news. Boosted or penalised legs show a reason on the ticket." },
               { n:"3", title:"Remix or Swap", body:"Don't like a ticket? Tap ↺ Remix for a different combination from the same pool. To swap one leg, tap ↺ on that leg row." },
               { n:"4", title:"Edit Draft", body:"Tap Edit on a ticket to copy all legs to your Draft for manual adjustments. Tap a game to open Full Model — this does not edit the ticket." },
               { n:"5", title:"Book it", body:"Tap Book Now, choose a bookmaker, confirm. The code is generated automatically. Save your ticket first if you want to reference it later." },
@@ -7849,10 +9102,28 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
           : { col:C.muted, label:`${strat.learnedHR}% HR` }
           : null;
 
+        // N36-FIX: verdict derived from server-enriched parlayResult
+        const parlayResult = strat.parlayResult || null;
+        const isPastDate   = date && date !== new Date().toISOString().split("T")[0];
+        const verdictCol   = parlayResult === "WIN" ? C.green
+                           : parlayResult === "LOSS" ? C.red
+                           : parlayResult === "PARTIAL" ? C.amber
+                           : C.muted;
+        const verdictLabel = parlayResult === "WIN" ? "WIN"
+                           : parlayResult === "LOSS" ? "LOSS"
+                           : parlayResult === "PARTIAL" ? "PARTIAL"
+                           : isPastDate ? "PENDING" : null;
+
+        const borderCol = isOpen ? `${C.accent}80`
+          : parlayResult === "WIN"  ? `${C.green}50`
+          : parlayResult === "LOSS" ? `${C.red}40`
+          : isUsed ? `${C.green}40`
+          : C.border;
+
         return (
           <div key={strat.id} style={{
             background: C.surface,
-            border: `1px solid ${isOpen ? C.accent+"80" : isUsed ? C.green+"40" : C.border}`,
+            border: `1px solid ${borderCol}`,
             borderRadius: 10,
             overflow: "hidden",
             transition: "border-color .15s",
@@ -7862,7 +9133,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
             <div onClick={() => setExpanded(isOpen ? null : strat.id)}
               style={{ padding:"12px 14px", cursor:"pointer" }}>
 
-              {/* Top row: name pill + signal badges + chevron */}
+              {/* Top row: name pill + signal badges + verdict + chevron */}
               <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:7,
                             justifyContent:"space-between" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:5, flex:1, minWidth:0, flexWrap:"wrap" }}>
@@ -7885,11 +9156,19 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                       {strat.saPositive} pattern{strat.saPositive!==1?"s":""}
                     </span>
                   )}
-                  {isUsed && (
+                  {/* N36-FIX: verdict badge for past date results */}
+                  {verdictLabel && (
+                    <span style={{ fontSize:7, fontWeight:800, color:verdictCol,
+                                   background:`${verdictCol}15`, border:`1px solid ${verdictCol}40`,
+                                   borderRadius:4, padding:"1px 6px", flexShrink:0, letterSpacing:".06em" }}>
+                      {verdictLabel}
+                    </span>
+                  )}
+                  {isUsed && !verdictLabel && (
                     <span style={{ fontSize:7, fontWeight:800, color:C.green,
                                    background:`${C.green}12`, border:`1px solid ${C.green}30`,
                                    borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
-                      ✓ Added
+                      Added
                     </span>
                   )}
                 </div>
@@ -7953,14 +9232,17 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                 {/* Legs */}
                 <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
                   {(strat.legs || []).map((leg, li) => {
-                    const canOpen = !!(onFullModel && leg.fixtureId);
+                    const canOpen  = !!(onFullModel && leg.fixtureId);
+                    // N36-FIX: per-leg result from server enrichment
+                    const legRes   = leg.result || null;
+                    const legResCol = legRes === "WIN" ? C.green : legRes === "LOSS" ? C.red : C.muted;
                     return (
                     <div key={li}
                       onClick={canOpen ? () => onFullModel(leg.fixtureId) : undefined}
                       style={{
                         display:"flex", justifyContent:"space-between", alignItems:"center",
                         padding:"7px 10px", background:C.bg, borderRadius:7,
-                        border:`1px solid ${canOpen ? C.border : C.border}`,
+                        border:`1px solid ${legRes === "WIN" ? C.green+"30" : legRes === "LOSS" ? C.red+"30" : C.border}`,
                         cursor: canOpen ? "pointer" : "default",
                         transition: canOpen ? "background .12s" : undefined,
                       }}
@@ -7984,9 +9266,15 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                           {leg.market}{leg.league ? ` · ${leg.league}` : ""}
                         </div>
                       </div>
-                      <div style={{ textAlign:"right", flexShrink:0, marginLeft:10 }}>
+                      <div style={{ textAlign:"right", flexShrink:0, marginLeft:10, display:"flex", alignItems:"center", gap:6 }}>
+                        {/* N36-FIX: per-leg verdict + score */}
+                        {legRes && legRes !== "PENDING" && (
+                          <span style={{ fontSize:9, fontWeight:800, color:legResCol }}>
+                            {legRes === "WIN" ? "W" : "L"}{leg.score ? ` ${leg.score}` : ""}
+                          </span>
+                        )}
                         {leg.odds
-                          ? <span style={{ fontSize:11, fontWeight:800, color:C.gold }}>{leg.odds}×</span>
+                          ? <span style={{ fontSize:11, fontWeight:800, color: legRes === "LOSS" ? C.red : legRes === "WIN" ? C.green : C.gold }}>{leg.odds}×</span>
                           : <span style={{ fontSize:9, color:C.muted }}>{leg.conf ? `${leg.conf}%` : "—"}</span>
                         }
                       </div>
@@ -7995,12 +9283,14 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                   })}
                 </div>
 
-                {/* CTA */}
+                {/* CTA — hide for resolved past-date tickets, show re-use otherwise */}
                 <button
                   onClick={() => { onUseTicket(strat); setUsedIds(prev => new Set([...prev, strat.id])); setExpanded(null); }}
                   className="gb-primary"
                   style={{ width:"100%", padding:"11px 0", fontSize:11, fontWeight:800 }}>
-                  {isUsed ? "↺ Re-add to Builder" : "Use This Ticket →"}
+                  {isPastDate && parlayResult && parlayResult !== "PENDING"
+                    ? "Re-use This Ticket"
+                    : isUsed ? "Re-add to Builder" : "Use This Ticket →"}
                 </button>
               </div>
             )}
@@ -8173,7 +9463,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     }
 
     // Build pool from available fixtures
-    const rawPool = buildUniversalPool(available, rates).filter(e => !parlayExcludedMarkets.has(e.market));
+    const rawPool = buildUniversalPool(available, rates).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
     if (rawPool.length < 2) {
       setAutoMessage("Pool too thin to remix right now.");
       setTimeout(() => setAutoMessage(""), 3500);
@@ -8398,7 +9688,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     };
 
     if (builderMode === "jarvis") {
-      const rawPool = buildUniversalPool(parlayFixtures, rates).filter(e => !parlayExcludedMarkets.has(e.market));
+      const rawPool = buildUniversalPool(parlayFixtures, rates).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
+      if (rawPool.length === 0) {
         setAutoMessage("No qualifying games in selected leagues — try adding more leagues or clearing the filter.");
         setBuilding(false); return;
       }
@@ -8453,7 +9744,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const allCustomFixtures = customPool === "engine" && engineFixtureIds?.size
         ? parlayFixtures.filter(f => engineFixtureIds.has(f.id))
         : parlayFixtures;
-      const rawPool = buildUniversalPool(allCustomFixtures, rates).filter(e => !parlayExcludedMarkets.has(e.market));
+      const rawPool = buildUniversalPool(allCustomFixtures, rates).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
       if (rawPool.length === 0) {
         setAutoMessage(customPool==="engine"
           ? "No qualifying games in engine pool — switch to All Fixtures or build the engine pool first."
@@ -8783,38 +10074,58 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     </div>
                   )}
 
-                  {/* H2-FIX: Market exclusion per Parley tab */}
-                  {(() => {
-                    const mktList = ["1X2","BTTS","Over/Under","Double Chance","Draw No Bet","Asian Handicap"];
-                    return (
-                      <div style={{ marginBottom:12 }}>
-                        <div style={{ fontSize:8,color:C.text,marginBottom:6,textTransform:"uppercase",letterSpacing:".1em" }}>
-                          Exclude Markets
-                          {parlayExcludedMarkets.size > 0 && (
-                            <button onClick={() => setParlayExcludedMarkets(new Set())}
-                              style={{ marginLeft:8,fontSize:7,padding:"1px 6px",borderRadius:4,background:"transparent",
-                                       border:`1px solid ${C.border}`,color:C.muted,cursor:"pointer",fontFamily:C.font }}>
-                              clear
-                            </button>
-                          )}
-                        </div>
-                        <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
-                          {mktList.map(mkt => {
-                            const on = parlayExcludedMarkets.has(mkt);
-                            return (
-                              <button key={mkt} onClick={() => toggleParlayExcludeMarket(mkt)} className="gb"
-                                style={{ fontSize:8,padding:"3px 9px",borderRadius:6,fontFamily:C.font,
-                                         background:on?`${C.red}15`:"transparent",
-                                         color:on?C.red:C.muted,
-                                         border:`1px solid ${on?C.red+"50":C.border}` }}>
-                                {on ? "✕ " : ""}{mkt}
-                              </button>
-                            );
-                          })}
-                        </div>
+                  {/* H2-FIX: Market exclusion — collapsible, engine pool markets only */}
+                  <ExcludeMarketsPanel
+                    excluded={parlayExcludedMarkets}
+                    toggle={toggleParlayExcludeMarket}
+                    clear={() => setParlayExcludedMarkets(new Set())}
+                  />
+
+                  {/* Research Mode toggle — pre-scores top candidates with live web context */}
+                  <button onClick={() => setJarvisResearch(r => !r)}
+                    style={{
+                      width:"100%", marginBottom:10, padding:"10px 14px",
+                      borderRadius:10, cursor:"pointer", fontFamily:C.font,
+                      background: jarvisResearch ? `${C.edge}12` : "transparent",
+                      border:`1px solid ${jarvisResearch ? C.edge : C.border}`,
+                      display:"flex", alignItems:"center", gap:10,
+                      transition:"all .15s",
+                    }}>
+                    {/* Toggle pill */}
+                    <div style={{
+                      width:34, height:20, borderRadius:10, flexShrink:0,
+                      background: jarvisResearch ? C.edge : C.faint,
+                      border:`1px solid ${jarvisResearch ? C.edge : C.border}`,
+                      position:"relative", transition:"background .2s",
+                    }}>
+                      <div style={{
+                        position:"absolute", top:2,
+                        left: jarvisResearch ? 16 : 2,
+                        width:14, height:14, borderRadius:"50%",
+                        background: jarvisResearch ? C.accentText : C.muted,
+                        transition:"left .2s",
+                        boxShadow:"0 1px 3px rgba(0,0,0,.2)",
+                      }}/>
+                    </div>
+                    <div style={{ textAlign:"left", flex:1 }}>
+                      <div style={{ fontSize:10, fontWeight:800,
+                        color: jarvisResearch ? C.edge : C.text }}>
+                        Research Mode
                       </div>
-                    );
-                  })()}
+                      <div style={{ fontSize:8, color:C.muted, marginTop:1, lineHeight:1.4 }}>
+                        {jarvisResearch
+                          ? "On — Jarvis will pre-score top candidates with live web context before building"
+                          : "Off — builds from model data only"}
+                      </div>
+                    </div>
+                    {jarvisResearch && (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.edge}
+                        strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="M21 21l-4.35-4.35"/>
+                      </svg>
+                    )}
+                  </button>
 
                   <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
                     style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
@@ -9029,76 +10340,98 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
 // ── MAIN COMPONENT ────────────────────────────────────────────────────────
 // ── HELP MODAL — collapsible sections ─────────────────────────────────────
+// N17: Full rewrite — reflects all features now in place. SVG icons only.
+const HELP_SECTION_ICONS = {
+  read: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  edge: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+  radar: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/></svg>,
+  tags: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>,
+  enginetab: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+  custom: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg>,
+  parlay: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg>,
+  rollover: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 7 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 7 23 7 23 13"/></svg>,
+  perf: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>,
+  ca: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
+  jarvis: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill="currentColor" opacity=".7" stroke="none"/><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+};
+
 const HELP_SECTIONS = [
   {
-    id: "read", icon: "read", title: "THE READ", sub: "best pick", color: () => C.gold,
-    what:    "The model's main recommendation for each fixture — the pick it's most confident in after running the full analysis.",
-    telling: "This went through xG, team form, standings, calibration weight, and historical hit rate for that market. STRONG badge means the confidence cleared an even higher bar than usual. The hit rate shown on each card (e.g. 'Over 1.5 hit rate: 74%') is the real historical success rate for that market at similar confidence — not a model estimate, but actual results from past picks.",
-    use:     "Tap '+ Add to Ticket' on the card. Start here for any fixture — it's the lowest-risk anchor for your ticket.",
-    caution: "Limited data badge means few match games played (early season or limited history). volatile means the league has high variance — the pick can still be right but risk is higher than the numbers suggest.",
+    id: "read", title: "THE READ", sub: "model's top pick", color: () => C.gold,
+    what:    "The model's highest-confidence pick for each fixture after running the full analysis — xG, form, standings, and calibration weight all combined.",
+    telling: "STRONG badge means confidence cleared an elevated threshold. The hit rate on the card (e.g. 'Over 1.5: 74%') is actual historical success for that market at similar confidence levels — not a forecast.",
+    use:     "Tap '+ Add to Ticket' on the card. Start here — it's the anchor for any ticket. Limited data means fewer than 10 season games played; treat these reads with more caution.",
+    caution: "Volatile label means the league has high variance. The pick can still be right but carry more actual risk than the percentage suggests.",
   },
   {
-    id: "edge", emoji: "", title: "THE EDGE", sub: "value pick", color: () => C.edge,  // N9/P18-FIX: 🔮 removed
-    what:    "A secondary pick where the model's probability is meaningfully higher than what the bookmaker's odds are implying.",
-    telling: "The book looks like it may have mispriced this outcome. The '+X% vs BOOK' figure shows the gap. Two signals or more means multiple checks converged on the same market.",
-    use:     "Works best alongside The Read in a 2-leg ticket. On its own, only worth taking if the edge is solid (+5% or more vs book). If you see 'value unclear', leave it.",
-    caution: "More risk than The Read — it's a value call, not just a probability call. No Edge showing doesn't mean the model missed anything — it means the odds don't justify an edge play today.",
+    id: "edge", title: "THE EDGE", sub: "value play", color: () => C.edge,
+    what:    "A secondary pick where the model's probability is meaningfully higher than what the bookmaker's odds imply. The book may have it wrong.",
+    telling: "The '+X% vs BOOK' gap is the signal strength. Two or more signals means multiple checks converged on the same outcome. 'Value unclear' means the gap wasn't wide enough to justify the pick.",
+    use:     "Works best as a second leg alongside The Read. Only worth taking standalone if the edge is +5% or more. Skip it if it shows 'value unclear'.",
+    caution: "Higher risk than The Read — it's a value judgment on top of a probability call. No Edge showing is not a miss — it means today's odds didn't create a qualifying gap.",
   },
   {
-    id: "radar", icon: "radar", title: "GOAL RADAR", sub: "team scoring odds", color: () => C.radar,
-    what:    "Per-team scoring probability — each team's chance of scoring at least once (O0.5) or more than once (O1.5). These are team total picks, separate from the main engine pool.",
-    telling: "Which team the model expects to find the net, and how confidently. Only shows when the probability clears a minimum threshold — if it's not showing, the signal didn't qualify, not that no prediction exists.",
-    use:     "Add as a team total leg in Custom or directly from the card. Good for confirming a BTTS read or adding a third leg. The O1.5 advisory (💡) is informational — add it via Custom if you want it in your ticket.",
-    caution: "Team total odds are often low. Check the implied odds — if it's under 1.15, there's not enough value in the leg to justify the added risk it brings to a parlay.",
+    id: "radar", title: "GOAL RADAR", sub: "team scoring odds", color: () => C.radar,
+    what:    "Per-team scoring probability — each team's chance of scoring at least once (O0.5) or more than once (O1.5). Separate from the main engine pool.",
+    telling: "Only shows when the probability clears a minimum threshold. Absence means the signal didn't qualify, not that no prediction exists.",
+    use:     "Add as a team total leg from Custom or directly from the card. Good for supporting a BTTS read or adding a third leg at low risk.",
+    caution: "Team total odds are often short. If implied odds are under 1.15 the leg adds risk without proportionate return — skip it.",
   },
   {
-    id: "tags", emoji: "🏷", title: "STRATEGY TAGS", sub: "on the card", color: () => C.amber,
-    what:    "Labels on each fixture showing which strategy conditions that game currently meets — Home Win, BTTS Value, Draw, Low Scoring, etc.",
-    telling: "Each tag needs several conditions to be true at the same time, not just one high number. So a 'BTTS Value' tag means multiple model signals point the same way, not just a decent BTTS probability.",
-    use:     "Head to the Custom tab and filter by a strategy to find every fixture meeting those conditions in one view — useful when you want to build around a specific angle.",
-    caution: "A tag means conditions are met today. Not a guarantee. A Low Scoring tag on a volatile league still carries real variance — check the league context before building.",
+    id: "tags", title: "STRATEGY TAGS", sub: "on the fixture card", color: () => C.amber,
+    what:    "Labels showing which strategy conditions a fixture currently meets — Home Win, BTTS Value, Draw, Low Scoring, and more.",
+    telling: "Each tag needs several simultaneous conditions, not just one high number. BTTS Value means multiple model signals align, not just a decent BTTS probability.",
+    use:     "Head to Custom and filter by a strategy to see every qualifying fixture in one list. Useful when building around a specific angle rather than the engine's top picks.",
+    caution: "A tag means conditions are met today. Not a guarantee. Check league context — a Low Scoring tag in a volatile division still carries real variance.",
   },
   {
-    id: "enginetab", icon: "engine", title: "THE ENGINE TAB", sub: "today's qualified picks", color: () => C.gold,
-    what:    "Only fixtures that cleared every quality gate — model confidence, empirical hit rate, data quality, and odds value — make it here. Sorted by engine score so the strongest picks are always at the top.",
-    telling: "The engine scores picks using a weighted formula combining historical win rate and live model confidence. A pick needs both a high empirical rate (historically this market lands) and a high model confidence (this specific game qualifies) to appear here. The 'volatile' label on a card is informational only — it still passed the engine's checks, just flag it as a higher-variance league.",
-    use:     "Use this tab as your shortlist before building. These are the games the system is most comfortable with today.",
-    caution: "Fewer fixtures here doesn't mean a poor day — it means the bar wasn't cleared by many games. Don't force picks just because you want a longer list.",
+    id: "enginetab", title: "THE ENGINE TAB", sub: "today's qualified picks", color: () => C.gold,
+    what:    "Only fixtures that cleared every quality gate — model confidence, empirical hit rate, data quality, and odds value — appear here. Sorted by engine score.",
+    telling: "A pick needs both a high historical rate for that market AND high model confidence for this specific game to qualify. The volatile label is informational — it still passed the bar.",
+    use:     "Use as your shortlist before building. These are the games the system is most comfortable with today.",
+    caution: "A short engine list isn't a bad day — it means few games cleared the bar. Don't force picks to get a longer list.",
   },
   {
-    id: "custom", emoji: "🎛", title: "CUSTOM TAB", sub: "strategy filter view", color: () => C.radar,
-    what:    "Browse all fixtures filtered by strategy and signal. Quick Tempo presets (one tap, pre-configured) sit at the top. Detailed Strategy shows all specific presets — Home Win, BTTS, Draw, Low Scoring etc — always visible.",
-    telling: "Every fixture shown meets the active filter conditions. Sorted by model confidence so the strongest sits at the top. Signal chips (Model Pick, Goal Radar, Upcoming, Live) are binary toggles. Advanced holds all threshold controls — xG, Win %, Clean Sheet, Odds — collapsed by default but shows an ACTIVE badge when filters are set.",
-    use:     "Step 1 — Choose a Quick Tempo preset or pick a Detailed Strategy. Step 2 — Tap fixtures to select them (finished games are blocked). Step 3 — Hit Add to Ticket. Your picks land in the draft as a banner — open the Parley System when you're ready.",
-    caution: "If you try to add a fixture that's already in your draft with a different pick, you'll get a prompt to replace or keep the existing one — nothing replaces silently.",
+    id: "custom", title: "CUSTOM TAB", sub: "strategy filter view", color: () => C.radar,
+    what:    "Browse all fixtures filtered by strategy and signal. Quick Tempo presets sit at the top. Detailed Strategy shows specific presets — Home Win, BTTS, Draw, Low Scoring — always visible.",
+    telling: "Every fixture shown meets the active filter. Sorted by model confidence. Signal chips are binary toggles. Advanced holds xG, Win %, Clean Sheet, and Odds threshold controls — shows an ACTIVE badge when set.",
+    use:     "Step 1 — Choose a Quick Tempo or Detailed Strategy. Step 2 — Tap fixtures to select. Step 3 — Hit Add to Ticket. Picks land in your draft as a banner.",
+    caution: "Adding a fixture already in your draft with a different pick prompts a replace-or-keep choice — nothing swaps silently.",
   },
   {
-    id: "parlay", icon: "parlay", title: "PARLEY SYSTEM", sub: "Jarvis · Custom · saved tickets", color: () => C.edge,
-    what:    "Where you build, review, save, and book tickets. Two build modes: Jarvis (auto-builds the single best ticket from the qualified pool) and Custom (builds N non-overlapping tickets from the same pool).",
-    telling: "Jarvis scores every qualified pick using a weighted formula — model confidence and empirical hit rate combined — then adds picks one by one until your target odds are hit. Custom does the same but across multiple tickets, making sure fixtures don't repeat.",
-    use:     "Add legs from fixture cards first if you want specific picks, or open Jarvis to let it build from scratch. Remix shuffles Jarvis for a different combination. The ✕ on each leg removes it individually. Book directly from any ticket.",
-    caution: "Draft legs are in-session only — they're not saved until you explicitly save the ticket. Saved tickets get a code you can use as a reference.",
+    id: "parlay", title: "PARLEY SYSTEM", sub: "Jarvis · Custom · saved · draft", color: () => C.edge,
+    what:    "Where you build, review, save, and book tickets. Jarvis auto-builds the best ticket from the qualified pool. Custom builds N non-overlapping tickets. The Jarvis tab also shows pre-built TA engine parleys for the day.",
+    telling: "Jarvis scores every qualified pick using a weighted formula then adds legs until your target odds are hit. The TA tab shows the engine's own pre-built parlay strategies — complete with odds and signal badges. On past dates these show WIN/LOSS/PENDING verdicts per leg.",
+    use:     "Add legs from fixture cards first if you want specific picks, or let Jarvis build from scratch. Remix shuffles for a different combination. → Draft from Code Analyzer now gives you Replace or Add options so you never accidentally clear your builder.",
+    caution: "Draft legs are in-session only. Save explicitly before leaving. Saved tickets get a reference code.",
   },
   {
-    id: "rollover", emoji: "🔁", title: "ROLLOVER SYSTEM", sub: "10-step compounding chain", color: () => C.accent,
-    what:    "A structured compounding system where the engine manages one slip per day across a 10-step chain. You put in a starting stake, the engine builds the daily pick, and your pot grows with each win.",
-    telling: "The engine selects picks using a weighted scoring formula (empirical rate and model confidence combined), then adds legs one by one until combined odds clear 2.0×. The slip is locked for the day — it won't shift even if fixture states change. Steps 3, 5, and 7 are profit gates — 30% of your pot gets locked so you keep something even if the chain fails later.",
-    use:     "Open the Rollover tab. Dashboard shows your current step and today's slip — book it there. Analytics shows the strategy pipeline and your ROI progress for the current chain. History shows past chains.",
-    caution: "One loss resets the compounding progress for that chain — but locked profit stays. Don't manually override the engine slip just because it looks conservative. The picks are chosen for survival, not aggression.",
+    id: "rollover", title: "ROLLOVER SYSTEM", sub: "10-step compounding chain", color: () => C.accent,
+    what:    "A structured compounding system. The engine manages one slip per day across a 10-step chain — your stake grows with each win.",
+    telling: "Picks use a weighted formula (empirical rate + model confidence) and build legs until combined odds clear 2.0×. The slip locks at build time and won't change during the day. Steps 3, 5, and 7 are profit gates — 30% of pot locks in so you keep something even if the chain fails later.",
+    use:     "Open the Rollover tab. Dashboard shows your current step and today's slip — book it there. Analytics shows strategy pipeline and ROI. History shows past chains. Step results feed into the Parleys tab in Performance so you can see your step-by-step win rate.",
+    caution: "One loss resets compounding — but locked profit stays. Don't override the engine slip. Picks are chosen for survival rate, not short-term aggression.",
   },
   {
-    id: "perf", emoji: "📊", title: "PERFORMANCE TAB", sub: "inside the parley system", color: () => C.muted,
-    what:    "Historical hit rate for every pick the engine has made — broken down by market, strategy, confidence band, and day. The daily pool view now collapses by date so it's not overwhelming.",
-    telling: "Which markets have been reliable, which are cold, and whether the confidence bands are calibrated (65% model confidence should be hitting around 65% of the time). The date filter at the top applies to everything — daily breakdown and all-read picks included.",
-    use:     "Check before building tickets. If a specific market is running cold this week, think twice before stacking it. Tap a day row in the pool accordion to expand individual pick results.",
-    caution: "Small samples (under 20 picks per market) swing wildly. Don't restructure your whole approach off a 5-pick run. Give it 30+ picks before drawing conclusions.",
+    id: "perf", title: "PERFORMANCE TAB", sub: "Overview · Markets · History · Parleys · Analyst", color: () => C.muted,
+    what:    "Five sub-tabs of historical performance data. Overview shows engine pool headline stats and a 14-day hit rate sparkline. Markets shows per-market and per-strategy bars — tap any bar to expand every individual fixture pick underneath it. History has the day-by-day accordion. Parleys tracks your Jarvis parley record and Rollover step history. Analyst is a combinable query builder over all picks.",
+    telling: "Overview hit rate is decay-weighted (14-day half-life) so recent form counts more. The Markets drill-down shows 60 individual picks per bucket with date, game, odds, and W/L result. Parleys breaks down hit rate by strategy label so you can see which ticket types land most consistently.",
+    use:     "Check Markets before building — if a specific market is cold this week, think twice before stacking it. Use Analyst to filter any combination: market + pick type + league + result + min confidence, sorted by date/confidence/odds.",
+    caution: "Small samples (under 20 picks per market) swing wildly. Don't restructure your approach off a 5-pick run. Give it 30+ before drawing real conclusions.",
   },
   {
-    id: "jarvis", emoji: "🤖", title: "JARVIS", sub: "AI match assistant", color: () => C.accent,
-    what:    "AI assistant with full access to every fixture's model data — xG, form, H2H, calibration quality, strategy tags, all of it.",
-    telling: "Straight-language reasoning behind any pick or concern. It's not summarising generic football knowledge — it's reading the actual numbers the model produced for that specific game.",
-    use:     "Tap 'Ask Jarvis' on any fixture card. Ask whatever you want: why this pick, any red flags, is the BTTS backed by both teams' form? The Mind Box at the top of the fixture list gives a daily overview across the whole card.",
-    caution: "Jarvis explains the model — it doesn't override it. If it sounds uncertain or hedgy, that's because the underlying data is thin or the signals are conflicting. That's useful information in itself.",
+    id: "ca", title: "CODE ANALYZER", sub: "slip review + Jarvis verdict", color: () => C.blue,
+    what:    "Paste a booking code or share link from SportyBet, Duel, or Lucky's Ledger. The model matches each leg against that day's snapshots, computes win probabilities for every pick, and Jarvis delivers a sharp verdict using live web search.",
+    telling: "Leg cards show model probability vs bookmaker-implied probability. The 'Rebuild' tab lets you swap any leg from your original pick to the model's top pick for that game — leg by leg — and book the rebuilt slip directly.",
+    use:     "Paste code → Analyze → read the Jarvis verdict → tap Rebuild to swap weak legs → → Draft (with Replace or Add choice) to move to your Parley builder. If legs show 'no snapshot', fetch that date in Live Model first.",
+    caution: "If a leg fails to match a fixture, the side names may be using a bookmaker variant the normaliser hasn't seen. The system covers most common aliases. Jarvis verdict requires Gemini — if it stalls, your API quota may be low.",
+  },
+  {
+    id: "jarvis", title: "JARVIS", sub: "AI match assistant", color: () => C.accent,
+    what:    "AI assistant with full access to every fixture's model data — xG, form, H2H, calibration quality, strategy tags, table position, all of it — plus live web search for current squad news.",
+    telling: "Not generic football analysis. Jarvis is reading the actual numbers the model produced for that specific game and adding live injury and motivation context on top.",
+    use:     "Tap the Jarvis FAB at any time. Ask about any fixture, any pick, or your whole ticket. The Mind Box at the top of the fixture list gives a daily overview across the full card. On past dates in the Jarvis tab, pre-built tickets show with WIN/LOSS/PENDING verdicts per leg.",
+    caution: "Jarvis explains the model — it doesn't override it. If it sounds uncertain, the underlying data is thin or signals conflict. That's useful information in itself, not a malfunction.",
   },
 ];
 
@@ -9121,7 +10454,11 @@ function HelpModal({ onClose }) {
               <div style={{ fontSize:8,color:C.text,opacity:.45,marginTop:2 }}>Tap any section to expand</div>
             </div>
             <button onClick={onClose} className="gb"
-              style={{ background:"transparent",border:"none",color:C.text,fontSize:18,padding:0,lineHeight:1 }}>✕</button>
+              style={{ background:"transparent",border:"none",color:C.muted,padding:4,lineHeight:1,display:"flex",alignItems:"center" }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -9129,17 +10466,18 @@ function HelpModal({ onClose }) {
         <div style={{ margin:"14px 20px 6px",background:C.surface,borderRadius:10,
           border:`1px solid ${C.goldBorder}`,padding:"12px 14px" }}>
           <div style={{ fontSize:8,color:C.gold,fontWeight:800,letterSpacing:".12em",
-            textTransform:"uppercase",marginBottom:10 }}>Quick Start — 3 Steps</div>
+            textTransform:"uppercase",marginBottom:10 }}>Quick Start — 4 Steps</div>
           {[
-            ["1", C.blue,   "Tap FETCH",          "Load today's fixtures. The engine analyses every match."],
-            ["2", C.green,  "Add to Ticket",       "Find a card with THE READ (best pick). Tap + Add to Ticket."],
-            ["3", C.radar,  "Build & Book",         "Tap Parley System → Build → Book to SportyBet."],
-          ].map(([n, col, title, desc]) => (
-            <div key={n} style={{ display:"flex",gap:10,alignItems:"flex-start",marginBottom:8 }}>
+            [C.blue,   "Fetch today's fixtures", "Tap FETCH. Engine loads and scores every match for the day."],
+            [C.gold,   "Find a pick",            "Engine tab = pre-qualified picks. Custom tab = filter by strategy. Tap + Add to Ticket on any card."],
+            [C.edge,   "Build your ticket",      "Open Parley System. Let Jarvis auto-build, or review your draft legs and book directly."],
+            [C.green,  "Track performance",      "Performance tab → Overview for hit rate. Markets → tap any bar for fixture-level results."],
+          ].map(([col, title, desc], i) => (
+            <div key={i} style={{ display:"flex",gap:10,alignItems:"flex-start",marginBottom: i < 3 ? 8 : 0 }}>
               <div style={{ width:20,height:20,borderRadius:"50%",background:`${col}20`,
                 border:`1px solid ${col}40`,display:"flex",alignItems:"center",justifyContent:"center",
                 flexShrink:0,marginTop:1 }}>
-                <span style={{ fontSize:9,fontWeight:800,color:col }}>{n}</span>
+                <span style={{ fontSize:9,fontWeight:800,color:col }}>{i+1}</span>
               </div>
               <div>
                 <div style={{ fontSize:10,fontWeight:800,color:C.text }}>{title}</div>
@@ -9154,17 +10492,24 @@ function HelpModal({ onClose }) {
           {HELP_SECTIONS.map(sec => {
             const isOpen = openSection === sec.id;
             const col    = sec.color();
+            const icon   = HELP_SECTION_ICONS[sec.id];
             return (
               <div key={sec.id} style={{ marginBottom:6,borderRadius:9,
                 border:`1px solid ${isOpen ? col+"40" : C.border}`,
                 background:isOpen ? `${col}06` : C.surface,
                 overflow:"hidden",transition:"border-color .15s" }}>
-                {/* Section header — always visible */}
+                {/* Section header */}
                 <button onClick={() => setOpenSection(isOpen ? null : sec.id)}
                   style={{ width:"100%",display:"flex",alignItems:"center",gap:10,
                     padding:"11px 14px",background:"transparent",border:"none",
                     cursor:"pointer",textAlign:"left",fontFamily:C.font }}>
-                  <span style={{ fontSize:14,lineHeight:1,flexShrink:0 }}>{sec.emoji}</span>
+                  {/* SVG icon in a tinted circle */}
+                  <div style={{ width:28,height:28,borderRadius:"50%",
+                    background:`${col}15`,border:`1px solid ${col}30`,
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    color:col,flexShrink:0 }}>
+                    {icon}
+                  </div>
                   <div style={{ flex:1,minWidth:0 }}>
                     <div style={{ display:"flex",alignItems:"baseline",gap:6 }}>
                       <span style={{ fontSize:10,fontWeight:800,color:col,letterSpacing:".08em",textTransform:"uppercase" }}>
@@ -9175,26 +10520,28 @@ function HelpModal({ onClose }) {
                       </span>
                     </div>
                   </div>
-                  <span style={{ fontSize:9,color:C.text,opacity:.35,flexShrink:0 }}>
-                    {isOpen ? "▲" : "▼"}
-                  </span>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transform: isOpen ? "rotate(180deg)" : "none", transition:"transform .2s", flexShrink:0 }}>
+                    <polyline points="6 9 12 15 18 9"/>
+                  </svg>
                 </button>
 
                 {/* Expanded content */}
                 {isOpen && (
                   <div style={{ padding:"0 14px 14px",display:"flex",flexDirection:"column",gap:10 }}>
                     {[
-                      { label:"What it is",           text: sec.what,    labelColor: C.text },
-                      { label:"What it's telling you", text: sec.telling, labelColor: col   },
+                      { label:"What it is",            text: sec.what,    labelColor: C.text  },
+                      { label:"What it's telling you", text: sec.telling, labelColor: col     },
                       { label:"How to use it",         text: sec.use,     labelColor: C.green },
                       { label:"When to be cautious",   text: sec.caution, labelColor: C.amber },
                     ].map(({ label, text, labelColor }) => (
                       <div key={label}>
-                        <div style={{ fontSize:7,fontWeight:800,color:labelColor,opacity:.8,
+                        <div style={{ fontSize:7,fontWeight:800,color:labelColor,opacity:.85,
                           textTransform:"uppercase",letterSpacing:".1em",marginBottom:3 }}>
                           {label}
                         </div>
-                        <div style={{ fontSize:9,color:C.text,opacity:.8,lineHeight:1.6 }}>
+                        <div style={{ fontSize:9,color:C.text,opacity:.8,lineHeight:1.65 }}>
                           {text}
                         </div>
                       </div>
@@ -9216,53 +10563,60 @@ function HelpModal({ onClose }) {
 
 // ── FIRST-RUN ONBOARDING FLOW ─────────────────────────────────────────────
 // Full-screen slide overlay. Shows once on first launch.
-// Flag: grm_onboarded_v2 in localStorage (bumped from v1 so existing users see updated tutorial).
-// Onboarding slide SVG icons — no emoji
+// N17: Bumped to grm_onboarded_v4 — all new features now reflected.
+// Existing users on v3 will see the updated tutorial once on next launch.
 const ONBOARD_ICONS = [
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="3" x2="12" y2="21"/><path d="M20 12H4"/></svg>,
   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>,
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg>,
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
-  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/></svg>,
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 7 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 7 23 7 23 13"/></svg>,
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>,
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
 ];
 
 const ONBOARD_SLIDES = [
   {
     color:   () => C.blue,
     title:   "Fetch today's fixtures",
-    body:    "Tap FETCH and the engine loads every fixture for the day, runs each one through the model, and scores every market. Then you have the full picture.",
-    tip:     "You can load past dates too. Results auto-merge so you can review how picks landed.",
+    body:    "Tap FETCH and the engine loads every fixture for the day, runs each one through the model, and scores every market. Past dates work too — results auto-merge so you can review how picks landed.",
+    tip:     "The engine runs xG, form, standings, calibration weight, and historical hit rate together. It's not just one number.",
   },
   {
     color:   () => C.gold,
     title:   "Three signals per match",
-    body:    "The Read is the model's highest-confidence pick. The Edge is where the model thinks the bookmaker's odds are wrong. Goal Radar shows which team is expected to score. Tap Full Model on any card for the complete breakdown.",
-    tip:     "Strong badge means the model is especially confident. Limited data means fewer than 10 season games — treat with caution.",
+    body:    "The Read is the model's highest-confidence pick. The Edge is where bookmaker odds look mispriced. Goal Radar shows per-team scoring probability. Tap Full Model on any card for the complete breakdown with xG, form, and table position.",
+    tip:     "STRONG badge means extra confidence. Limited data means fewer than 10 season games — use those reads with more caution.",
   },
   {
     color:   () => C.accent,
     title:   "The Engine tab",
-    body:    "Not every fixture qualifies. The Engine tab only shows games that cleared every quality threshold — model confidence, historical hit rate, and odds value. Sorted by engine score.",
-    tip:     "A short engine list is not a bad sign. It means fewer games cleared the bar today — quality over volume.",
+    body:    "Not every fixture qualifies. The Engine tab shows only games that cleared every threshold — model confidence, historical hit rate, data quality, and odds value. Sorted by engine score so the strongest sits at the top.",
+    tip:     "A short engine list means fewer games cleared the bar today. Quality over volume — don't force picks just to build a longer list.",
   },
   {
     color:   () => C.edge,
     title:   "Build your ticket",
-    body:    "Tap Add to Ticket on any pick to add it to your draft. Open the Parlay System to review. Jarvis builds the best ticket automatically. Custom lets you hand-pick from the fixture list.",
-    tip:     "Remix shuffles Jarvis for a different combination. The X on each leg removes it individually.",
+    body:    "Tap Add to Ticket on any pick. Open the Parley System to review. Jarvis auto-builds the best ticket from the engine pool. The Jarvis tab also shows pre-built TA engine parleys — on past dates these show WIN/LOSS/PENDING per leg.",
+    tip:     "Remix shuffles Jarvis for a different combination. Sending picks from Code Analyzer now asks whether to replace or add to your existing draft.",
   },
   {
     color:   () => C.green,
-    title:   "Rollover compound engine",
-    body:    "A 10-step compounding chain. The engine picks one optimised slip per day and manages your stake across steps. Profit gates at steps 3, 5, and 7 lock secured gains even if the chain fails later.",
-    tip:     "The daily slip locks at build time. It will not change even if fixture states update during the day.",
+    title:   "Rollover — compound engine",
+    body:    "A 10-step compounding chain. One optimised slip per day, managed by the engine. Profit gates at steps 3, 5, and 7 lock secured gains even if the chain fails later. Step results feed into the Parleys performance tab so you can track your chain win rate over time.",
+    tip:     "The daily slip locks at build time and won't change during the day.",
   },
   {
     color:   () => C.radar,
-    title:   "Book and track",
-    body:    "Built a ticket you like? Hit Book Now to send it straight to your bookmaker — picks pre-load automatically. The Performance tab tracks hit rate by market and day.",
-    tip:     "Saved tickets get a shareable code. Use it as a reference or to reload a past build.",
+    title:   "Performance — five sub-tabs",
+    body:    "Overview shows engine hit rate and a 14-day sparkline. Markets lets you tap any bar to see every individual fixture pick with its result. Parleys tracks your Jarvis parley record and Rollover step history with per-strategy hit rate. Analyst is a combinable query builder across all picks.",
+    tip:     "Small samples swing wildly. Give any market 30+ picks before drawing real conclusions from its hit rate.",
+  },
+  {
+    color:   () => C.blue,
+    title:   "Code Analyzer",
+    body:    "Paste a booking code from SportyBet, Duel, or Lucky's Ledger. The model matches each leg against that day's snapshots, shows model probability vs bookmaker odds, and Jarvis delivers a verdict using live web search. The Rebuild tab lets you swap any weak leg for the model's pick and re-book.",
+    tip:     "If a leg shows no snapshot, fetch that date in Live Model first. The analyzer covers most common team name variants automatically.",
   },
 ];
 
@@ -9274,7 +10628,7 @@ function FirstRunFlow({ onDone }) {
   const icon  = ONBOARD_ICONS[slide];
 
   const finish = () => {
-    try { localStorage.setItem("grm_onboarded_v3", "1"); } catch {}
+    try { localStorage.setItem("grm_onboarded_v4", "1"); } catch {}
     onDone();
   };
 
@@ -9287,7 +10641,6 @@ function FirstRunFlow({ onDone }) {
       display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
       padding:"32px 24px", fontFamily:"var(--font)",
     }}>
-      {/* Skip */}
       <button onClick={finish} className="gb-ghost"
         style={{ position:"absolute", top:20, right:20, padding:"6px 14px", fontSize:10, opacity:.6 }}>
         Skip
@@ -9296,7 +10649,6 @@ function FirstRunFlow({ onDone }) {
       <div style={{ width:"100%", maxWidth:360, display:"flex", flexDirection:"column",
                     alignItems:"center", textAlign:"center", flex:1, justifyContent:"center", gap:22 }}>
 
-        {/* Icon circle — SVG, no emoji */}
         <div style={{
           width:76, height:76, borderRadius:"var(--r-xl)",
           background:`${col}14`, border:`1px solid ${col}35`,
@@ -9306,7 +10658,6 @@ function FirstRunFlow({ onDone }) {
           {icon}
         </div>
 
-        {/* Step progress */}
         <div style={{ display:"flex", gap:5, width:"100%" }}>
           {ONBOARD_SLIDES.map((_,i) => (
             <div key={i} style={{
@@ -9317,7 +10668,6 @@ function FirstRunFlow({ onDone }) {
           ))}
         </div>
 
-        {/* Step counter + title */}
         <div>
           <div style={{ fontSize:9, fontWeight:800, color:"var(--muted)", letterSpacing:".12em",
                         textTransform:"uppercase", marginBottom:8 }}>
@@ -9331,7 +10681,6 @@ function FirstRunFlow({ onDone }) {
           </div>
         </div>
 
-        {/* Tip */}
         <div style={{
           background:`${col}0e`, border:`1px solid ${col}28`,
           borderRadius:"var(--r-lg)", padding:"10px 14px", width:"100%",
@@ -9343,7 +10692,6 @@ function FirstRunFlow({ onDone }) {
         </div>
       </div>
 
-      {/* Buttons */}
       <div style={{ width:"100%", maxWidth:360, marginTop:24, display:"flex", gap:8 }}>
         <button onClick={next} className="gb-primary"
           style={{ flex:1, padding:"14px 0", fontSize:13, fontWeight:800 }}>
@@ -9768,7 +11116,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
             pointerEvents: "none",
             animation: "grm-fade-in .2s ease",
           }}>
-          🌟 Ask Jarvis anything
+          Ask Jarvis anything
             <div style={{
               position: "absolute", bottom: -5,
               [isRightEdge ? "right" : "left"]: 18,
@@ -9797,10 +11145,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           style={{
             width: SIZE, height: SIZE,
             borderRadius: "50%",
-            // Redesigned FAB: solid gradient fill for visual weight on any theme
-            background: dragging
-              ? `linear-gradient(135deg, ${C.accent}, ${C.edge || C.accent})`
-              : `linear-gradient(135deg, ${C.accent}ee, ${C.edge || C.accent}cc)`,
+            background: dragging ? C.accent : `${C.accent}ee`,
             border: `2px solid ${C.accent}`,
             boxShadow: dragging
               ? `0 0 0 5px ${C.accent}28, 0 14px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15)`
@@ -9827,10 +11172,14 @@ function JarvisFAB({ C, isDesktop, onClick }) {
             background:"rgba(255,255,255,0.10)", borderRadius:"50% 50% 0 0",
             pointerEvents:"none",
           }}/>
-          {/* Jarvis sparkle icon */}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ position:"relative", zIndex:1 }}>
-            <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z" fill="currentColor" stroke="none" opacity=".9"/>
-            <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/>
+          {/* Chat bubble icon — clean, recognisable as AI assistant */}
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+            style={{ position:"relative", zIndex:1 }}>
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" fill="currentColor" opacity=".2"/>
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            <line x1="9" y1="10" x2="15" y2="10" strokeWidth="1.6"/>
+            <line x1="9" y1="13" x2="13" y2="13" strokeWidth="1.6"/>
           </svg>
           <span style={{ fontSize:6, fontWeight:900, letterSpacing:".06em",
                           textTransform:"uppercase", opacity:.85, position:"relative", zIndex:1,
@@ -10080,7 +11429,7 @@ export default function GRMPro() {
 
   // ── Onboarding flags ──────────────────────────────────────────────────────
   const [showOnboarding, setShowOnboarding] = useState(() => {
-    try { return !localStorage.getItem("grm_onboarded_v3"); } catch { return false; }
+    try { return !localStorage.getItem("grm_onboarded_v4"); } catch { return false; }
   });
   const [showCustomBanner, setShowCustomBanner] = useState(() => {
     try { return !localStorage.getItem("grm_custom_onboarded_v1"); } catch { return false; }
@@ -10996,50 +12345,93 @@ export default function GRMPro() {
       {drawerOpen && (
         <div style={{ position:"fixed",inset:0,zIndex:200 }} onClick={() => setDrawerOpen(false)}>
           <div onClick={e => e.stopPropagation()} style={{
-            position:"absolute",top:0,right:0,height:"100%",width:290,
+            position:"absolute",top:0,right:0,height:"100%",width:280,
             background:C.modalBg,borderLeft:`1px solid ${C.border}`,
-            overflowY:"auto",display:"flex",flexDirection:"column",gap:0,
-            transform:"translateX(0)",
+            overflowY:"auto",display:"flex",flexDirection:"column",
           }}>
-            {/* Drawer header */}
-            <div style={{ padding:"14px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
-              <span style={{ fontSize:12,fontWeight:800,color:C.text,letterSpacing:".05em" }}>FILTERS</span>
-              <button onClick={() => setDrawerOpen(false)} className="gb"
-                style={{ background:"transparent",border:"none",color:C.text,fontSize:16,padding:"2px 8px" }}>✕</button>
+            {/* Header */}
+            <div style={{ padding:"16px 18px 14px",borderBottom:`1px solid ${C.border}`,
+              display:"flex",justifyContent:"space-between",alignItems:"center",
+              position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
+              <div>
+                <div style={{ fontSize:13,fontWeight:800,color:C.text,letterSpacing:".04em" }}>Filters</div>
+                {(leagueFilter || sortActive.size > 0) && (
+                  <div style={{ fontSize:8,color:C.accent,marginTop:2 }}>
+                    {(leagueFilter ? 1 : 0) + sortActive.size} active
+                  </div>
+                )}
+              </div>
+              <button onClick={() => setDrawerOpen(false)}
+                style={{ background:"transparent",border:"none",color:C.muted,cursor:"pointer",
+                         padding:4,display:"flex",alignItems:"center" }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
             </div>
 
-            <div style={{ padding:"14px 16px",display:"flex",flexDirection:"column",gap:14 }}>
-              {/* League Filter — all tabs including custom */}
+            <div style={{ padding:"18px 18px 32px", display:"flex", flexDirection:"column", gap:24 }}>
+
+              {/* League Filter */}
               {availableLeagues.length > 1 && (
                 <div>
-                  <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>League</div>
+                  <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                    letterSpacing:".14em",marginBottom:10 }}>League</div>
                   <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
                 </div>
               )}
 
-              {/* Sort/Filter — all tabs including custom */}
+              {/* Sort & Filter */}
               <div>
-                <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Sort & Filter</div>
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Sort & Filter</div>
                 <SortFilter active={sortActive} setActive={setSortActive} />
               </div>
 
-              {/* Theme */}
+              {/* Divider */}
+              <div style={{ height:1,background:C.border }} />
+
+              {/* Appearance */}
               <div>
-                <div style={{ fontSize:8,color:C.text,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Appearance</div>
-                <button onClick={() => { setThemePickerOpen(true); setDrawerOpen(false); }} className="gb"
-                  style={{ background:C.accentDim,border:`1px solid ${C.accentBorder}`,color:C.accent,padding:"7px 14px",fontSize:10,width:"100%" }}>
-                  Change Theme
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Appearance</div>
+                <button onClick={() => { setThemePickerOpen(true); setDrawerOpen(false); }}
+                  style={{ width:"100%",padding:"11px 14px",borderRadius:10,cursor:"pointer",
+                           background:C.surface,border:`1px solid ${C.border}`,
+                           fontFamily:C.font,display:"flex",alignItems:"center",gap:10,
+                           transition:"background .12s" }}
+                  onMouseEnter={e => e.currentTarget.style.background = C.faint}
+                  onMouseLeave={e => e.currentTarget.style.background = C.surface}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent}
+                    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+                  </svg>
+                  <span style={{ fontSize:11,fontWeight:700,color:C.text,flex:1,textAlign:"left" }}>Change Theme</span>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="9 18 15 12 9 6"/>
+                  </svg>
                 </button>
               </div>
 
-              {/* Admin controls — only when adminMode */}
+              {/* Admin controls */}
               {adminMode && (
                 <div>
-                  <div style={{ fontSize:8,color:C.red,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:6 }}>Admin</div>
+                  <div style={{ fontSize:7,fontWeight:800,color:C.red,textTransform:"uppercase",
+                    letterSpacing:".14em",marginBottom:10 }}>Admin</div>
                   <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
-                    <button onClick={() => { fetchData(true); setDrawerOpen(false); }} disabled={loading} className="gb"
-                      style={{ background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,padding:"7px 12px",fontSize:9 }}>
-                      ↺ Force Refresh
+                    <button onClick={() => { fetchData(true); setDrawerOpen(false); }} disabled={loading}
+                      style={{ padding:"9px 14px",borderRadius:8,cursor:"pointer",fontFamily:C.font,
+                               background:"transparent",border:`1px solid ${C.radar}40`,color:C.radar,
+                               fontSize:10,fontWeight:700,display:"flex",alignItems:"center",gap:8 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="1 4 1 10 7 10"/>
+                        <path d="M3.51 15a9 9 0 1 0 .49-4"/>
+                      </svg>
+                      Force Refresh
                     </button>
                     {fixtures.length > 0 && (
                       <button onClick={async () => {
@@ -11047,51 +12439,76 @@ export default function GRMPro() {
                           const res = await fetch(`${SERVER}/api/refresh-odds?date=${date}`, { method:"POST", headers:{"x-admin-token": adminToken} });
                           const d = await res.json();
                           if (d.updated) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${date}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } }
-                          // Auto-fetch after odds refresh — no need to manually hit Fetch again
                           await fetchData(true);
                         } catch {}
                         setDrawerOpen(false);
-                      }} className="gb"
-                        style={{ background:"transparent",border:`1px solid ${C.gold}50`,color:C.gold,padding:"7px 12px",fontSize:9 }}>
-                        $ Refresh Odds
+                      }} style={{ padding:"9px 14px",borderRadius:8,cursor:"pointer",fontFamily:C.font,
+                                  background:"transparent",border:`1px solid ${C.gold}40`,color:C.gold,
+                                  fontSize:10,fontWeight:700,display:"flex",alignItems:"center",gap:8 }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                          strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="12" y1="1" x2="12" y2="23"/>
+                          <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                        </svg>
+                        Refresh Odds
                       </button>
                     )}
                   </div>
                 </div>
               )}
 
-              {/* Lock/Unlock admin + Help */}
-              <div style={{ display:"flex",flexDirection:"column",gap:6,marginTop:4 }}>
-                <button onClick={() => { toggleAdmin(); setDrawerOpen(false); }} className="gb"
-                  style={{ background:adminMode?C.redDim:"transparent",border:`1px solid ${adminMode?C.red:C.faint}`,color:adminMode?C.red:C.text,padding:"7px 12px",fontSize:9 }}>
+              {/* Divider */}
+              <div style={{ height:1,background:C.border }} />
+
+              {/* Admin lock + Help */}
+              <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                <button onClick={() => { toggleAdmin(); setDrawerOpen(false); }}
+                  style={{ padding:"9px 14px",borderRadius:8,cursor:"pointer",fontFamily:C.font,
+                           background:adminMode?`${C.red}10`:"transparent",
+                           border:`1px solid ${adminMode?C.red:C.border}`,
+                           color:adminMode?C.red:C.muted,fontSize:10,fontWeight:700,
+                           display:"flex",alignItems:"center",gap:8 }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    {adminMode
+                      ? <><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></>
+                      : <><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>}
+                  </svg>
                   {adminMode ? "Lock Admin" : "Admin"}
                 </button>
-                <button onClick={() => { setHelpOpen(true); setDrawerOpen(false); }} className="gb"
-                  style={{ background:C.accentDim, border:`1px solid ${C.accentBorder}`, color:C.accent,
-                           padding:"9px 12px", fontSize:9, fontWeight:700,
-                           display:"flex", alignItems:"center", gap:8, width:"100%", borderRadius:C.btnRadius }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+
+                <button onClick={() => { setHelpOpen(true); setDrawerOpen(false); }}
+                  style={{ padding:"11px 14px",borderRadius:10,cursor:"pointer",fontFamily:C.font,
+                           background:C.accentDim,border:`1px solid ${C.accentBorder}`,
+                           display:"flex",alignItems:"center",gap:10 }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent}
+                    strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="16" x2="12" y2="12"/>
+                    <line x1="12" y1="8" x2="12.01" y2="8"/>
                   </svg>
-                  <span style={{ flex:1, textAlign:"left" }}>
-                    Learn how it works
-                    <span style={{ display:"block", fontSize:8, fontWeight:500, opacity:.7, marginTop:1 }}>Tap to open guide</span>
-                  </span>
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0, opacity:.5 }}>
+                  <div style={{ flex:1, textAlign:"left" }}>
+                    <div style={{ fontSize:11,fontWeight:800,color:C.accent }}>Learn how it works</div>
+                    <div style={{ fontSize:8,color:C.accent,opacity:.6,marginTop:1 }}>Tap to open guide</div>
+                  </div>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={C.accent}
+                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity:.5 }}>
                     <polyline points="9 18 15 12 9 6"/>
                   </svg>
                 </button>
               </div>
+
             </div>
           </div>
         </div>
       )}
 
-      {activeTab === "backtest" && mainView === "main" && (
-        <div style={{ padding:"16px 14px" }}>
-          <BacktestTab loadSnapshot={loadSnapshot} adminMode={adminMode} adminToken={adminToken} onReloadFixtures={async (d) => { if (d === date) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${d}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } } }} />
-        </div>
-      )}
+      {/* N34-FIX: BacktestTab kept mounted always — display:none when inactive.
+          Conditional && unmounts on every tab switch, losing all sub-tab state and
+          any results the user loaded. display:none preserves state with zero prop changes. */}
+      <div style={{ display: activeTab === "backtest" && mainView === "main" ? undefined : "none", padding:"16px 14px" }}>
+        <BacktestTab loadSnapshot={loadSnapshot} adminMode={adminMode} adminToken={adminToken} onReloadFixtures={async (d) => { if (d === date) { const r = await fetch(`${SERVER}/api/load-snapshot?date=${d}`); const j = await r.json(); if (j.data) { setFixtures(j.data); setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})); } } }} />
+      </div>
 
       {activeTab === "code" && mainView === "main" && (
         <div style={{ padding:"16px 14px" }}>
@@ -11104,7 +12521,7 @@ export default function GRMPro() {
               setMainFocusFixture(fixture);
               setFullModelReturnTab("code");
             }}
-            onSendToDraft={(legs) => {
+            onSendToDraft={(legs, mode = "replace") => {
             const incoming = legs.map(l => ({
               game:      l.game || `${l.home} vs ${l.away}`,
               pick:      l.pick,
@@ -11115,27 +12532,36 @@ export default function GRMPro() {
               empiricalRate: l.empiricalRate || null,
               _fromCodeAnalyzer: true,
             }));
-            // Merge: incoming legs replace any existing leg for the same fixtureId,
-            // and are appended for fixtureIds not yet in the draft.
-            // This preserves picks the user already added from the fixture list.
-            setDraftLegs(prev => {
-              const merged = [...prev];
-              for (const leg of incoming) {
-                const idx = leg.fixtureId
-                  ? merged.findIndex(l => l.fixtureId === leg.fixtureId)
-                  : -1;
-                if (idx >= 0) merged[idx] = leg;
-                else merged.push(leg);
-              }
-              return merged;
-            });
+            // N13-FIX: mode "replace" clears builder first, "add" merges with existing.
+            // Prior behaviour always merged regardless — user had no control.
+            if (mode === "replace") {
+              setDraftLegs(incoming);
+            } else {
+              // Merge: incoming legs replace any existing leg for the same fixtureId,
+              // and are appended for fixtureIds not yet in the draft.
+              setDraftLegs(prev => {
+                const merged = [...prev];
+                for (const leg of incoming) {
+                  const idx = leg.fixtureId
+                    ? merged.findIndex(l => l.fixtureId === leg.fixtureId)
+                    : -1;
+                  if (idx >= 0) merged[idx] = leg;
+                  else merged.push(leg);
+                }
+                return merged;
+              });
+            }
             setParlayJarvisOpen(true);
           }} />
         </div>
       )}
 
-      {/* Stats tab — rendered at GRMPro level via bottom nav */}
-      {activeTab === "perf" && mainView === "main" && <PoolPerformanceTab serverUrl={SERVER} />}
+      {/* N34-FIX: PoolPerformanceTab kept mounted always — display:none when inactive.
+          Without this, every nav away triggers a fresh API fetch on return and the
+          selected day-range, scroll position, and accordion open state are lost. */}
+      <div style={{ display: activeTab === "perf" && mainView === "main" ? undefined : "none" }}>
+        <PoolPerformanceTab serverUrl={SERVER} />
+      </div>
 
       {/* Rollover — rendered at GRMPro level via bottom nav */}
       {mainView === "rollover" && (
