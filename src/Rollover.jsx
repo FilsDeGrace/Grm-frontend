@@ -474,7 +474,7 @@ function TimelineStep({ row, state, stepData, isLast, C, pick, isPast, blocked, 
                 <div style={{ fontSize:9, color:C.muted, lineHeight:1.6 }}>
                   {isPast
                     ? "Pool was too thin or this date wasn't active."
-                    : "Engine couldn't clear ≥2.0× today. Check back when new fixtures load."}
+                    : "No qualifying slip yet — engine will update as fixtures lock in."}
                 </div>
               </div>
             )}
@@ -485,9 +485,9 @@ function TimelineStep({ row, state, stepData, isLast, C, pick, isPast, blocked, 
                 {pick.belowTarget && (
                   <div style={{ padding:"8px 14px", background:`${C.amber||C.gold}12`,
                                 borderBottom:`1px solid ${C.amber||C.gold}30` }}>
-                    <div style={{ fontSize:9, fontWeight:800, color:C.amber||C.gold }}>⚠ Below 2.0× target — thin pool day</div>
+                    <div style={{ fontSize:9, fontWeight:800, color:C.amber||C.gold }}>Slip below 2.0× target</div>
                     <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.5 }}>
-                      Engine couldn't clear threshold. Booking is your call.
+                      Pool was thin today. Review the legs before booking.
                     </div>
                   </div>
                 )}
@@ -1531,11 +1531,10 @@ function SlipCard({ pick, date, C, SERVER, onRefresh, fixtures = [], onFullModel
                         background:`${C.amber||C.gold}12`, border:`1px solid ${C.amber||C.gold}35`,
                         borderRadius:8, padding:"8px 12px" }}>
             <div style={{ fontSize:9, color:C.amber||C.gold, fontWeight:800, marginBottom:3 }}>
-              ⚠ Pool too thin today — slip shown below 2.0× target
+              Slip below 2.0× — thin pool day
             </div>
             <div style={{ fontSize:8, color:C.muted, lineHeight:1.6 }}>
-              The engine couldn't find enough qualifying picks to clear 2.0×. You can still book this slip,
-              but understand the target odds are lower than usual. Tomorrow's pool may be stronger.
+              Not enough qualifying picks to hit the target today. Review before booking — tomorrow's pool may be stronger.
             </div>
           </div>
         )}

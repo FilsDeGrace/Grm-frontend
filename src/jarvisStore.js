@@ -70,6 +70,30 @@ export const MARKET_GROUPS = [
 export const TOP_LEAGUES_RANK = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Champions League","UEFA"];
 export const TOP_COUNTRIES    = ["England","Spain","Italy","Germany","France","Portugal","Netherlands"];
 
+// ── FAB FEATURE-DISCOVERY TIP CAROUSEL ───────────────────────────────────────
+// Short, single-purpose tips shown above the Jarvis FAB while idle, cycling
+// through different parts of the app (not just "Ask Jarvis anything").
+// Each tip gets its own read-time budget based on text length (~min 4.5s,
+// scales up for longer copy) so a short tip doesn't linger and a long tip
+// doesn't get cut off mid-read.
+export const FAB_FEATURE_TIPS = [
+  { id: "fab_tip_custom",   text: "Tip: Go to Custom on Live Model — set your own strategy and build from it." },
+  { id: "fab_tip_tools",    text: "Tip: Tools tab → Code Analyzer reads any SportyBet or Lucky's Ledger slip code." },
+  { id: "fab_tip_engine",   text: "Tip: The Engine tab only shows fixtures that cleared every confidence threshold." },
+  { id: "fab_tip_rollover", text: "Tip: Rollover compounds one slip a day — profit gates lock in gains at steps 3, 5, 7." },
+  { id: "fab_tip_perf",     text: "Tip: Performance → Markets — tap any bar to see every pick behind that number." },
+  { id: "fab_tip_jarvis",   text: "Ask Jarvis anything" }, // legacy default, kept in rotation
+];
+
+// Minimum and per-character read-time budget (ms) for the tip popup.
+// Tuned so a ~40 char tip gets ~4.5s and a ~90 char tip gets ~7s — enough
+// to read once at a comfortable pace without feeling rushed or sluggish.
+export function tipReadDuration(text = "") {
+  const MIN_MS = 4500;
+  const PER_CHAR_MS = 45;
+  return Math.max(MIN_MS, Math.min(8000, text.length * PER_CHAR_MS));
+}
+
 export const BOOKING_CODE_RE = /\b[A-Z0-9]{6,12}\b/;
 export const SB_LINK_RE      = /sportybet\.com/i;
 export const LL_LINK_RE      = /luckysledger\.com|luckyledger\.com/i;
@@ -335,6 +359,11 @@ export function buildParley({
     mode:      "jarvis",
     legs,
     totalOdds,
+    // DATE FIX: every Jarvis-built ticket must carry the date it was built for.
+    // Without this, tickets saved from chat have no `date` field, which breaks
+    // the backtest evaluator (it groups/filters tickets by date) and any
+    // past-date readonly logic that checks ticket.date downstream.
+    date:      new Date().toISOString().slice(0, 10),
     createdAt: Date.now(),
     savedAt:   null,
     bookedCode: null,

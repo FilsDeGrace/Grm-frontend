@@ -142,13 +142,31 @@ function TopFormStrip({ form, align = "left" }) {
 }
 
 // BOTTOM form strip — engine recentResults with scores
+// B8-FIX: show daysAgo on each chip so users know when the result was.
+// Section header added in Team Totals render ("Last 5 · all competitions").
 function BottomFormStrip({ recentResults }) {
   if (!recentResults?.length) return null;
   return (
-    <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
-      {recentResults.slice(0, 5).map((r, i) => (
-        <WLDChip key={i} result={r.outcome} score={`${r.scored}-${r.conceded}`} />
-      ))}
+    <div>
+      <div style={{ fontSize: 7, color: C.muted, letterSpacing: ".08em", fontWeight: 700,
+                    textTransform: "uppercase", marginBottom: 4, opacity: .7 }}>
+        Last {Math.min(recentResults.length, 5)} · all competitions
+      </div>
+      <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+        {recentResults.slice(0, 5).map((r, i) => {
+          const age = r.daysAgo != null
+            ? r.daysAgo === 0 ? "today" : `${r.daysAgo}d`
+            : null;
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <WLDChip result={r.outcome} score={`${r.scored}-${r.conceded}`} />
+              {age && (
+                <span style={{ fontSize: 6, color: C.muted, opacity: .6, lineHeight: 1 }}>{age}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -416,7 +434,11 @@ function FullModelJarvis({ f, backtestSummary }) {
       });
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      const text = (data.analysis || "").trim();
+      // Track B returns analysis as a structured object; standard path returns a string.
+      const isTrackB = data._trackB || (data.analysis && typeof data.analysis === "object" && data.analysis._jarvisSourced);
+      const text = isTrackB
+        ? JSON.stringify(data.analysis)   // store serialised, render branch handles it
+        : (typeof data.analysis === "string" ? data.analysis : "").trim();
       if (text) {
         setBrief(text); setSrvCached(!!data.cached); setAgeH(data.ageH ?? null);
         try { localStorage.setItem(cacheKey, text); } catch {}
@@ -430,6 +452,9 @@ function FullModelJarvis({ f, backtestSummary }) {
     "MODEL CHECK": C.edge, "VERDICT": C.green,
   };
 
+  // Track B: auto-consent for _insufficientData fixtures — Jarvis is the only pick source
+  const isInsufficient = !!f.markets?._insufficientData;
+
   if (!consented) {
     return (
       <div style={{ padding: "14px 16px 16px", borderBottom: `1px solid ${C.border}`, background: `${C.accent}05` }}>
@@ -442,11 +467,13 @@ function FullModelJarvis({ f, backtestSummary }) {
             <circle cx="5" cy="5" r="4.5" stroke="currentColor" strokeWidth="1"/>
             <path d="M5 3v2.5L6.5 7" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
           </svg>
-          Jarvis Analysis
+          {isInsufficient ? "Jarvis Read" : "Jarvis Analysis"}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span className="grm-jarvis-pulse" style={{ fontSize: 11, color: C.muted, flex: 1, lineHeight: 1.5 }}>
-            Want real-time context — injuries, motivation, squad news?
+            {isInsufficient
+              ? "No model data for this fixture — Jarvis will research and give you a pick"
+              : "Want real-time context — injuries, motivation, squad news?"}
           </span>
           <button
             onClick={() => { setConsented(true); doFetch(false); }}
@@ -456,7 +483,7 @@ function FullModelJarvis({ f, backtestSummary }) {
               borderRadius: 8, cursor: "pointer", letterSpacing: ".05em",
               textTransform: "uppercase",
             }}>
-            Yes
+            {isInsufficient ? "Get Pick" : "Yes"}
           </button>
         </div>
       </div>
@@ -511,6 +538,83 @@ function FullModelJarvis({ f, backtestSummary }) {
 
       {brief && !loading && (() => {
         const raw = brief.trim();
+
+        // Track B — structured JSON from _insufficientData path
+        let trackBData = null;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed._jarvisSourced) trackBData = parsed;
+        } catch {}
+
+        if (trackBData) {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Jarvis-sourced badge */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 7, fontWeight: 800, color: C.accent,
+                               background: `${C.accent}12`, border: `1px solid ${C.accent}30`,
+                               borderRadius: 4, padding: "2px 7px", letterSpacing: ".06em" }}>
+                  JARVIS SOURCED · web research
+                </span>
+              </div>
+              {/* Synthesised Read */}
+              {trackBData.read && (
+                <div style={{ padding: "10px 12px", borderLeft: `3px solid ${C.green}`,
+                              borderRadius: "0 8px 8px 0", background: `${C.green}08` }}>
+                  <div style={{ fontSize: 9, fontWeight: 800, color: C.green,
+                                letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>
+                    The Read · Jarvis
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>
+                    {trackBData.read.pick}
+                    {trackBData.read.conf && (
+                      <span style={{ fontSize: 9, fontWeight: 400, color: C.muted, marginLeft: 8 }}>
+                        {trackBData.read.conf}% confidence
+                      </span>
+                    )}
+                  </div>
+                  {trackBData.read.narrative && (
+                    <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.6 }}>
+                      {trackBData.read.narrative}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Synthesised Edge */}
+              {trackBData.edge && (
+                <div style={{ padding: "10px 12px", borderLeft: `3px solid ${C.edge}`,
+                              borderRadius: "0 8px 8px 0", background: `${C.edge}08` }}>
+                  <div style={{ fontSize: 9, fontWeight: 800, color: C.edge,
+                                letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>
+                    The Edge · Jarvis
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>
+                    {trackBData.edge.pick}
+                  </div>
+                  {trackBData.edge.narrative && (
+                    <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.6 }}>
+                      {trackBData.edge.narrative}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Context */}
+              {trackBData.context && (
+                <div style={{ padding: "8px 10px", background: C.surface,
+                              borderRadius: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 9, fontWeight: 800, color: C.muted,
+                                letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>
+                    Match Context
+                  </div>
+                  <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.65 }}>
+                    {trackBData.context}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        }
+
         const hasStructure = /\*\*[A-Z ]+\*\*/.test(raw);
         if (hasStructure) {
           const parts    = raw.split(/(\*\*[A-Z][A-Z ]*\*\*)/).filter(Boolean);
@@ -1195,6 +1299,21 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
       `}</style>
 
       <div style={{ padding: "0 12px", marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+
+        {/* B4.2 Track A: low-data caveat banner — picks shown but flagged as estimates */}
+        {f.markets?._lowDataCaveat && !f.markets?._insufficientData && (
+          <div style={{ padding: "8px 12px", borderRadius: 8, background: `${C.amber}10`,
+                        border: `1px solid ${C.amber}30`, display: "flex", alignItems: "center", gap: 8 }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <span style={{ fontSize: 9, color: C.amber, lineHeight: 1.5 }}>
+              <strong>Thin form data</strong> — model running on limited recent games. Picks are estimates; treat with caution.
+            </span>
+          </div>
+        )}
 
         {/* ── THE READ ─────────────────────────────────────────────── */}
         {(() => {

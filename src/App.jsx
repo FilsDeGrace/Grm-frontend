@@ -7,11 +7,15 @@ import { SERVER, LEAGUE_RANK, POOL_MIN_EMPIRICAL_RATE, POOL_SCORE_P_EXP } from "
 export { SERVER };
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 import FullModelPage from "./FullModelPage";
+import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
 // temporal dead zone when called before line 4881 executes.
-const SAVED_TICKETS_KEY = "grm_saved_tickets_v15";
+const SAVED_TICKETS_KEY  = "grm_saved_tickets_v15";
+// Built tickets are session-scoped and date-keyed — they survive a refresh
+// on the same day but are not carried forward to tomorrow.
+const BUILT_TICKETS_KEY  = (date) => `grm_built_tickets_${date}`;
 
 // C7-FIX: Prune stale Jarvis cache entries on startup.
 // Cache keys are date-suffixed (grm_fm_<id>_YYYY-MM-DD, grm_ca_jarvis_..._YYYY-MM-DD,
@@ -2668,7 +2672,14 @@ export function TheEdgeSection({ theEdge, onAddToParlay, alreadyAdded, otherInDr
 
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
         <span className="grm-signal-panel-prob" style={{ color:C.edge }}>{Math.round(theEdge.prob)}%</span>
-        {/* Removed: edgeStrength number and convergenceCount chip — internal model metadata */}
+        {/* N2-FIX: show base prob + pp gain breakdown when convergence boosted the probability */}
+        {theEdge.baseProb != null && theEdge.ppGain != null && Math.abs(theEdge.ppGain) >= 1 && (
+          <span style={{ fontSize:9, color:C.muted, letterSpacing:".02em" }}>
+            {theEdge.baseProb}% base
+            <span style={{ color:C.edge, fontWeight:700 }}> +{theEdge.ppGain}pp</span>
+            {" "}<span style={{ color:C.muted }}>({theEdge.convergenceCount}-signal)</span>
+          </span>
+        )}
       </div>
       <Bar value={theEdge.prob} color={C.edge} />
 
@@ -3105,6 +3116,11 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
             <span style={{ fontSize:7, color:C.muted, border:`1px solid ${C.faint}`,
                            borderRadius:3, padding:"1px 5px" }}>Limited data</span>
           )}
+          {/* B4.2 Track A: thin-data caveat badge — picks shown but flagged */}
+          {f.markets?._lowDataCaveat && !f.markets?._lowConfidence && (
+            <span style={{ fontSize:7, color:C.amber, border:`1px solid ${C.amber}35`,
+                           borderRadius:3, padding:"1px 5px" }}>Low data · model est.</span>
+          )}
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
           {/* Issue 5 fix: "In Draft" badge so user knows this game is already picked */}
@@ -3220,23 +3236,26 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
         </div>
       ) : (
         <div style={{ padding:"10px 12px", background:C.surface, borderRadius:8,
-                      border:`1px solid ${C.faint}`, display:"flex", alignItems:"center",
-                      justifyContent:"space-between", gap:8 }}>
-          <div>
+                      border:`1px solid ${f.markets?._insufficientData ? `${C.accent}25` : C.faint}`,
+                      display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+          <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:10, fontWeight:700, color:C.text, marginBottom:2 }}>
-              No model pick today
+              No model pick · limited data
             </div>
             <div style={{ fontSize:9, color:C.muted, lineHeight:1.4 }}>
-              Stats, xG and Jarvis analysis still available
+              {f.markets?._insufficientData
+                ? <span>Jarvis can read this match <span style={{ color:C.accent, fontWeight:700 }}>→ tap to ask</span></span>
+                : "Stats, xG and Jarvis analysis still available"}
             </div>
           </div>
           {onFullModel && (
             <button onClick={(e) => { e.stopPropagation(); onFullModel(f); }}
-              style={{ fontSize:9, color:C.accent, background:C.accentDim,
-                       border:`1px solid ${C.accentBorder}`, borderRadius:6,
-                       padding:"5px 10px", cursor:"pointer", fontFamily:C.font,
-                       fontWeight:700, flexShrink:0, whiteSpace:"nowrap" }}>
-              View →
+              style={{ fontSize:9, fontWeight:700, flexShrink:0, whiteSpace:"nowrap",
+                       cursor:"pointer", fontFamily:C.font, borderRadius:6, padding:"5px 10px",
+                       color: f.markets?._insufficientData ? C.accent : C.accent,
+                       background: f.markets?._insufficientData ? C.accentDim : C.accentDim,
+                       border:`1px solid ${C.accentBorder}` }}>
+              {f.markets?._insufficientData ? "Ask Jarvis →" : "View →"}
             </button>
           )}
         </div>
@@ -5271,14 +5290,14 @@ function TicketBookNowButton({ legs }) {
                       {l.odds}
                     </span>
                   </div>
-                  {/* Match + pick */}
+                  {/* Match + pick — B5-FIX: use label (match name) and outcome from oddsBreakdown */}
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontSize:9, fontWeight:700, color:C.text,
                                   whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-                      {l.game || l.pick}
+                      {l.label || l.game || "—"}
                     </div>
-                    {l.pick && l.game && (
-                      <div style={{ fontSize:8, color:C.muted, marginTop:1 }}>{l.pick}</div>
+                    {(l.outcome || l.pick) && (
+                      <div style={{ fontSize:8, color:C.muted, marginTop:1 }}>{l.outcome || l.pick}</div>
                     )}
                     {l._fallbackFrom && (
                       <div style={{ fontSize:7, color:C.amber, marginTop:1 }}>
@@ -6571,6 +6590,12 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               ⚠ Exhausted
             </span>
           )}
+          {/* B3.2: notice when finished legs were excluded from RE-ADD */}
+          {ticket._finishedExcluded > 0 && (
+            <span className="grm-chip" style={{ color:C.muted,borderColor:`${C.border}`,background:"transparent",fontSize:8 }}>
+              {ticket._finishedExcluded} finished leg{ticket._finishedExcluded > 1 ? "s" : ""} excluded
+            </span>
+          )}
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
           <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
@@ -7204,13 +7229,17 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
             style={{ position:"fixed",inset:0,zIndex:8998,
                      background: window.innerWidth < 600 ? "rgba(0,0,0,.45)" : "transparent" }}/>
           {/* P2-FIX: bottom sheet on mobile, dropdown on desktop */}
+          {/* B6-FIX: paddingBottom uses env(safe-area-inset-bottom) so the sheet
+              clears the phone gesture nav bar. maxHeight reduced to 70vh to ensure
+              the bottom of the list is reachable without scrolling past the nav. */}
           <div style={window.innerWidth < 600 ? {
             position:"fixed", bottom:0, left:0, right:0, zIndex:8999,
-            maxHeight:"75vh", display:"flex", flexDirection:"column",
+            maxHeight:"70vh", display:"flex", flexDirection:"column",
             background:C.modalBg, borderRadius:"16px 16px 0 0",
             boxShadow:"0 -4px 32px rgba(0,0,0,.5)",
             border:`1px solid ${C.border}`,
             animation:"slideUp .22s ease",
+            paddingBottom:"env(safe-area-inset-bottom, 16px)",
           } : {
             position:"fixed",
             top: btnRect ? btnRect.bottom + 3 : 60,
@@ -9034,20 +9063,20 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     const isDC    = dom.includes("dc");
     const isTB    = dom.includes("tb:");
 
-    // Name — short, scannable
+    // Name — short, user-facing (no internal engine codes)
     let name;
     if (hasDA && hasSA && isGoals) name = "Goals Momentum";
-    else if (hasDA && hasSA && isDC) name = "DA + SA Cover";
-    else if (hasDA && hasSA)         name = "Full Signal";
-    else if (hasDA && isTB)          name = "DA Team Goals";
-    else if (hasDA && isGoals)       name = "DA Goals";
-    else if (hasDA)                  name = "DA Backed";
-    else if (hasSA && isDC)          name = "SA Draw Cover";
-    else if (hasSA)                  name = "SA Pattern";
-    else if (isDC)                   name = "Low Risk DC";
-    else if (dom.includes("under"))  name = "Goals Under";
+    else if (hasDA && hasSA && isDC) name = "Covered Value";
+    else if (hasDA && hasSA)         name = "Converging Signal";
+    else if (hasDA && isTB)          name = "Team Goals";
+    else if (hasDA && isGoals)       name = "Goals Backed";
+    else if (hasDA)                  name = "Pattern Backed";
+    else if (hasSA && isDC)          name = "Draw Cover";
+    else if (hasSA)                  name = "Situational Pick";
+    else if (isDC)                   name = "Safety Net";
+    else if (dom.includes("under"))  name = "Under Pick";
     else if (dom.includes("over"))   name = "Goals Over";
-    else                             name = `Pick ${idx + 1}`;
+    else                             name = `Ticket ${idx + 1}`;
 
     // One-line rationale — explain what the signals mean in plain English
     let rationale;
@@ -9109,9 +9138,11 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                            : parlayResult === "LOSS" ? C.red
                            : parlayResult === "PARTIAL" ? C.amber
                            : C.muted;
+        // B3.1-FIX: PARTIAL means some legs have finished, others haven't yet.
+        // "IN PLAY" is clearer — the ticket is still live, not partially failed.
         const verdictLabel = parlayResult === "WIN" ? "WIN"
                            : parlayResult === "LOSS" ? "LOSS"
-                           : parlayResult === "PARTIAL" ? "PARTIAL"
+                           : parlayResult === "PARTIAL" ? "IN PLAY"
                            : isPastDate ? "PENDING" : null;
 
         const borderCol = isOpen ? `${C.accent}80`
@@ -9129,86 +9160,74 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
             transition: "border-color .15s",
           }}>
 
-            {/* ── Collapsed — scan row ── */}
+            {/* ── Collapsed — scan row (B3.3 redesign) ── */}
             <div onClick={() => setExpanded(isOpen ? null : strat.id)}
-              style={{ padding:"12px 14px", cursor:"pointer" }}>
+              style={{ padding:"14px 16px", cursor:"pointer" }}>
 
-              {/* Top row: name pill + signal badges + verdict + chevron */}
-              <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:7,
-                            justifyContent:"space-between" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:5, flex:1, minWidth:0, flexWrap:"wrap" }}>
-                  <span style={{
-                    fontSize:8, fontWeight:800, letterSpacing:".06em", textTransform:"uppercase",
-                    color:C.accent, background:`${C.accent}14`, borderRadius:5, padding:"2px 8px", flexShrink:0
-                  }}>{name}</span>
-                  {/* Signal badges */}
-                  {hrGrade && (
-                    <span style={{ fontSize:7, fontWeight:700, color:hrGrade.col,
-                                   background:`${hrGrade.col}12`, border:`1px solid ${hrGrade.col}30`,
-                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
-                      {hrGrade.label}
+              {/* Row 1: odds dominant left · verdict/chevron right */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+                <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                  <span style={{ fontSize:26, fontWeight:900, lineHeight:1,
+                                 color: verdictLabel === "WIN" ? C.green
+                                      : verdictLabel === "LOSS" ? C.red
+                                      : isUsed ? C.green : C.text }}>
+                    {odds ? `${odds}×` : "—"}
+                  </span>
+                  {pct != null && (
+                    <span style={{ fontSize:9, color: pct>=60?C.green:pct>=40?C.gold:C.muted, fontWeight:700 }}>
+                      {pct}%
                     </span>
                   )}
-                  {hasSA && (
-                    <span style={{ fontSize:7, fontWeight:700, color:C.edge,
-                                   background:`${C.edge}12`, border:`1px solid ${C.edge}30`,
-                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
-                      {strat.saPositive} pattern{strat.saPositive!==1?"s":""}
-                    </span>
-                  )}
-                  {/* N36-FIX: verdict badge for past date results */}
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
                   {verdictLabel && (
                     <span style={{ fontSize:7, fontWeight:800, color:verdictCol,
                                    background:`${verdictCol}15`, border:`1px solid ${verdictCol}40`,
-                                   borderRadius:4, padding:"1px 6px", flexShrink:0, letterSpacing:".06em" }}>
+                                   borderRadius:4, padding:"2px 7px", letterSpacing:".06em" }}>
                       {verdictLabel}
                     </span>
                   )}
                   {isUsed && !verdictLabel && (
-                    <span style={{ fontSize:7, fontWeight:800, color:C.green,
+                    <span style={{ fontSize:7, fontWeight:700, color:C.green,
                                    background:`${C.green}12`, border:`1px solid ${C.green}30`,
-                                   borderRadius:4, padding:"1px 6px", flexShrink:0 }}>
-                      Added
-                    </span>
+                                   borderRadius:4, padding:"2px 7px" }}>Added</span>
                   )}
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
+                    strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s" }}>
+                    <polyline points="6 9 12 15 18 9"/>
+                  </svg>
                 </div>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2"
-                  strokeLinecap="round" strokeLinejoin="round"
-                  style={{ transform:isOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", flexShrink:0 }}>
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
-              </div>
-
-              {/* Odds + probability */}
-              <div style={{ display:"flex", alignItems:"baseline", gap:10, marginBottom:5 }}>
-                <div style={{ fontSize:22, fontWeight:900, color: isUsed ? C.green : C.text, lineHeight:1 }}>
-                  {odds ? `${odds}×` : "—"}
-                </div>
-                {pct != null && (
-                  <div style={{ fontSize:9, color:C.muted }}>
-                    <span style={{ fontWeight:700, color: pct>=60?C.green:pct>=40?C.gold:C.muted }}>{pct}%</span>
-                    {" "}chance
-                  </div>
-                )}
               </div>
 
               {/* Probability bar */}
               {pct != null && (
-                <div style={{ height:3, background:C.faint, borderRadius:2, marginBottom:7, overflow:"hidden" }}>
+                <div style={{ height:2, background:C.faint, borderRadius:2, marginBottom:8, overflow:"hidden" }}>
                   <div style={{ height:"100%", width:`${Math.min(pct,100)}%`,
                                 background: pct>=60?C.green:pct>=40?C.gold:C.muted,
-                                borderRadius:2, transition:"width .3s" }} />
+                                borderRadius:2, transition:"width .4s" }} />
                 </div>
               )}
 
-              {/* Rationale */}
-              <div style={{ fontSize:9, color:C.muted, marginBottom:3, lineHeight:1.5 }}>
-                {rationale}
-              </div>
-
-              {/* Leg count · markets */}
-              <div style={{ fontSize:8, color:C.muted, opacity:.7 }}>
-                {legCount} leg{legCount!==1?"s":""} · {mktStr}
+              {/* Row 2: name + signal badges */}
+              <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
+                <span style={{ fontSize:8, fontWeight:800, letterSpacing:".05em",
+                               color:C.accent, textTransform:"uppercase" }}>{name}</span>
+                {hrGrade && (
+                  <span style={{ fontSize:7, color:hrGrade.col,
+                                 background:`${hrGrade.col}10`, border:`1px solid ${hrGrade.col}25`,
+                                 borderRadius:4, padding:"1px 5px" }}>{hrGrade.label}</span>
+                )}
+                {hasSA && (
+                  <span style={{ fontSize:7, color:C.edge,
+                                 background:`${C.edge}10`, border:`1px solid ${C.edge}25`,
+                                 borderRadius:4, padding:"1px 5px" }}>
+                    {strat.saPositive} signal{strat.saPositive!==1?"s":""}
+                  </span>
+                )}
+                <span style={{ fontSize:7, color:C.muted, marginLeft:"auto" }}>
+                  {legCount} leg{legCount!==1?"s":""} · {mktStr}
+                </span>
               </div>
             </div>
 
@@ -9216,15 +9235,15 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
             {isOpen && (
               <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
 
-                {/* N41-FIX: Why this ticket blurb */}
+                {/* Signal explainer blurb */}
                 {(hasDA || hasSA) && (
-                  <div style={{ background:C.faint, borderRadius:7, padding:"8px 10px",
+                  <div style={{ borderLeft:`2px solid ${C.accent}40`, paddingLeft:8,
                                 marginBottom:10, fontSize:8, color:C.muted, lineHeight:1.6 }}>
                     {hasDA && hasSA
-                      ? `Two independent signals agree on these picks: ${strat.learnedHR}% historical hit rate on this market pattern, plus ${strat.saPositive} situational confirmation${strat.saPositive!==1?"s":""} from form and context.`
+                      ? `${strat.learnedHR}% hit rate on this pattern · ${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} agree`
                       : hasDA
-                      ? `This market pattern has landed ${strat.learnedHR}% of the time in GRM's historical data — the picks are drawn from the highest-scoring games in that pattern.`
-                      : `${strat.saPositive} situational pattern${strat.saPositive!==1?"s":""} aligned — team form, fixture context, and market behaviour all pointing the same way.`
+                      ? `Landed ${strat.learnedHR}% historically — picks drawn from highest-confidence games`
+                      : `${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} aligned across form, context, and market behaviour`
                     }
                   </div>
                 )}
@@ -9350,25 +9369,32 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // they came from so "Replace in Ticket" patches that ticket instead of the draft.
   const [activeTicketId, setActiveTicketId] = useState(null);
 
-  // When Jarvis sends a pre-built ticket via "Book Now" / "View Full",
-  // save it and open it. Book Now → Saved tab. View Full → Builder tab.
+  // When Jarvis sends a pre-built ticket via "View & Book" / "Save Ticket",
+  // open it here. Save Ticket already saved it from chat and stays in chat —
+  // it does not navigate, so this effect only ever fires for View & Book.
   useEffect(() => {
     if (!jarvisBuiltTicket) return;
-    // _viewSaved = true means "Book Now" was tapped — route to Saved tab
+    // _viewSaved = true means a ticket was opened by id only (legacy path,
+    // kept for safety) — route to Saved tab to find it.
     if (jarvisBuiltTicket._viewSaved) {
       setView("saved");
       onJarvisBuiltTicketConsumed?.();
       return;
     }
-    const exists = savedTickets.find(t => t.id === jarvisBuiltTicket.id);
-    if (!exists) {
-      const payload = { ...jarvisBuiltTicket, source: "jarvis_chat", savedAt: new Date().toISOString() };
-      const updated = [payload, ...savedTickets];
-      setSavedTickets(updated);
-      persistTickets(updated);
-    }
+    // B_VIEWFULL-FIX: add ticket to built tickets so activeTicketId lookup
+    // finds it — previously the ticket was never in `tickets` state, causing
+    // tickets.find(t => t.id === activeTicketId) to return undefined and the
+    // Builder to render blank. Ticket goes to Builder only; Save is explicit.
+    setTickets(prev => {
+      if (prev.find(t => t.id === jarvisBuiltTicket.id)) return prev;
+      return [{ ...jarvisBuiltTicket, source: "jarvis_view" }, ...prev];
+    });
     setActiveTicketId(jarvisBuiltTicket.id);
-    setView("parley"); // View Full → Builder tab with ticket active
+    // CRITICAL TYPO FIX: this was setView("parley") — not a valid view ID.
+    // Valid IDs in this component are "fixture" | "parlay" | "perf" |
+    // "rollover" | "saved". "parley" matched none of them, so the tab
+    // rendered nothing — the blank screen seen after tapping View Full/Book.
+    setView("parlay"); // View & Book → Builder tab with ticket active
     onJarvisBuiltTicketConsumed?.();
   }, [jarvisBuiltTicket]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -9578,16 +9604,42 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   };
 
   const saveTicketInternal = (ticket, stake) => {
-    const code    = generateTicketCode();
-    const payload = { ...ticket, stake, code, date:date||todayStr(), savedAt:new Date().toISOString() };
-    const updated = [...savedTickets, payload];
+    // B2-FIX: save immediately with a local code so the UI is instant,
+    // then patch to GRM code from /api/ticket/share when server responds.
+    const localCode = generateTicketCode();
+    const payload   = { ...ticket, stake, code: localCode, date:date||todayStr(), savedAt:new Date().toISOString() };
+    const updated   = [...savedTickets, payload];
     setSavedTickets(updated); persistTickets(updated);
     const contentKey = ticketContentKey(ticket);
     setSavedCodes(prev => {
-      const next = { ...prev, [contentKey]: code };
+      const next = { ...prev, [contentKey]: localCode };
       try { localStorage.setItem("grm_saved_codes_v15", JSON.stringify(next)); } catch {}
       return next;
     });
+    // Async patch — upgrade local code to canonical GRM code once server responds
+    fetch(`${SERVER}/api/ticket/share`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        legs:      ticket.legs,
+        totalOdds: ticket.totalOdds,
+        date:      ticket.date || date || todayStr(),
+        label:     ticket.slotLabel || null,
+      }),
+    }).then(r => r.ok ? r.json() : null).then(data => {
+      if (!data?.code || data.code === localCode) return;
+      const grmCode = data.code;
+      setSavedTickets(prev => {
+        const patched = prev.map(t => t.code === localCode ? { ...t, code: grmCode } : t);
+        persistTickets(patched);
+        return patched;
+      });
+      setSavedCodes(prev => {
+        const next = { ...prev, [contentKey]: grmCode };
+        try { localStorage.setItem("grm_saved_codes_v15", JSON.stringify(next)); } catch {}
+        return next;
+      });
+    }).catch(() => {}); // silently keep local code if server fails
   };
 
   const deleteSavedTicket = code => {
@@ -9946,17 +9998,27 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   } : null}
                   onUseTicket={(strategy) => {
                     // Convert TA strategy into a ticket object compatible with TicketCard
-                    const legs = (strategy.legs || []).map(l => ({
-                      fixtureId: l.fixtureId,
-                      game:      l.game || `${l.home || "?"} vs ${l.away || "?"}`,
-                      home:      l.home,
-                      away:      l.away,
-                      pick:      l.market,
-                      market:    l.market,
-                      league:    l.league || null,
-                      odds:      l.odds ? parseFloat(l.odds) : null,
-                      conf:      l.conf ? parseFloat(l.conf) : null,
-                    }));
+                    // B3.2-FIX: skip finished legs (those with a known result) — they
+                    // can't be booked and inflate the combined odds falsely.
+                    const allLegs = strategy.legs || [];
+                    const finishedCount = allLegs.filter(l => l._result && l._result !== "PENDING").length;
+                    const legs = allLegs
+                      .filter(l => !l._result || l._result === "PENDING")
+                      .map(l => ({
+                        fixtureId: l.fixtureId,
+                        game:      l.game || `${l.home || "?"} vs ${l.away || "?"}`,
+                        home:      l.home,
+                        away:      l.away,
+                        pick:      l.market,
+                        market:    l.market,
+                        league:    l.league || null,
+                        odds:      l.odds ? parseFloat(l.odds) : null,
+                        conf:      l.conf ? parseFloat(l.conf) : null,
+                      }));
+                    if (finishedCount > 0 && legs.length === 0) {
+                      alert("All legs in this ticket have already finished — nothing to add.");
+                      return;
+                    }
                     const totalOdds = parseFloat(
                       legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2)
                     );
@@ -9969,6 +10031,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       slotId:      strategy.id,
                       jarvisMode:  "jarvis",
                       _taStrategy: strategy.id,
+                      // B3.2: carry count of skipped finished legs for display notice
+                      _finishedExcluded: finishedCount || 0,
                     };
                     // Replace any existing ticket from same strategy, else append
                     setTickets(prev => [
@@ -10261,21 +10325,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         {/* PERFORMANCE TAB */}
         {view === "perf" && <PoolPerformanceTab serverUrl={SERVER} />}
 
-        {/* ROLLOVER TAB */}
-        {view === "rollover" && (
-          <RolloverSystem
-            C={C}
-            SERVER={SERVER}
-            fixtures={fixtures}
-            historicalRates={historicalRates}
-            date={date}
-            buildRolloverPick={buildRolloverPick}
-            buildUniversalPool={buildUniversalPool}
-            onFullModel={onFullModelFromParlay}
-            onChainChange={handleChainChange}
-          />
-        )}
-
         {/* SAVED TICKETS */}
         {view === "saved" && (
           <>
@@ -10300,6 +10349,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   {/* Row 2: action buttons */}
                   <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:8 }}>
                     <CopyCodeButton code={t.code} />
+                    <GrmShareMenu ticket={t} />
                     <button onClick={() => { setDraftLegs(t.legs||[]); setView("parlay"); }} className="gb-ghost"
                       style={{ padding:"3px 10px",fontSize:9,color:C.accent,borderColor:`${C.accent}40`,
                                display:"flex",alignItems:"center",gap:4 }}>
@@ -10948,26 +10998,46 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   const [dragging, setDragging]     = useState(false);
   const [shaking, setShaking]       = useState(false);
   const [tipVisible, setTipVisible] = useState(false);
+  // FEATURE-TIP CAROUSEL: cycles through FAB_FEATURE_TIPS instead of always
+  // showing the same "Ask Jarvis anything" line. tipIndex tracks rotation
+  // position across the whole session (persisted in a ref, not state, since
+  // it doesn't need to trigger a render on its own — only the timer does).
+  const [tipIndex, setTipIndex]     = useState(0);
   // wrapRef owns the DOM position — mutated directly during drag, no React renders mid-drag
   const wrapRef     = useRef(null);
   const dragRef     = useRef(null);  // drag session state (startX/Y, origX/Y, lastX/Y, moved)
   const shakeTimer  = useRef(null);
   const tipTimer    = useRef(null);
 
-  // Shake + show tip every 30s while FAB is idle
+  // Shake + show next tip every 30s while FAB is idle.
+  // FEATURE-TIP CAROUSEL FIX: previously this always showed the same static
+  // "Ask Jarvis anything" string for a flat 3.5s. Now it rotates through
+  // FAB_FEATURE_TIPS (Custom strategy, Code Analyzer, Engine tab, Rollover,
+  // Performance — "Ask Jarvis anything" is still in the rotation, just not
+  // the only thing shown) and sizes the on-screen duration to how long the
+  // tip actually takes to read (tipReadDuration), so a short tip doesn't
+  // linger and a longer one doesn't get cut off mid-sentence.
+  // Gated on `!jarvisOpen` below at render time — it never shows while the
+  // chat panel (with its own "Ask Jarvis anything..." input placeholder) is
+  // open, so the two never compete for the same visual space.
   useEffect(() => {
     const schedule = () => {
       shakeTimer.current = setTimeout(() => {
         setShaking(true);
         setTipVisible(true);
         setTimeout(() => setShaking(false), 600);
-        tipTimer.current = setTimeout(() => setTipVisible(false), 3500);
+        const tip = FAB_FEATURE_TIPS[tipIndex % FAB_FEATURE_TIPS.length];
+        const readMs = tipReadDuration(tip.text);
+        tipTimer.current = setTimeout(() => {
+          setTipVisible(false);
+          setTipIndex(i => (i + 1) % FAB_FEATURE_TIPS.length);
+        }, readMs);
         schedule();
       }, 30000);
     };
     schedule();
     return () => { clearTimeout(shakeTimer.current); clearTimeout(tipTimer.current); };
-  }, []);
+  }, [tipIndex]);
 
   const clamp = (x, y) => {
     const maxX = (window.innerWidth  || 375) - SIZE - 8;
@@ -11099,7 +11169,11 @@ function JarvisFAB({ C, isDesktop, onClick }) {
           willChange: "left, top",     // hint compositor to promote this layer
         }}
       >
-        {/* Co-pilot tooltip */}
+        {/* Feature-discovery tooltip — rotates through FAB_FEATURE_TIPS.
+            Theme-aware via C.surface / C.accent / C.text, same as before.
+            whiteSpace switched from nowrap → normal + maxWidth because tip
+            copy is longer than the original fixed "Ask Jarvis anything"
+            line and would otherwise overflow off-screen on narrow phones. */}
         {tipVisible && !dragging && (
           <div style={{
             position: "absolute",
@@ -11111,12 +11185,14 @@ function JarvisFAB({ C, isDesktop, onClick }) {
             padding: "7px 11px",
             fontSize: 11,
             color: C.text,
-            whiteSpace: "nowrap",
+            whiteSpace: "normal",
+            maxWidth: 220,
+            lineHeight: 1.4,
             boxShadow: `0 4px 16px rgba(0,0,0,0.25)`,
             pointerEvents: "none",
             animation: "grm-fade-in .2s ease",
           }}>
-          Ask Jarvis anything
+          {FAB_FEATURE_TIPS[tipIndex % FAB_FEATURE_TIPS.length].text}
             <div style={{
               position: "absolute", bottom: -5,
               [isRightEdge ? "right" : "left"]: 18,
@@ -11242,7 +11318,22 @@ export default function GRMPro() {
   const [marketFilter, setMarketFilter] = useState(["theRead"]);
   const toggleMarket = id => setMarketFilter(prev => prev.includes(id) ? (prev.length>1?prev.filter(x=>x!==id):prev) : [...prev, id]);
 
-  const [tickets, setTickets]     = useState([]);
+  const [tickets, setTicketsRaw] = useState([]);
+  // B1-FIX: built tickets persist across refreshes for the same date.
+  // On mount, rehydrate from sessionStorage if the date key matches today.
+  const setTickets = useCallback((updater) => {
+    setTicketsRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      try { sessionStorage.setItem(BUILT_TICKETS_KEY(todayStr()), JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    try {
+      const stored = sessionStorage.getItem(BUILT_TICKETS_KEY(todayStr()));
+      if (stored) { const parsed = JSON.parse(stored); if (Array.isArray(parsed) && parsed.length) setTicketsRaw(parsed); }
+    } catch {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [historicalRates, setHistoricalRates] = useState(null);
   const historicalRatesDateRef    = useRef(null);
 
@@ -12563,8 +12654,10 @@ export default function GRMPro() {
         <PoolPerformanceTab serverUrl={SERVER} />
       </div>
 
-      {/* Rollover — rendered at GRMPro level via bottom nav */}
-      {mainView === "rollover" && (
+      {/* N1-FIX: RolloverSystem kept mounted always — display:none when inactive.
+          Same pattern as N34 PoolPerformanceTab. Prevents re-fetch and state loss
+          on every nav away from the Rollover tab. */}
+      <div style={{ display: mainView === "rollover" ? undefined : "none" }}>
         <RolloverSystem
           C={C}
           SERVER={SERVER}
@@ -12576,7 +12669,7 @@ export default function GRMPro() {
           onFullModel={onFullModelFromRollover}
           onChainChange={handleChainChange}
         />
-      )}
+      </div>
 
       {activeTab === "live" && mainView === "main" && (
         <div style={{ maxWidth:1480,margin:"0 auto",padding:activeTab==="live"?"28px 16px 0":"28px 24px 0" }}>
@@ -12808,6 +12901,39 @@ export default function GRMPro() {
       )}
 
       <DraftTicketBanner draftLegs={draftLegs} onOpen={() => setParlayJarvisOpen(true)} onClear={() => setDraftLegs([])} />
+      {/* N3-FIX: persistent correlation warning FAB — shows when draft has correlated legs */}
+      {(() => {
+        if (!draftLegs.length) return null;
+        const leagueCounts = {}, matchCounts = {};
+        draftLegs.forEach(l => {
+          if (l.league) leagueCounts[l.league] = (leagueCounts[l.league]||0)+1;
+          const mk = l.fixtureId || l.game;
+          if (mk) matchCounts[mk] = (matchCounts[mk]||0)+1;
+        });
+        const hasMatch  = Object.values(matchCounts).some(c => c >= 2);
+        const hasLeague = Object.values(leagueCounts).some(c => c >= 2);
+        if (!hasMatch && !hasLeague) return null;
+        return (
+          <div style={{ position:"fixed", bottom:160, left:0, right:0, zIndex:199,
+                        display:"flex", justifyContent:"center", pointerEvents:"none" }}>
+            <div onClick={() => setParlayJarvisOpen(true)}
+              style={{ pointerEvents:"all", background:`${C.amber}18`,
+                       border:`1px solid ${C.amber}50`, borderRadius:12,
+                       padding:"8px 16px", display:"flex", alignItems:"center", gap:8,
+                       cursor:"pointer", boxShadow:"0 4px 16px rgba(0,0,0,.2)",
+                       maxWidth:360, width:"calc(100% - 48px)" }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <span style={{ fontSize:9, fontWeight:800, color:C.amber }}>
+                {hasMatch ? "Same-match legs in draft" : "Same-league legs in draft"} · tap to review
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Duplicate fixture conflict prompt */}
       {draftConflicts.length > 0 && pendingTicket && (
@@ -12979,11 +13105,16 @@ export default function GRMPro() {
           fetchError={error}
           savedTickets={tickets}
           onSaveTicket={(ticket) => {
+            // DATE-STAMP SAFETY NET: jarvisStore.buildParley now stamps `date`
+            // on every ticket it creates, but this stamps it here too in case
+            // a ticket arrives without one from some other path — the backtest
+            // evaluator depends on `date` being present and correct.
+            const stamped = ticket.date ? ticket : { ...ticket, date: new Date().toISOString().slice(0, 10) };
             setTickets(prev => {
-              const exists = prev.findIndex(t => t.id === ticket.id);
+              const exists = prev.findIndex(t => t.id === stamped.id);
               const next = exists >= 0
-                ? prev.map((t, i) => i === exists ? ticket : t)
-                : [ticket, ...prev];
+                ? prev.map((t, i) => i === exists ? stamped : t)
+                : [stamped, ...prev];
               persistTickets(next);
               return next;
             });

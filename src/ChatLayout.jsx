@@ -995,7 +995,12 @@ export default function ChatLayout({
         signal:  controller.signal,
         body:    JSON.stringify({
           message:             rawText,
-          date:                new Date().toISOString().slice(0, 10),
+          // DATE-CONTEXT FIX: previously always sent today's date, even when
+          // the user had a past date selected via the calendar picker. Gemini
+          // would then answer about "today" while the UI showed a past date,
+          // producing confusing/stale-sounding replies (e.g. referencing
+          // "the fixtures I provided earlier" without knowing which day).
+          date:                selectedDate || new Date().toISOString().slice(0, 10),
           fixtures:            fixturePayload,
           conversationHistory: recentHistory,
         }),
@@ -1168,8 +1173,11 @@ export default function ChatLayout({
     }
 
     const { ticket, partial } = result;
-    // Auto-save
-    onSaveTicket?.(ticket);
+    // SAVE-TIMING FIX: previously auto-saved here unconditionally, which put
+    // every built ticket into Saved before the user had even seen it (and
+    // before View & Book / Save Ticket existed as distinct actions). Saving
+    // now only happens when the user explicitly taps "Save Ticket", or when
+    // they tap "View & Book" and act on it inside the Builder.
 
     // FIX-E: Warn if built odds fall significantly short of target
     const builtOdds   = parseFloat(ticket.totalOdds) || 0;
@@ -1239,7 +1247,8 @@ export default function ChatLayout({
     }
 
     const { ticket: newTicket } = result;
-    onSaveTicket?.(newTicket);
+    // SAVE-TIMING FIX: don't auto-save the remixed ticket — let the user
+    // choose Save Ticket or View & Book from the new card, same as a fresh build.
     replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
       { type: "TICKET_CARD", ticket: newTicket },
       [{ label: "Remix again", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]
@@ -1301,13 +1310,26 @@ export default function ChatLayout({
     }
 
     const { ticket: newTicket } = result;
-    onSaveTicket?.(newTicket);
+    // SAVE-TIMING FIX: same as handleRemix — don't auto-save, let the user choose
+    // Save Ticket or View & Book from the new card.
     replaceLoadingMsg(loadingMsg.id, makeJarvisMsg(
       { type: "TICKET_CARD", ticket: newTicket },
       [{ label: "Remix again", text: "Remix" }, { label: "New parley", text: "Build me a new parley" }]
     ));
     setChatLastAction({ type: "PARLEY_BUILT", ticket: newTicket });
   }
+
+  // ── SAVE TICKET (inline, no navigation) ─────────────────────────────────────
+  // Fired by TicketCard's "Save Ticket" button. The ticket is already saved by
+  // the time this runs (onSaveTicket fires first) — this just posts a small
+  // confirmation message into chat so the user has feedback without leaving
+  // Jarvis. Mirrors how "View & Book" leaves chat instead.
+  const handleSavedInline = useCallback((ticket) => {
+    addJarvisMsg({ type: "TEXT", text: `Saved — ticket #${ticket.id?.toString().slice(-3) || ""} is in your Saved tab.` }, [
+      { label: "Remix",         text: "Remix"          },
+      { label: "New parley",    text: "Build me a new parley" },
+    ]);
+  }, [addJarvisMsg]);
 
   function handleChipAction(chip) {
     // Guard: prevent double-fire if chip is tapped multiple times before Jarvis responds
@@ -1541,7 +1563,8 @@ export default function ChatLayout({
         signal:  controller.signal,
         body: JSON.stringify({
           message:             raw,
-          date:                new Date().toISOString().slice(0, 10),
+          // DATE-CONTEXT FIX — see matching note in handleUnknown's /api/jarvis-chat call.
+          date:                selectedDate || new Date().toISOString().slice(0, 10),
           fixtures:            fixturePayload,
           rolloverSummary:     rolloverPayload,
           conversationHistory: historyPayload,
@@ -1859,6 +1882,7 @@ export default function ChatLayout({
           savedTickets={savedTickets}
           fixtures={fixtures}
           chatEnabled={chatEnabled}
+          onSavedInline={handleSavedInline}
         />
 
         {/* ── SHEETS & DIALOGS (scoped inside panel) ── */}
@@ -1931,7 +1955,7 @@ function ChatTab({
   buildFlow, activeBuildMsgId,
   onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro,
-  defaultBookmaker, savedTickets, fixtures, chatEnabled,
+  defaultBookmaker, savedTickets, fixtures, chatEnabled, onSavedInline,
 }) {
   function handleKey(e) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1996,6 +2020,7 @@ function ChatTab({
               defaultBookmaker={defaultBookmaker}
               savedTickets={savedTickets}
               fixtures={fixtures}
+              onSavedInline={onSavedInline}
             />
           ))}
 
@@ -2060,7 +2085,7 @@ function MessageRow({
   msg, C, S, buildFlow, activeBuildMsgId, isTyping,
   onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro,
-  defaultBookmaker, savedTickets, fixtures,
+  defaultBookmaker, savedTickets, fixtures, onSavedInline,
 }) {
   if (msg.role === "user") {
     return (
@@ -2112,6 +2137,7 @@ function MessageRow({
         defaultBookmaker={defaultBookmaker}
         savedTickets={savedTickets}
         fixtures={fixtures}
+        onSavedInline={onSavedInline}
       />
 
       {/* ── CHIPS ── */}
@@ -2140,7 +2166,7 @@ function MessageContent({
   buildFlow, isActiveBuildStep,
   onBuildModeSelect, onBuildPoolSelect, onBuildLegsTargetSelect,
   onChipAction, onBookNow, onSaveTicket, onNavigatePro, defaultBookmaker,
-  savedTickets, fixtures,
+  savedTickets, fixtures, onSavedInline,
 }) {
   if (!content) return null;
 
@@ -2269,7 +2295,16 @@ function MessageContent({
               {content.noteText}
             </div>
           )}
-          <TicketCard C={C} S={S} ticket={content.ticket} partial={content.partial} onBookNow={onBookNow} onNavigatePro={onNavigatePro} defaultBookmaker={defaultBookmaker} />
+          <TicketCard
+            C={C} S={S}
+            ticket={content.ticket}
+            partial={content.partial}
+            onBookNow={onBookNow}
+            onSaveTicket={onSaveTicket}
+            onNavigatePro={onNavigatePro}
+            defaultBookmaker={defaultBookmaker}
+            onSavedInline={onSavedInline}
+          />
         </div>
       );
 
@@ -2420,11 +2455,12 @@ function LegsTargetWidget({ C, S, onSelect }) {
   );
 }
 
-function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBookmaker }) {
+function TicketCard({ C, S, ticket, partial, onBookNow, onSaveTicket, onNavigatePro, defaultBookmaker, onSavedInline }) {
   if (!ticket) return null;
   const legs     = ticket.legs || [];
   const showLegs = legs.slice(0, 3);
   const extra    = legs.length - showLegs.length;
+  const [justSaved, setJustSaved] = useState(false);
 
   return (
     <div style={S.miniCard}>
@@ -2479,24 +2515,32 @@ function TicketCard({ C, S, ticket, partial, onBookNow, onNavigatePro, defaultBo
         ) : null;
       })()}
 
-      {/* Actions — booking handled by App's TicketBookNowButton in Saved tab */}
+      {/* Actions —
+          VIEW & BOOK: does NOT save. Navigates straight to the Parley System
+          Builder tab with this ticket loaded so the user can review/edit/book
+          it there. Nothing is persisted to Saved until the user acts in the
+          Builder (or taps Save Ticket here).
+          SAVE TICKET: saves silently to the Saved tab WITHOUT leaving chat —
+          shows a brief inline confirmation instead of navigating away. */}
       <div style={{ display:"flex", gap:6 }}>
         <button
           className="grm-mini-btn-primary"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
-          onClick={() => {
-            onBookNow?.(ticket, null); // save to tickets
-            onNavigatePro?.({ tab:"saved", ticketId: ticket.id });
-          }}
+          onClick={() => onNavigatePro?.({ layout:"pro", tab:"parley", ticket })}
         >
-          Book Now
+          View &amp; Book
         </button>
         <button
           className="grm-mini-btn"
           style={{ flex:1, padding:"7px 0", fontSize:10 }}
-          onClick={() => onNavigatePro?.({ layout:"pro", tab:"parley", ticket })}
+          disabled={justSaved}
+          onClick={() => {
+            onSaveTicket?.(ticket);
+            setJustSaved(true);
+            onSavedInline?.(ticket);
+          }}
         >
-          View Full
+          {justSaved ? "Saved ✓" : "Save Ticket"}
         </button>
       </div>
     </div>
