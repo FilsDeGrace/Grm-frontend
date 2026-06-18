@@ -416,11 +416,8 @@ function FullModelJarvis({ f, backtestSummary }) {
   const [consented, setConsented] = useState(!!cached);
 
   const doFetch = async (force = false) => {
-    // #5.1-FIX: deduplicate in-flight fetches so navigating away and back
-    // doesn't trigger a second call. Result is applied when promise resolves
-    // regardless of whether this component instance is still mounted.
     const inflightKey = `${fxId}_${force ? "force" : "normal"}`;
-    if (_inFlightFetches.has(inflightKey)) return; // already fetching
+    if (_inFlightFetches.has(inflightKey)) return;
     setLoading(true); setError(null);
     if (force) { setBrief(null); setSrvCached(false); setAgeH(null); }
     let mounted = true;
@@ -436,25 +433,33 @@ function FullModelJarvis({ f, backtestSummary }) {
         f.form?.away?.length ? `Away form: ${f.form.away.join("")}` : "",
         force ? "refresh" : "",
       ].filter(Boolean).join(" ");
-      const res  = await fetch(`${SERVER}/api/jarvis-match`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fixture: f, question: q, backtestSummary }),
-      });
+      const controller = new AbortController();
+      const clientTimeout = setTimeout(() => controller.abort(), 35000);
+      let res;
+      try {
+        res = await fetch(`${SERVER}/api/jarvis-match`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fixture: f, question: q, backtestSummary }),
+          signal: controller.signal,
+        });
+      } finally { clearTimeout(clientTimeout); }
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      // Track B returns analysis as a structured object; standard path returns a string.
       const isTrackB = data._trackB || (data.analysis && typeof data.analysis === "object" && data.analysis._jarvisSourced);
       const text = isTrackB
-        ? JSON.stringify(data.analysis)   // store serialised, render branch handles it
+        ? JSON.stringify(data.analysis)
         : (typeof data.analysis === "string" ? data.analysis : "").trim();
       if (text) {
         setBrief(text); setSrvCached(!!data.cached); setAgeH(data.ageH ?? null);
         try { localStorage.setItem(cacheKey, text); } catch {}
       } else setError("Analysis unavailable — check back shortly.");
-    } catch { setError("Could not reach analysis service."); }
-    finally  { cleanup(); if (mounted) setLoading(false); }
-    })(); // end async IIFE
+    } catch (err) {
+      const isTimeout = err?.name === "AbortError";
+      setError(isTimeout ? "Jarvis took too long — tap Retry." : "Could not reach analysis service.");
+    }
+    finally { cleanup(); if (mounted) setLoading(false); }
+    })();
     _inFlightFetches.set(inflightKey, promise);
   };
 
