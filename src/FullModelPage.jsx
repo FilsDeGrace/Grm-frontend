@@ -415,8 +415,16 @@ function FullModelJarvis({ f, backtestSummary }) {
   const [consented, setConsented] = useState(!!cached);
 
   const doFetch = async (force = false) => {
+    // #5.1-FIX: deduplicate in-flight fetches so navigating away and back
+    // doesn't trigger a second call. Result is applied when promise resolves
+    // regardless of whether this component instance is still mounted.
+    const inflightKey = `${fxId}_${force ? "force" : "normal"}`;
+    if (_inFlightFetches.has(inflightKey)) return; // already fetching
     setLoading(true); setError(null);
     if (force) { setBrief(null); setSrvCached(false); setAgeH(null); }
+    let mounted = true;
+    const cleanup = () => { mounted = false; _inFlightFetches.delete(inflightKey); };
+    const promise = (async () => {
     try {
       const q = [
         `Give a 4-5 sentence analyst briefing. Plain English, no emoji, no "as an AI".`,
@@ -444,7 +452,9 @@ function FullModelJarvis({ f, backtestSummary }) {
         try { localStorage.setItem(cacheKey, text); } catch {}
       } else setError("Analysis unavailable — check back shortly.");
     } catch { setError("Could not reach analysis service."); }
-    finally  { setLoading(false); }
+    finally  { cleanup(); if (mounted) setLoading(false); }
+    })(); // end async IIFE
+    _inFlightFetches.set(inflightKey, promise);
   };
 
   const sectionColors = {
@@ -454,6 +464,14 @@ function FullModelJarvis({ f, backtestSummary }) {
 
   // Track B: auto-consent for _insufficientData fixtures — Jarvis is the only pick source
   const isInsufficient = !!f.markets?._insufficientData;
+
+  // #5-FIX: if opened via "Ask Jarvis →" button, auto-consent and start fetch immediately
+  useEffect(() => {
+    if (f._autoAskJarvis && !consented && !brief) {
+      setConsented(true);
+      doFetch(false);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!consented) {
     return (
@@ -1135,6 +1153,354 @@ function TipIcon({ text }) {
   );
 }
 
+
+// #5.1-FIX: module-level in-flight map so fetch survives FMP unmount.
+// Key = fixtureId+date. If user navigates away and returns, the result
+// is either in the cache (fast) or the promise is still running (re-attach).
+const _inFlightFetches = new Map();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXTERNAL PREDICTIONS SECTION
+// Drop this component definition anywhere above FullModelPage().
+// Then insert <ExternalPredictions fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+// right after the Team Totals </SectionPanel> and before {/* Combos */}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DirBadge({ dir, count, total }) {
+  if (!dir) return null;
+  const strength = count / total;
+  const col = strength >= 0.75 ? C.green : strength >= 0.5 ? C.amber : C.muted;
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: col }}>{dir}</span>
+      <span style={{ fontSize: 9, color: C.muted }}>{count}/{total}</span>
+    </div>
+  );
+}
+
+function SourceRow({ s }) {
+  const pct = v => (v != null ? `${Math.round(v)}%` : "—");
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "52px 1fr 1fr 1fr",
+      gap: 6, alignItems: "center",
+      padding: "6px 0",
+      borderBottom: `1px solid ${C.faint}`,
+    }}>
+      <span style={{ fontSize: 9, fontWeight: 800, color: C.muted, letterSpacing: ".06em" }}>
+        {s.source}
+      </span>
+      {/* 1X2 mini-bar */}
+      <div>
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>1X2</div>
+        <div style={{ display: "flex", gap: 1, height: 4, borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ flex: s.homePer || 0, background: C.accent, opacity: .8 }} />
+          <div style={{ flex: s.drawPer || 0, background: C.muted,  opacity: .5 }} />
+          <div style={{ flex: s.awayPer || 0, background: C.blue,   opacity: .8 }} />
+        </div>
+        <div style={{ fontSize: 8, color: C.muted, marginTop: 2 }}>
+          {pct(s.homePer)} · {pct(s.drawPer)} · {pct(s.awayPer)}
+        </div>
+      </div>
+      {/* Goals */}
+      <div>
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>O2.5</div>
+        <div style={{
+          fontSize: 11, fontWeight: 700,
+          color: (s.over25 || 0) >= 50 ? C.green : C.muted,
+          fontFamily: "var(--display,'Azeret Mono',monospace)",
+        }}>
+          {pct(s.over25)}
+        </div>
+      </div>
+      {/* BTTS */}
+      <div>
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>BTTS</div>
+        <div style={{
+          fontSize: 11, fontWeight: 700,
+          color: (s.bts || 0) >= 50 ? C.orange : C.muted,
+          fontFamily: "var(--display,'Azeret Mono',monospace)",
+        }}>
+          {pct(s.bts)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConsensusBlock({ consensus, total }) {
+  const dirs = consensus.directions;
+  const rows = [
+    { label: "1X2 Direction",   key: "1x2"   },
+    { label: "DC Direction",    key: "dc"    },
+    { label: "Goals Direction", key: "goals" },
+    { label: "BTTS",            key: "btts"  },
+  ];
+  return (
+    <div style={{
+      background: C.faint, borderRadius: 8, padding: "12px 14px",
+      marginTop: 12, display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
+        textTransform: "uppercase", color: C.muted, marginBottom: 2,
+      }}>
+        Consensus · {total} source{total !== 1 ? "s" : ""}
+      </div>
+      {rows.map(r => {
+        const d = dirs[r.key];
+        if (!d) return null;
+        return (
+          <div key={r.key} style={{
+            display: "grid", gridTemplateColumns: "110px 1fr",
+            gap: 8, alignItems: "center",
+          }}>
+            <span style={{ fontSize: 9, color: C.muted }}>{r.label}</span>
+            <DirBadge dir={d.dir} count={d.count} total={d.total} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function JarvisExtBlock({ text, fixture, onAddToParlay }) {
+  if (!text) return null;
+
+  // Detect if Jarvis recommends adding to ticket vs custom pick
+  const addSignal    = /add to ticket|add it|back it|go with it|ticket/i.test(text);
+  const customSignal = /custom pick|your own|use custom|consider custom/i.test(text);
+
+  // Derive a pick from model read anchor for the Add to Ticket btn
+  const anchor = fixture?.theRead?.anchor;
+
+  return (
+    <div style={{
+      marginTop: 14,
+      padding: "12px 14px",
+      borderLeft: `3px solid ${C.accent}`,
+      borderRadius: "0 8px 8px 0",
+      background: `${C.accent}08`,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 800, letterSpacing: ".10em",
+        textTransform: "uppercase", color: C.accent, marginBottom: 6,
+      }}>
+        Jarvis · External Read
+      </div>
+      <div style={{ fontSize: 11, color: C.text, lineHeight: 1.7 }}>{text}</div>
+
+      {/* CTAs */}
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        {addSignal && anchor && onAddToParlay && (
+          <AddBtn
+            compact
+            color={C.accent}
+            label={`Add ${anchor.pick} to Ticket`}
+            onClick={() => onAddToParlay({ pick: anchor.pick, prob: anchor.prob, market: anchor.market })}
+          />
+        )}
+        {customSignal && (
+          <div style={{
+            padding: "7px 10px", borderRadius: 8,
+            border: `1px solid ${C.border}`,
+            fontSize: 9, fontWeight: 700, color: C.muted,
+            letterSpacing: ".06em", textTransform: "uppercase",
+          }}>
+            Use Custom Pick
+          </div>
+        )}
+        {/* Fallback — always show add if no strong signal either way */}
+        {!addSignal && !customSignal && anchor && onAddToParlay && (
+          <AddBtn
+            compact
+            variant="ghost"
+            color={C.accent}
+            label={`Add ${anchor.pick}`}
+            onClick={() => onAddToParlay({ pick: anchor.pick, prob: anchor.prob, market: anchor.market })}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExternalPredictions({ fixture, onAddToParlay }) {
+  const [open,    setOpen]    = useState(false);
+  const [status,  setStatus]  = useState("idle");   // idle | loading | done | unavailable | error
+  const [data,    setData]    = useState(null);
+
+  const home  = fixture?.teams?.home || "";
+  const away  = fixture?.teams?.away || "";
+  const date  = fixture?.date || new Date().toISOString().slice(0, 10);
+  const fxId  = String(fixture?.id || "");
+
+  // Fire fetch when section is first opened
+  useEffect(() => {
+    if (!open || status !== "idle") return;
+
+    setStatus("loading");
+
+    const params = new URLSearchParams({ home, away, date });
+    if (fxId) params.set("fxId", fxId);
+    if (fixture?.league) params.set("league", fixture.league);
+
+    fetch(`/api/ext-predictions?${params}`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    })
+      .then(r => r.json())
+      .then(json => {
+        if (!json.available) {
+          setStatus("unavailable");
+        } else {
+          setData(json);
+          setStatus("done");
+        }
+      })
+      .catch(() => setStatus("error"));
+  }, [open]);
+
+  // ── Collapsed header ──────────────────────────────────────────────────────
+  return (
+    <div style={{
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: 10,
+      overflow: "hidden",
+      boxShadow: "0 1px 4px rgba(0,0,0,0.10)",
+    }}>
+      {/* Toggle header */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center",
+          justifyContent: "space-between",
+          padding: "13px 16px",
+          background: "transparent", border: "none",
+          borderBottom: open ? `1px solid ${C.border}` : "none",
+          cursor: "pointer",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{
+            fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
+            textTransform: "uppercase", color: C.muted,
+          }}>
+            What do other sources say?
+          </span>
+          {status === "done" && data && (
+            <span style={{
+              fontSize: 8, fontWeight: 700, color: C.green,
+              background: `${C.green}14`, border: `1px solid ${C.green}28`,
+              padding: "2px 5px", borderRadius: 3, letterSpacing: ".04em",
+              textTransform: "uppercase",
+            }}>
+              {data.sources.length} found
+            </span>
+          )}
+        </div>
+        {/* Chevron */}
+        <svg
+          width="12" height="12" viewBox="0 0 12 12" fill="none"
+          style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .2s ease" }}
+        >
+          <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {/* Body */}
+      {open && (
+        <div style={{ padding: "16px" }}>
+
+          {/* Loading */}
+          {status === "loading" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {["Forebet", "PremaT", "FST", "AccaGen"].map(src => (
+                <div key={src} style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "6px 0", borderBottom: `1px solid ${C.faint}`,
+                }}>
+                  <span style={{ fontSize: 9, fontWeight: 800, color: C.muted, width: 52 }}>{src}</span>
+                  <div style={{
+                    flex: 1, height: 4, background: C.faint, borderRadius: 2, overflow: "hidden",
+                  }}>
+                    <div style={{
+                      height: "100%", width: "40%", background: C.border,
+                      borderRadius: 2, animation: "grm-shimmer 1.4s ease-in-out infinite",
+                    }} />
+                  </div>
+                  <span style={{ fontSize: 9, color: C.muted, opacity: .5 }}>checking…</span>
+                </div>
+              ))}
+              <style>{`
+                @keyframes grm-shimmer {
+                  0%   { transform: translateX(-100%); }
+                  100% { transform: translateX(300%); }
+                }
+              `}</style>
+            </div>
+          )}
+
+          {/* Unavailable */}
+          {status === "unavailable" && (
+            <div style={{ fontSize: 11, color: C.muted, fontStyle: "italic", lineHeight: 1.6 }}>
+              No external predictions found for this match yet. Sources may not have published today's data.
+            </div>
+          )}
+
+          {/* Error */}
+          {status === "error" && (
+            <div style={{ fontSize: 11, color: C.red, lineHeight: 1.6 }}>
+              Could not fetch external predictions. Check your connection and try again.
+            </div>
+          )}
+
+          {/* Done */}
+          {status === "done" && data && (
+            <>
+              {/* Source breakdown */}
+              <div style={{ marginBottom: 4 }}>
+                {data.sources.map((s, i) => (
+                  <SourceRow key={i} s={s} />
+                ))}
+                {/* Show which sources didn't find the match */}
+                {data.errors && Object.entries(data.errors).length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 8, color: C.muted, opacity: .6, lineHeight: 1.6 }}>
+                    Not found: {Object.keys(data.errors).join(", ")}
+                  </div>
+                )}
+              </div>
+
+              {/* Consensus */}
+              {data.consensus && (
+                <ConsensusBlock
+                  consensus={data.consensus}
+                  total={data.sources.length}
+                />
+              )}
+
+              {/* Jarvis auto-summary */}
+              <JarvisExtBlock
+                text={data.jarvis}
+                fixture={fixture}
+                onAddToParlay={onAddToParlay}
+              />
+
+              {/* Cached notice */}
+              {data.cached && (
+                <div style={{ marginTop: 8, fontSize: 8, color: C.muted, opacity: .5, textAlign: "right" }}>
+                  Cached · {data.cachedAt ? new Date(data.cachedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, backtestSummary }) {
   const m         = f.markets;
@@ -1863,6 +2229,8 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             </div>
           ))}
         </SectionPanel>
+
+        <ExternalPredictions fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
 
         {/* Combos */}
         {f.combos?.length > 0 && (
