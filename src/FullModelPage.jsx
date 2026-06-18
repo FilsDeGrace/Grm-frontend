@@ -458,7 +458,7 @@ function FullModelJarvis({ f, backtestSummary }) {
       const isTimeout = err?.name === "AbortError";
       setError(isTimeout ? "Jarvis took too long — tap Retry." : "Could not reach analysis service.");
     }
-    finally { cleanup(); if (mounted) setLoading(false); }
+    finally { cleanup(); setLoading(false); }
     })();
     _inFlightFetches.set(inflightKey, promise);
   };
