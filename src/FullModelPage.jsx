@@ -404,6 +404,7 @@ function SignalArc({ prob, color, size = 72 }) {
 // JARVIS — consent gate + analysis display
 // ─────────────────────────────────────────────────────────────────────────────
 function FullModelJarvis({ f, backtestSummary }) {
+  const fxId     = String(f?.id || "");
   const cacheKey = `grm_fm_${f.id}_${new Date().toISOString().slice(0, 10)}`;
   const cached   = (() => { try { return localStorage.getItem(cacheKey) || null; } catch { return null; } })();
 
@@ -1345,6 +1346,9 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
     const params = new URLSearchParams({ home, away, date });
     if (fxId) params.set("fxId", fxId);
     if (fixture?.league) params.set("league", fixture.league);
+    if (fixture?.theRead?.anchor?.pick)   params.set("readPick",   fixture.theRead.anchor.pick);
+    if (fixture?.theRead?.anchor?.prob)   params.set("readConf",   fixture.theRead.anchor.prob);
+    if (fixture?.theRead?.anchor?.market) params.set("readMarket", fixture.theRead.anchor.market);
 
     fetch(`/api/ext-predictions?${params}`, {
       method: "GET",
