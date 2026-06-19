@@ -727,6 +727,14 @@ function BookModal({ pick, C, SERVER, onClose, onBooked }) {
       setDone(enriched);
       persistBooking(enriched);      // persist so tab-switch doesn't lose it
       if (onBooked) onBooked(enriched);
+      // Fix B: mark step as booked so auto-score knows bet was placed.
+      // Fire-and-forget — UI doesn't depend on this response.
+      try {
+        fetch(`${SERVER}/api/rollover/engine/booked`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: pick?.date || new Date().toISOString().split("T")[0], bookingCode: d.code || null }),
+        }).catch(() => {});
+      } catch {}
     } catch(e) {
       // N1/N20-FIX: translate raw error strings into user-friendly messages
       const msg = e.message || "";
@@ -2504,6 +2512,11 @@ export default function RolloverSystem({ C, SERVER, fixtures, historicalRates, d
 
   useEffect(() => {
     injectRolloverStyles(C);
+    // #3-FIX: force browser repaint after theme change so the dashboard hero
+    // doesn't show a stale white box when Rollover was hidden (display:none)
+    // during the theme switch. Read a layout property to flush the paint queue.
+    const el = document.getElementById("rollover-v4-styles");
+    if (el) void el.offsetHeight; // eslint-disable-line no-unused-expressions
     // Seed server date so todayStr() is server-aligned before slip build runs
     fetchRolloverServerDate(SERVER);
   }, [C]);

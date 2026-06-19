@@ -3244,17 +3244,19 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
             </div>
             <div style={{ fontSize:9, color:C.muted, lineHeight:1.4 }}>
               {f.markets?._insufficientData
-                ? <span>Jarvis can read this match <span style={{ color:C.accent, fontWeight:700 }}>→ tap to ask</span></span>
+                ? <span style={{ color:C.muted }}>No model data — Jarvis will research a pick</span>
                 : "Stats, xG and Jarvis analysis still available"}
             </div>
           </div>
           {onFullModel && (
-            <button onClick={(e) => { e.stopPropagation(); onFullModel(f); }}
+            <button onClick={(e) => {
+                e.stopPropagation();
+                // #5-FIX: pass _autoAskJarvis so FMP auto-consents and starts fetch
+                onFullModel(f.markets?._insufficientData ? { ...f, _autoAskJarvis: true } : f);
+              }}
               style={{ fontSize:9, fontWeight:700, flexShrink:0, whiteSpace:"nowrap",
                        cursor:"pointer", fontFamily:C.font, borderRadius:6, padding:"5px 10px",
-                       color: f.markets?._insufficientData ? C.accent : C.accent,
-                       background: f.markets?._insufficientData ? C.accentDim : C.accentDim,
-                       border:`1px solid ${C.accentBorder}` }}>
+                       color:C.accent, background:C.accentDim, border:`1px solid ${C.accentBorder}` }}>
               {f.markets?._insufficientData ? "Ask Jarvis →" : "View →"}
             </button>
           )}
@@ -11179,16 +11181,19 @@ function JarvisFAB({ C, isDesktop, onClick }) {
             position: "absolute",
             bottom: SIZE + 8,
             [isRightEdge ? "right" : "left"]: 0,
-            background: C.surface,
-            border: `1px solid ${C.accent}40`,
+            // #2-FIX: solid bg with fallback so it's never transparent on any theme.
+            // #2.1-FIX: wider + min-height so bubble is squarer, not a tall rectangle.
+            background: C.cardBg || C.surface || "#1e1e2e",
+            border: `1px solid ${C.accent}50`,
             borderRadius: 10,
-            padding: "7px 11px",
+            padding: "10px 13px",
             fontSize: 11,
             color: C.text,
             whiteSpace: "normal",
-            maxWidth: 220,
-            lineHeight: 1.4,
-            boxShadow: `0 4px 16px rgba(0,0,0,0.25)`,
+            width: 210,
+            minHeight: 60,
+            lineHeight: 1.55,
+            boxShadow: `0 6px 20px rgba(0,0,0,0.45)`,
             pointerEvents: "none",
             animation: "grm-fade-in .2s ease",
           }}>
@@ -12654,10 +12659,12 @@ export default function GRMPro() {
         <PoolPerformanceTab serverUrl={SERVER} />
       </div>
 
-      {/* N1-FIX: RolloverSystem kept mounted always — display:none when inactive.
-          Same pattern as N34 PoolPerformanceTab. Prevents re-fetch and state loss
-          on every nav away from the Rollover tab. */}
-      <div style={{ display: mainView === "rollover" ? undefined : "none" }}>
+      {/* N1-FIX: RolloverSystem always mounted at GRMPro level — same pattern as
+          PoolPerformanceTab (N34-FIX). display:none when inactive so slip
+          preloads in background. Props stay at GRMPro scope where they belong.
+          #3-FIX: themeId key forces React to re-render children when theme
+          changes so the dashboard hero doesn't show a stale white box. */}
+      <div key={`rollover-${theme?.id}`} style={{ display: mainView === "rollover" ? undefined : "none" }}>
         <RolloverSystem
           C={C}
           SERVER={SERVER}
@@ -12771,6 +12778,34 @@ export default function GRMPro() {
 
               {tab === "custom" ? (
                 <>
+                  {/* #6-FIX: active filter reminder strip — shows between toolbar and first card
+                      so users don't forget why they're seeing fewer fixtures */}
+                  {(leagueFilter && (leagueFilter instanceof Set ? leagueFilter.size > 0 : true)) && (() => {
+                    const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
+                    const names = [...lf].map(id => {
+                      const f2 = fixtures.find(f => f.leagueId === id);
+                      return f2?.league || id;
+                    }).filter(Boolean);
+                    const label = names.length <= 2
+                      ? names.join(" · ")
+                      : `${names.slice(0,2).join(" · ")} +${names.length - 2} more`;
+                    return (
+                      <div style={{ margin:"6px 0 2px", padding:"7px 12px",
+                                    background:`${C.accent}10`, border:`1px solid ${C.accent}25`,
+                                    borderRadius:8, display:"flex", alignItems:"center",
+                                    justifyContent:"space-between", gap:8 }}>
+                        <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
+                          Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                        </span>
+                        <button onClick={() => setLeagueFilter(null)}
+                          style={{ fontSize:8, color:C.muted, background:"transparent",
+                                   border:`1px solid ${C.border}`, borderRadius:5,
+                                   padding:"2px 8px", cursor:"pointer", fontFamily:C.font }}>
+                          Clear
+                        </button>
+                      </div>
+                    );
+                  })()}
                   {showCustomBanner && (
                     <CustomTabBanner onDismiss={() => {
                       setShowCustomBanner(false);
@@ -12804,6 +12839,28 @@ export default function GRMPro() {
                 </>
               ) : (
                 <>
+                  {/* #6-FIX: same filter strip for All/Engine tabs */}
+                  {(leagueFilter && (leagueFilter instanceof Set ? leagueFilter.size > 0 : true)) && (() => {
+                    const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
+                    const names = [...lf].map(id => { const f2 = fixtures.find(f => f.leagueId === id); return f2?.league || id; }).filter(Boolean);
+                    const label = names.length <= 2 ? names.join(" · ") : `${names.slice(0,2).join(" · ")} +${names.length - 2} more`;
+                    return (
+                      <div style={{ margin:"6px 0 2px", padding:"7px 12px",
+                                    background:`${C.accent}10`, border:`1px solid ${C.accent}25`,
+                                    borderRadius:8, display:"flex", alignItems:"center",
+                                    justifyContent:"space-between", gap:8 }}>
+                        <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
+                          Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                        </span>
+                        <button onClick={() => setLeagueFilter(null)}
+                          style={{ fontSize:8, color:C.muted, background:"transparent",
+                                   border:`1px solid ${C.border}`, borderRadius:5,
+                                   padding:"2px 8px", cursor:"pointer", fontFamily:C.font }}>
+                          Clear
+                        </button>
+                      </div>
+                    );
+                  })()}
                   <div className="grm-grid" style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:14,paddingBottom:80 }}>
                     {filtered.map(f => (
                       <FixtureErrorBoundary key={f.id} fixtureId={f.id}>

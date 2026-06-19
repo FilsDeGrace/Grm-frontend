@@ -510,6 +510,55 @@ export default function ChatLayout({
     ]);
   }
 
+  // #7: navigation + how-to handler — answers "where is X", "how do I Y", "what is Z"
+  async function handleNavHelp(q) {
+    await simulateTyping(500);
+    const ql = q.toLowerCase();
+
+    // Feature location answers
+    if (/rollover/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Rollover is the bottom tab with the trend icon. It runs one compounding slip per day — profit gates lock in gains at steps 3, 5, and 7." },
+        [{ label: "Go to Rollover", action: "NAV_ROLLOVER" }]);
+    } else if (/filter|league|country/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Tap the Filters button (top right on Live Model) to filter by league or country. An active filter shows a reminder strip between the toolbar and first fixture." });
+    } else if (/engine|qualified|confidence/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "The Engine tab shows only fixtures that cleared every confidence threshold — higher quality, fewer games. Tap it next to 'All' in Live Model." },
+        [{ label: "Go to Engine", action: "NAV_ENGINE" }]);
+    } else if (/custom|strategy|my.*rule|build.*own/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Custom lets you set your own strategy — pick markets, confidence floor, odds target. Find it in the third tab on Live Model." },
+        [{ label: "Go to Custom", action: "NAV_CUSTOM" }]);
+    } else if (/performance|hit.?rate|history|track.?record/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Performance tab shows your pick hit rate by market, date, and strategy. Markets drill-down shows every pick behind the number." });
+    } else if (/code.?anal|analyser|analyze|booking.?code|slip.?code/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Code Analyzer is in the Tools tab. Paste a SportyBet or LuckyLedger booking code and it breaks down every leg, odds, and lets you rebuild the slip." },
+        [{ label: "Open Code Analyzer", action: "NAV_CODE", platform: "SB", code: "" }]);
+    } else if (/parley|ticket|builder|draft/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Parley System is the second bottom tab. Builder holds your draft legs. Jarvis tab has AI-built tickets. Saved tab stores your booked slips." });
+    } else if (/theme|colour|color|dark|light|appearance/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Tap Filters on Live Model, then 'Change Theme' to switch between GRM's colour themes." });
+    } else if (/save|saved|bookmark/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Tap Save on any built ticket in the Parley System. Saved tickets appear in the Saved tab and get a GRM share code you can copy or send." });
+    } else if (/share|link|grm.*code|code.*share/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "Every saved ticket gets a GRM code. Tap Share on the ticket to copy the code or link — anyone can load it via 'Load Shared Ticket' in the Parley System." });
+    } else if (/jarvis|ai|ask/.test(ql)) {
+      addJarvisMsg({ type: "TEXT",
+        text: "That's me! I can build parleys, analyse slips, check your rollover, run match analysis, and answer questions about GRM. Just ask." });
+    } else {
+      // Fallback — route to generic Gemini for anything I don't have a canned answer for
+      await handleUnknown(q);
+    }
+  }
+
   // ── ROLLOVER ─────────────────────────────────────────────────────────────────
 
   async function handleRolloverStatus() {
@@ -1453,6 +1502,10 @@ export default function ChatLayout({
 
       case "show_help":
         await handleHelp();
+        break;
+
+      case "nav_help":
+        await handleNavHelp(args.question || "");
         break;
 
       case "conversational_reply":

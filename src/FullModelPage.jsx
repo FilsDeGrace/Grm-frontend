@@ -417,7 +417,9 @@ function FullModelJarvis({ f, backtestSummary }) {
 
   const doFetch = async (force = false) => {
     const inflightKey = `${fxId}_${force ? "force" : "normal"}`;
-    if (_inFlightFetches.has(inflightKey)) return;
+    const existing = _inFlightFetches.get(inflightKey);
+    if (existing && (Date.now() - existing.startedAt) < _inFlightExpiry) return;
+    if (existing) _inFlightFetches.delete(inflightKey);
     setLoading(true); setError(null);
     if (force) { setBrief(null); setSrvCached(false); setAgeH(null); }
     let mounted = true;
@@ -460,7 +462,7 @@ function FullModelJarvis({ f, backtestSummary }) {
     }
     finally { cleanup(); setLoading(false); }
     })();
-    _inFlightFetches.set(inflightKey, promise);
+    _inFlightFetches.set(inflightKey, { promise, startedAt: Date.now() });
   };
 
   const sectionColors = {
@@ -478,6 +480,21 @@ function FullModelJarvis({ f, backtestSummary }) {
       doFetch(false);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mobile throttle fix — browser pauses JS when screen is idle/locked.
+  // On visibility restore, if we're still loading force a re-render to
+  // unstick the spinner (the fetch is still running in the background).
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && loadingRef.current) {
+        setLoading(l => l); // no-op state update — forces re-render
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   if (!consented) {
     return (
@@ -1164,6 +1181,7 @@ function TipIcon({ text }) {
 // Key = fixtureId+date. If user navigates away and returns, the result
 // is either in the cache (fast) or the promise is still running (re-attach).
 const _inFlightFetches = new Map();
+const _inFlightExpiry  = 38000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EXTERNAL PREDICTIONS SECTION
@@ -1184,51 +1202,76 @@ function DirBadge({ dir, count, total }) {
   );
 }
 
+const SOURCE_FULL_NAMES = {
+  Forebet: "Forebet",
+  PremaT:  "Primatips",
+  FST:     "FootballSuperTips",
+  AccaGen: "AccaGenerator",
+};
+
 function SourceRow({ s }) {
   const pct = v => (v != null ? `${Math.round(v)}%` : "—");
+  const fullName = SOURCE_FULL_NAMES[s.source] || s.source;
   return (
     <div style={{
       display: "grid",
-      gridTemplateColumns: "52px 1fr 1fr 1fr",
-      gap: 6, alignItems: "center",
-      padding: "6px 0",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 10,
+      padding: "10px 0",
       borderBottom: `1px solid ${C.faint}`,
     }}>
-      <span style={{ fontSize: 9, fontWeight: 800, color: C.muted, letterSpacing: ".06em" }}>
-        {s.source}
-      </span>
-      {/* 1X2 mini-bar */}
+      <div style={{ gridColumn: "1 / -1", fontSize: 9, fontWeight: 800, color: C.text, letterSpacing: ".04em", marginBottom: 4 }}>
+        {fullName}
+      </div>
+      {/* 1X2 — clear H/D/A breakdown */}
       <div>
-        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>1X2</div>
-        <div style={{ display: "flex", gap: 1, height: 4, borderRadius: 2, overflow: "hidden" }}>
-          <div style={{ flex: s.homePer || 0, background: C.accent, opacity: .8 }} />
-          <div style={{ flex: s.drawPer || 0, background: C.muted,  opacity: .5 }} />
-          <div style={{ flex: s.awayPer || 0, background: C.blue,   opacity: .8 }} />
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>1X2</div>
+        <div style={{ display: "flex", gap: 1, height: 5, borderRadius: 2, overflow: "hidden", marginBottom: 3 }}>
+          <div style={{ flex: s.homePer || 0, background: C.accent, opacity: .85 }} />
+          <div style={{ flex: s.drawPer || 0, background: C.muted,  opacity: .55 }} />
+          <div style={{ flex: s.awayPer || 0, background: C.blue,   opacity: .85 }} />
         </div>
-        <div style={{ fontSize: 8, color: C.muted, marginTop: 2 }}>
-          {pct(s.homePer)} · {pct(s.drawPer)} · {pct(s.awayPer)}
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: C.accent, fontWeight: 700 }}>H</span>
+            <span style={{ color: C.muted }}>{pct(s.homePer)}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: C.muted, fontWeight: 700 }}>D</span>
+            <span style={{ color: C.muted }}>{pct(s.drawPer)}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: C.blue, fontWeight: 700 }}>A</span>
+            <span style={{ color: C.muted }}>{pct(s.awayPer)}</span>
+          </div>
         </div>
       </div>
       {/* Goals */}
       <div>
-        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>O2.5</div>
-        <div style={{
-          fontSize: 11, fontWeight: 700,
-          color: (s.over25 || 0) >= 50 ? C.green : C.muted,
-          fontFamily: "var(--display,'Azeret Mono',monospace)",
-        }}>
-          {pct(s.over25)}
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>GOALS</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: (s.over25 || 0) >= 50 ? C.green : C.muted, fontWeight: 700 }}>O2.5</span>
+            <span style={{ color: C.muted }}>{pct(s.over25)}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: (s.under25 || 0) >= 50 ? C.green : C.muted, fontWeight: 700 }}>U2.5</span>
+            <span style={{ color: C.muted }}>{pct(s.under25)}</span>
+          </div>
         </div>
       </div>
       {/* BTTS */}
       <div>
-        <div style={{ fontSize: 8, color: C.muted, marginBottom: 2 }}>BTTS</div>
-        <div style={{
-          fontSize: 11, fontWeight: 700,
-          color: (s.bts || 0) >= 50 ? C.orange : C.muted,
-          fontFamily: "var(--display,'Azeret Mono',monospace)",
-        }}>
-          {pct(s.bts)}
+        <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>BTTS</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: (s.bts || 0) >= 50 ? C.orange : C.muted, fontWeight: 700 }}>Yes</span>
+            <span style={{ color: C.muted }}>{pct(s.bts)}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+            <span style={{ color: (s.ots || 0) >= 50 ? C.orange : C.muted, fontWeight: 700 }}>No</span>
+            <span style={{ color: C.muted }}>{pct(s.ots)}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1308,14 +1351,20 @@ function JarvisExtBlock({ text, fixture, onAddToParlay }) {
           />
         )}
         {customSignal && (
-          <div style={{
-            padding: "7px 10px", borderRadius: 8,
-            border: `1px solid ${C.border}`,
-            fontSize: 9, fontWeight: 700, color: C.muted,
-            letterSpacing: ".06em", textTransform: "uppercase",
-          }}>
+          <button
+            onClick={() => {
+              const el = document.getElementById("grm-custom-pick-anchor");
+              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+            style={{
+              padding: "7px 10px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: "transparent",
+              fontSize: 9, fontWeight: 700, color: C.text,
+              letterSpacing: ".06em", textTransform: "uppercase", cursor: "pointer",
+            }}
+          >
             Use Custom Pick
-          </div>
+          </button>
         )}
         {/* Fallback — always show add if no strong signal either way */}
         {!addSignal && !customSignal && anchor && onAddToParlay && (
@@ -1355,21 +1404,30 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
     if (fixture?.theRead?.anchor?.prob)   params.set("readConf",   fixture.theRead.anchor.prob);
     if (fixture?.theRead?.anchor?.market) params.set("readMarket", fixture.theRead.anchor.market);
 
-    fetch(`/api/ext-predictions?${params}`, {
+    fetch(`${SERVER}/api/ext-predictions?${params}`, {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then(json => {
+        console.log("[ExtPred] response:", JSON.stringify(json).slice(0, 400));
         if (!json.available) {
           setStatus("unavailable");
+          setData({ errors: json.errors || {} });
         } else {
           setData(json);
           setStatus("done");
         }
       })
-      .catch(() => setStatus("error"));
-  }, [open]);
+      .catch(err => {
+        console.error("[ExtPred] fetch error:", err.message);
+        setStatus("error");
+        setData({ _fetchError: err.message });
+      });
+  }, [open, status]);
 
   // ── Collapsed header ──────────────────────────────────────────────────────
   return (
@@ -1454,15 +1512,55 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
 
           {/* Unavailable */}
           {status === "unavailable" && (
-            <div style={{ fontSize: 11, color: C.muted, fontStyle: "italic", lineHeight: 1.6 }}>
-              No external predictions found for this match yet. Sources may not have published today's data.
+            <div>
+              <div style={{ fontSize: 11, color: C.muted, fontStyle: "italic", lineHeight: 1.6, marginBottom: 10 }}>
+                No external predictions found for this match yet. Sources may not have published today's data.
+              </div>
+              <button
+                onClick={() => setStatus("idle")}
+                style={{
+                  padding: "7px 14px", borderRadius: 8,
+                  border: `1px solid ${C.border}`, background: "transparent",
+                  fontSize: 9, fontWeight: 700, color: C.text,
+                  letterSpacing: ".06em", textTransform: "uppercase", cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
             </div>
           )}
 
           {/* Error */}
           {status === "error" && (
-            <div style={{ fontSize: 11, color: C.red, lineHeight: 1.6 }}>
-              Could not fetch external predictions. Check your connection and try again.
+            <div>
+              <div style={{ fontSize: 11, color: C.red, lineHeight: 1.6, marginBottom: 10 }}>
+                Could not fetch external predictions.
+                {data?._fetchError && (
+                  <div style={{ fontSize: 9, color: C.muted, marginTop: 4, fontFamily: "monospace", wordBreak: "break-all" }}>
+                    {data._fetchError}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => setStatus("idle")}
+                style={{
+                  padding: "7px 14px", borderRadius: 8,
+                  border: `1px solid ${C.red}`, background: "transparent",
+                  fontSize: 9, fontWeight: 700, color: C.red,
+                  letterSpacing: ".06em", textTransform: "uppercase", cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Unavailable — show which sources errored */}
+          {status === "unavailable" && data?.errors && Object.keys(data.errors).length > 0 && (
+            <div style={{ marginTop: 8, fontSize: 9, color: C.muted, fontFamily: "monospace", lineHeight: 1.8 }}>
+              {Object.entries(data.errors).map(([src, msg]) => (
+                <div key={src}>{src}: {msg}</div>
+              ))}
             </div>
           )}
 
@@ -1912,7 +2010,9 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
         gap: 14, maxWidth: 700, width: "100%", margin: "0 auto",
       }}>
 
-        <FixtureBookNow fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+        <div id="grm-custom-pick-anchor">
+          <FixtureBookNow fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+        </div>
 
         {/* Expected Goals */}
         <SectionPanel

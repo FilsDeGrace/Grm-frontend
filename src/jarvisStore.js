@@ -83,15 +83,19 @@ export const FAB_FEATURE_TIPS = [
   { id: "fab_tip_rollover", text: "Tip: Rollover compounds one slip a day — profit gates lock in gains at steps 3, 5, 7." },
   { id: "fab_tip_perf",     text: "Tip: Performance → Markets — tap any bar to see every pick behind that number." },
   { id: "fab_tip_jarvis",   text: "Ask Jarvis anything" }, // legacy default, kept in rotation
+  // #6.1: onboarding tips for filters, themes, and how it works
+  { id: "fab_tip_filters",  text: "Tip: Tap Filters to narrow by league, confidence, or data quality." },
+  { id: "fab_tip_theme",    text: "Tip: Filters → Change Theme to switch GRM's look and feel." },
+  { id: "fab_tip_guide",    text: "Tip: Filters → Learn how it works for a full walkthrough of GRM Pro." },
 ];
 
 // Minimum and per-character read-time budget (ms) for the tip popup.
-// Tuned so a ~40 char tip gets ~4.5s and a ~90 char tip gets ~7s — enough
-// to read once at a comfortable pace without feeling rushed or sluggish.
+// #2-FIX: increased MIN_MS 4500→7000 and PER_CHAR_MS 45→60 so tips are
+// readable at a comfortable pace. A ~50 char tip now gets ~7s, ~90 char ~9s.
 export function tipReadDuration(text = "") {
-  const MIN_MS = 4500;
-  const PER_CHAR_MS = 45;
-  return Math.max(MIN_MS, Math.min(8000, text.length * PER_CHAR_MS));
+  const MIN_MS = 7000;
+  const PER_CHAR_MS = 60;
+  return Math.max(MIN_MS, Math.min(12000, text.length * PER_CHAR_MS));
 }
 
 export const BOOKING_CODE_RE = /\b[A-Z0-9]{6,12}\b/;
