@@ -9,7 +9,6 @@ export const THEME_DARK = {
   id: "dark", name: "Dark Mode", emoji: "🌙",
   desc: "Original — deep space, gold accents",
 
-  // ── Surfaces ──────────────────────────────────────────────────────────────
   bg:         "#050508",
   surface:    "rgba(255,255,255,0.025)",
   surfaceHi:  "rgba(255,255,255,0.045)",
@@ -17,21 +16,17 @@ export const THEME_DARK = {
   modalBg:    "#0d1117",
   inputBg:    "rgba(0,0,0,0.35)",
 
-  // ── Header (sticky) ───────────────────────────────────────────────────────
   headerBg:   "rgba(5,5,8,0.95)",
   headerBorder:"rgba(255,255,255,0.06)",
 
-  // ── Borders ───────────────────────────────────────────────────────────────
   border:     "rgba(255,255,255,0.06)",
   borderHi:   "rgba(255,255,255,0.13)",
 
-  // ── Text ──────────────────────────────────────────────────────────────────
   text:       "#E2E8F0",
   muted:      "#64748B",
   faint:      "#1E293B",
   subtleBg:   "#1E293B",
 
-  // ── Primary CTA accent ────────────────────────────────────────────────────
   accent:      "#E8C27A",
   accentDim:   "rgba(232,194,122,0.10)",
   accentBorder:"rgba(232,194,122,0.24)",
@@ -40,7 +35,6 @@ export const THEME_DARK = {
   goldDim:     "rgba(232,194,122,0.10)",
   goldBorder:  "rgba(232,194,122,0.24)",
 
-  // ── Semantic market colours ───────────────────────────────────────────────
   green:       "#34D399",
   greenDim:    "rgba(52,211,153,0.10)",
   blue:        "#60A5FA",
@@ -64,17 +58,13 @@ export const THEME_DARK = {
   silver:      "#94A3B8",
   silverDim:   "rgba(148,163,184,0.07)",
 
-  // ── Progress / skeleton ───────────────────────────────────────────────────
   track:       "#1E293B",
   skeleton:    "rgba(255,255,255,0.06)",
   skeletonHi:  "rgba(255,255,255,0.13)",
 
-  // ── Typography & shape ────────────────────────────────────────────────────
   font:        '"JetBrains Mono","Fira Code",monospace',
   btnRadius:   8,
   cardRadius:  12,
-
-  // ── Scrollbar ─────────────────────────────────────────────────────────────
   scrollThumb: "#1E293B",
 };
 
@@ -145,71 +135,6 @@ export const THEME_CLAUDE = {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEME_OPENCODE = {
-  id: "opencode", name: "OpenCode Terminal", emoji: "⌨️",
-  desc: "Warm near-black, monospace, Apple HIG semantic colours",
-
-  bg:         "#201d1d",
-  surface:    "#302c2c",
-  surfaceHi:  "#3a3535",
-  cardBg:     "#302c2c",
-  modalBg:    "#201d1d",
-  inputBg:    "#302c2c",
-
-  headerBg:   "rgba(32,29,29,0.98)",
-  headerBorder:"rgba(253,252,252,0.10)",
-
-  border:     "rgba(253,252,252,0.10)",
-  borderHi:   "rgba(253,252,252,0.20)",
-
-  text:       "#fdfcfc",
-  muted:      "#9a9898",
-  faint:      "rgba(253,252,252,0.07)",
-  subtleBg:   "#302c2c",
-
-  accent:      "#007aff",
-  accentDim:   "rgba(0,122,255,0.15)",
-  accentBorder:"rgba(0,122,255,0.35)",
-  accentText:  "#fdfcfc",
-  gold:        "#007aff",
-  goldDim:     "rgba(0,122,255,0.15)",
-  goldBorder:  "rgba(0,122,255,0.35)",
-
-  green:       "#30d158",
-  greenDim:    "rgba(48,209,88,0.12)",
-  blue:        "#007aff",
-  blueDim:     "rgba(0,122,255,0.12)",
-  purple:      "#bf5af2",
-  purpleDim:   "rgba(191,90,242,0.10)",
-  orange:      "#ff9f0a",
-  orangeDim:   "rgba(255,159,10,0.10)",
-  radar:       "#5ac8fa",
-  radarDim:    "rgba(90,200,250,0.10)",
-  radarBorder: "rgba(90,200,250,0.28)",
-  edge:        "#007aff",
-  edgeDim:     "rgba(0,122,255,0.12)",
-  edgeBorder:  "rgba(0,122,255,0.30)",
-  red:         "#ff3b30",
-  redDim:      "rgba(255,59,48,0.12)",
-  amber:       "#ff9f0a",
-  amberDim:    "rgba(255,159,10,0.12)",
-  dc:          "#ff6b6b",
-  dcDim:       "rgba(255,107,107,0.10)",
-  silver:      "#9a9898",
-  silverDim:   "rgba(154,152,152,0.10)",
-
-  track:       "#302c2c",
-  skeleton:    "rgba(253,252,252,0.06)",
-  skeletonHi:  "rgba(253,252,252,0.12)",
-
-  font:        '"Berkeley Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
-  btnRadius:   4,
-  cardRadius:  4,
-  scrollThumb: "#646262",
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 export const THEME_GRM = {
   id: "grm", name: "GRM Pitch", emoji: "⚽",
   desc: "Stadium black, turf green, violet accent — built for the model",
@@ -274,244 +199,235 @@ export const THEME_GRM = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  NEW: THEME_MILK — Fade milk minimal
-//  Off-white canvas, never bright. Jet black text. Surgical precision.
-//  Think: a printed research report on quality paper.
+//  THEME_NOIR — Cold crimson editorial
+//  Base: near-black charcoal with a faint purple undertone (#141018)
+//  Accent: arterial crimson (#c0292b) — one color, used surgically
+//  Vibe: Bloomberg terminal crossed with a fashion magazine. Dangerous calm.
+//  Font: Tight grotesque — compressed, editorial, no warmth
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEME_MILK = {
-  id: "milk", name: "Milk", emoji: "🥛",
-  desc: "Off-white canvas, jet black type, obsessive minimalism",
+export const THEME_NOIR = {
+  id: "noir", name: "Noir Rouge", emoji: "🔴",
+  desc: "Charcoal base, cold crimson accent — editorial danger",
 
-  // Milk tones — warm whites, never harsh
-  bg:         "#f4f1ec",          // warm milk — softly beige, never bright
-  surface:    "#f8f6f2",          // cream surface, barely lifted
-  surfaceHi:  "#faf9f6",          // near-white for hovers
-  cardBg:     "#f8f6f2",
-  modalBg:    "#f4f1ec",
-  inputBg:    "#ffffff",          // inputs go pure white for clarity
+  bg:         "#141018",          // near-black, purple undertone
+  surface:    "#1c1820",          // lifted dark with same undertone
+  surfaceHi:  "#231f2a",
+  cardBg:     "#1c1820",
+  modalBg:    "#141018",
+  inputBg:    "#1c1820",
 
-  headerBg:   "rgba(244,241,236,0.97)",
-  headerBorder:"rgba(0,0,0,0.07)",
-
-  border:     "rgba(0,0,0,0.07)",
-  borderHi:   "rgba(0,0,0,0.14)",
-
-  // Text — jet black hierarchy, serious and sharp
-  text:       "#0a0a0a",          // near-true black
-  muted:      "#5a5a5a",          // mid grey — ~6:1 on milk bg
-  faint:      "rgba(0,0,0,0.05)",
-  subtleBg:   "rgba(0,0,0,0.04)",
-
-  // Accent — single pure black. No colour pollution.
-  accent:      "#0a0a0a",
-  accentDim:   "rgba(10,10,10,0.06)",
-  accentBorder:"rgba(10,10,10,0.20)",
-  accentText:  "#f4f1ec",         // milk text on black button
-  gold:        "#0a0a0a",
-  goldDim:     "rgba(10,10,10,0.06)",
-  goldBorder:  "rgba(10,10,10,0.20)",
-
-  // Market colours — deeply muted, desaturated on light background
-  // Still readable, but not loud — data, not decoration
-  green:       "#1a5c38",
-  greenDim:    "rgba(26,92,56,0.08)",
-  blue:        "#1a3a6b",
-  blueDim:     "rgba(26,58,107,0.08)",
-  purple:      "#4c2d8a",
-  purpleDim:   "rgba(76,45,138,0.08)",
-  orange:      "#8a3a10",
-  orangeDim:   "rgba(138,58,16,0.08)",
-  radar:       "#0a5e58",
-  radarDim:    "rgba(10,94,88,0.08)",
-  radarBorder: "rgba(10,94,88,0.20)",
-  edge:        "#6b4c10",
-  edgeDim:     "rgba(107,76,16,0.08)",
-  edgeBorder:  "rgba(107,76,16,0.20)",
-  red:         "#8a1a1a",
-  redDim:      "rgba(138,26,26,0.08)",
-  amber:       "#6b4c10",
-  amberDim:    "rgba(107,76,16,0.08)",
-  dc:          "#7a1a4a",
-  dcDim:       "rgba(122,26,74,0.08)",
-  silver:      "#888888",
-  silverDim:   "rgba(136,136,136,0.08)",
-
-  track:       "rgba(0,0,0,0.06)",
-  skeleton:    "rgba(0,0,0,0.05)",
-  skeletonHi:  "rgba(0,0,0,0.09)",
-
-  // Typeface: editorial grotesque — Aktiv or Helvetica spirit
-  font:        '"Helvetica Neue","Arial",sans-serif',
-  btnRadius:   3,               // almost square — precise, Swiss
-  cardRadius:  4,
-  scrollThumb: "rgba(0,0,0,0.15)",
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  NEW: THEME_CUPERTINO — What if Apple designed GRM Pro
-//  Not "Apple-looking" — Apple THINKING: invisible UI, content is everything.
-//  SF Pro rhythm. Vibrancy layers. Hairline borders. Chromatic minimalism.
-//  One accent: pure system blue. Everything else recedes.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const THEME_CUPERTINO = {
-  id: "cupertino", name: "Cupertino", emoji: "🔵",
-  desc: "System blue, vibrancy layers, hairline precision — invisible UI",
-
-  // Base: platinum cool white — not warm, not grey — the Apple neutral
-  bg:         "#f2f2f7",          // iOS systemGroupedBackground
-  surface:    "#ffffff",          // iOS secondarySystemGroupedBackground
-  surfaceHi:  "#f9f9fb",
-  cardBg:     "#ffffff",
-  modalBg:    "#f2f2f7",
-  inputBg:    "#ffffff",
-
-  headerBg:   "rgba(242,242,247,0.82)",   // true vibrancy feel
-  headerBorder:"rgba(60,60,67,0.12)",      // iOS separator
-
-  border:     "rgba(60,60,67,0.12)",       // iOS opaqueSeparator
-  borderHi:   "rgba(60,60,67,0.22)",
-
-  // Text: Apple's exact label hierarchy
-  text:       "#000000",                   // iOS label (primary)
-  muted:      "rgba(60,60,67,0.60)",       // iOS secondaryLabel — 4.5:1+
-  faint:      "rgba(60,60,67,0.06)",
-  subtleBg:   "rgba(60,60,67,0.05)",
-
-  // One accent. Pure. System blue.
-  accent:      "#007aff",
-  accentDim:   "rgba(0,122,255,0.10)",
-  accentBorder:"rgba(0,122,255,0.30)",
-  accentText:  "#ffffff",
-  gold:        "#007aff",
-  goldDim:     "rgba(0,122,255,0.10)",
-  goldBorder:  "rgba(0,122,255,0.30)",
-
-  // Market colours — Apple HIG semantic colours, pure system values
-  green:       "#34c759",         // systemGreen
-  greenDim:    "rgba(52,199,89,0.10)",
-  blue:        "#007aff",         // systemBlue
-  blueDim:     "rgba(0,122,255,0.10)",
-  purple:      "#af52de",         // systemPurple
-  purpleDim:   "rgba(175,82,222,0.10)",
-  orange:      "#ff9500",         // systemOrange
-  orangeDim:   "rgba(255,149,0,0.10)",
-  radar:       "#5ac8fa",         // systemTeal
-  radarDim:    "rgba(90,200,250,0.10)",
-  radarBorder: "rgba(90,200,250,0.28)",
-  edge:        "#ff9500",         // systemOrange reused for edge/signal
-  edgeDim:     "rgba(255,149,0,0.10)",
-  edgeBorder:  "rgba(255,149,0,0.28)",
-  red:         "#ff3b30",         // systemRed
-  redDim:      "rgba(255,59,48,0.09)",
-  amber:       "#ff9f0a",         // systemYellow (dark)
-  amberDim:    "rgba(255,159,10,0.09)",
-  dc:          "#ff2d55",         // systemPink
-  dcDim:       "rgba(255,45,85,0.09)",
-  silver:      "rgba(60,60,67,0.42)",   // tertiaryLabel
-  silverDim:   "rgba(60,60,67,0.05)",
-
-  track:       "rgba(60,60,67,0.10)",
-  skeleton:    "rgba(60,60,67,0.07)",
-  skeletonHi:  "rgba(60,60,67,0.03)",
-
-  // SF Pro Rounded — the Apple design system font
-  font:        '"SF Pro Rounded","SF Pro Display",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif',
-  btnRadius:   10,              // iOS default button corner
-  cardRadius:  12,              // iOS card corner
-  scrollThumb: "rgba(0,0,0,0.20)",
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  NEW: THEME_VELOCI — Bugatti × Luxury Data
-//  Carbon black base. Bugatti Racing Blue (#001A6B deep, #0033A0 brand).
-//  Agence gold. The car does 0-60 in 2.3s — the UI should feel that fast.
-//  Razor border lines. No clutter. Performance is the aesthetic.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const THEME_VELOCI = {
-  id: "veloci", name: "Veyron", emoji: "🏎️",
-  desc: "Carbon black, Bugatti blue, Agence gold — pure performance",
-
-  // Carbon fiber: ultra deep, not pure black — has structure
-  bg:         "#08090c",          // carbon void
-  surface:    "#0f1218",          // carbon weave surface
-  surfaceHi:  "#161b24",          // lifted panel
-  cardBg:     "#0f1218",
-  modalBg:    "#08090c",
-  inputBg:    "#0f1218",
-
-  headerBg:   "rgba(8,9,12,0.98)",
-  headerBorder:"rgba(0,51,160,0.40)",   // blue hairline — signature
+  headerBg:   "rgba(20,16,24,0.97)",
+  headerBorder:"rgba(192,41,43,0.20)",   // crimson hairline in header
 
   border:     "rgba(255,255,255,0.07)",
-  borderHi:   "rgba(0,51,160,0.50)",    // Bugatti blue border on hover
+  borderHi:   "rgba(192,41,43,0.35)",    // crimson on hover
 
-  // Text: pure white hierarchy — no warmth, clinical precision
-  text:       "#f0f2f5",
-  muted:      "#7a8399",
-  faint:      "rgba(240,242,245,0.05)",
-  subtleBg:   "#0f1218",
+  text:       "#ece8f0",                  // cool white with purple tinge
+  muted:      "#8a8492",
+  faint:      "rgba(236,232,240,0.05)",
+  subtleBg:   "#1c1820",
 
-  // Dual accent system: blue (primary) + gold (signal/highlight)
-  // Bugatti uses blue as brand, gold as trim — we mirror that
-  accent:      "#0033a0",         // Bugatti Racing Blue
-  accentDim:   "rgba(0,51,160,0.15)",
-  accentBorder:"rgba(0,51,160,0.50)",
+  accent:      "#c0292b",         // arterial crimson
+  accentDim:   "rgba(192,41,43,0.12)",
+  accentBorder:"rgba(192,41,43,0.40)",
+  accentText:  "#ece8f0",
+  gold:        "#c0292b",
+  goldDim:     "rgba(192,41,43,0.12)",
+  goldBorder:  "rgba(192,41,43,0.40)",
+
+  // Market colours — vivid enough to read on dark purple-charcoal
+  green:       "#2ecc71",
+  greenDim:    "rgba(46,204,113,0.10)",
+  blue:        "#5b9cf6",
+  blueDim:     "rgba(91,156,246,0.10)",
+  purple:      "#b57bee",
+  purpleDim:   "rgba(181,123,238,0.10)",
+  orange:      "#e8852a",
+  orangeDim:   "rgba(232,133,42,0.10)",
+  radar:       "#1abccd",
+  radarDim:    "rgba(26,188,205,0.10)",
+  radarBorder: "rgba(26,188,205,0.28)",
+  edge:        "#f0c040",
+  edgeDim:     "rgba(240,192,64,0.10)",
+  edgeBorder:  "rgba(240,192,64,0.28)",
+  red:         "#c0292b",         // red IS the accent here — consistent
+  redDim:      "rgba(192,41,43,0.12)",
+  amber:       "#e8852a",
+  amberDim:    "rgba(232,133,42,0.10)",
+  dc:          "#e05a8a",
+  dcDim:       "rgba(224,90,138,0.09)",
+  silver:      "#8a8492",
+  silverDim:   "rgba(138,132,146,0.08)",
+
+  track:       "#1c1820",
+  skeleton:    "rgba(236,232,240,0.05)",
+  skeletonHi:  "rgba(236,232,240,0.10)",
+
+  font:        '"Barlow Semi Condensed","Barlow","Trebuchet MS",sans-serif',
+  btnRadius:   4,
+  cardRadius:  6,
+  scrollThumb: "#2e2830",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THEME_DUSK — Blue-slate stadium hour
+//  Base: deep blue-slate (#141c2e) — the colour of a stadium at 7:30pm,
+//  floodlights just fired, sky not fully dark. Full of electricity.
+//  Accent: neon coral (#ff5e3a) — live match energy, urgent, kinetic
+//  Vibe: Sky Sports dashboard if it had taste. Athletic. Present tense.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const THEME_DUSK = {
+  id: "dusk", name: "Dusk", emoji: "🌆",
+  desc: "Blue-slate stadium hour, neon coral — live match energy",
+
+  bg:         "#111827",          // deep blue-charcoal — Tailwind gray-900 territory
+  surface:    "#1a2235",          // true blue-slate lift
+  surfaceHi:  "#202c42",
+  cardBg:     "#1a2235",
+  modalBg:    "#111827",
+  inputBg:    "#1a2235",
+
+  headerBg:   "rgba(17,24,39,0.97)",
+  headerBorder:"rgba(255,94,58,0.18)",   // coral hairline
+
+  border:     "rgba(255,255,255,0.08)",
+  borderHi:   "rgba(255,94,58,0.40)",    // coral on active
+
+  text:       "#e8edf5",
+  muted:      "#7e8da8",
+  faint:      "rgba(232,237,245,0.05)",
+  subtleBg:   "#1a2235",
+
+  accent:      "#ff5e3a",         // neon coral — live, urgent
+  accentDim:   "rgba(255,94,58,0.12)",
+  accentBorder:"rgba(255,94,58,0.38)",
   accentText:  "#ffffff",
-  gold:        "#c8a96e",         // Agence gold — the trim
-  goldDim:     "rgba(200,169,110,0.12)",
-  goldBorder:  "rgba(200,169,110,0.35)",
+  gold:        "#ff5e3a",
+  goldDim:     "rgba(255,94,58,0.12)",
+  goldBorder:  "rgba(255,94,58,0.38)",
 
-  // Market colours — vivid on carbon, chosen to complement blue/gold palette
-  green:       "#00d68f",         // telemetry green — sector time
-  greenDim:    "rgba(0,214,143,0.10)",
-  blue:        "#4d9fff",         // brightened Bugatti blue for data
-  blueDim:     "rgba(77,159,255,0.10)",
-  purple:      "#a78bfa",
-  purpleDim:   "rgba(167,139,250,0.10)",
-  orange:      "#ff7b00",         // pit lane orange
-  orangeDim:   "rgba(255,123,0,0.10)",
-  radar:       "#00bcd4",
-  radarDim:    "rgba(0,188,212,0.10)",
-  radarBorder: "rgba(0,188,212,0.30)",
-  edge:        "#c8a96e",         // gold is the edge signal
-  edgeDim:     "rgba(200,169,110,0.12)",
-  edgeBorder:  "rgba(200,169,110,0.35)",
-  red:         "#ff3d55",
-  redDim:      "rgba(255,61,85,0.10)",
-  amber:       "#c8a96e",
-  amberDim:    "rgba(200,169,110,0.12)",
-  dc:          "#ff6eb4",
-  dcDim:       "rgba(255,110,180,0.09)",
-  silver:      "#7a8399",
-  silverDim:   "rgba(122,131,153,0.08)",
+  // Market colours — punchy against blue-slate
+  green:       "#00e676",         // electric green — full signal
+  greenDim:    "rgba(0,230,118,0.10)",
+  blue:        "#40a9ff",         // sky blue — complementary
+  blueDim:     "rgba(64,169,255,0.10)",
+  purple:      "#c084fc",
+  purpleDim:   "rgba(192,132,252,0.10)",
+  orange:      "#ff5e3a",         // accent reuse — orange IS coral here
+  orangeDim:   "rgba(255,94,58,0.10)",
+  radar:       "#00d4e0",
+  radarDim:    "rgba(0,212,224,0.10)",
+  radarBorder: "rgba(0,212,224,0.28)",
+  edge:        "#ffd60a",         // signal yellow on slate is sharp
+  edgeDim:     "rgba(255,214,10,0.10)",
+  edgeBorder:  "rgba(255,214,10,0.28)",
+  red:         "#ff4757",
+  redDim:      "rgba(255,71,87,0.10)",
+  amber:       "#ffab00",
+  amberDim:    "rgba(255,171,0,0.10)",
+  dc:          "#f472b6",
+  dcDim:       "rgba(244,114,182,0.09)",
+  silver:      "#7e8da8",
+  silverDim:   "rgba(126,141,168,0.08)",
 
-  track:       "#0f1218",
-  skeleton:    "rgba(240,242,245,0.05)",
-  skeletonHi:  "rgba(240,242,245,0.10)",
+  track:       "#1a2235",
+  skeleton:    "rgba(232,237,245,0.05)",
+  skeletonHi:  "rgba(232,237,245,0.10)",
 
-  // Typeface: tight grotesque — engineered, not designed
-  font:        '"Barlow Condensed","Barlow","Franklin Gothic Medium","Arial Narrow",sans-serif',
-  btnRadius:   2,               // almost zero — machined, not rounded
-  cardRadius:  3,
-  scrollThumb: "#1a2035",
+  font:        '"Inter","DM Sans","Helvetica Neue",sans-serif',
+  btnRadius:   8,
+  cardRadius:  10,
+  scrollThumb: "#2a3650",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THEME_OBSIDIAN — Private members club analytics
+//  Base: warm obsidian (#13100e) — volcanic, rich, not cold-grey-boring
+//  Accent: molten gold (#d4a843) — not yellow, not bronze — molten
+//  Card borders get a gold hairline treatment. Feels like wealth and privacy.
+//  Vibe: If a hedge fund's internal analytics tool had a night mode
+//  Font: Didot-adjacent serif — old money editorial
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const THEME_OBSIDIAN = {
+  id: "obsidian", name: "Obsidian", emoji: "✦",
+  desc: "Warm volcanic black, molten gold — private club precision",
+
+  bg:         "#0e0c0a",          // warm obsidian — almost black, brown undertone
+  surface:    "#171410",          // lifted volcanic
+  surfaceHi:  "#1f1b16",
+  cardBg:     "#171410",
+  modalBg:    "#0e0c0a",
+  inputBg:    "#171410",
+
+  headerBg:   "rgba(14,12,10,0.98)",
+  headerBorder:"rgba(212,168,67,0.25)",  // gold hairline — restrained luxury
+
+  border:     "rgba(255,255,255,0.06)",
+  borderHi:   "rgba(212,168,67,0.35)",   // gold activates on interaction
+
+  text:       "#f0ebe3",                  // warm white — ivory, not cold
+  muted:      "#9a8f80",
+  faint:      "rgba(240,235,227,0.05)",
+  subtleBg:   "#171410",
+
+  accent:      "#d4a843",         // molten gold
+  accentDim:   "rgba(212,168,67,0.12)",
+  accentBorder:"rgba(212,168,67,0.38)",
+  accentText:  "#0e0c0a",         // obsidian text on gold button
+  gold:        "#d4a843",
+  goldDim:     "rgba(212,168,67,0.12)",
+  goldBorder:  "rgba(212,168,67,0.38)",
+
+  // Market colours — warm-shifted palette to match obsidian base
+  green:       "#4ade80",
+  greenDim:    "rgba(74,222,128,0.10)",
+  blue:        "#7db8f7",
+  blueDim:     "rgba(125,184,247,0.10)",
+  purple:      "#c4a8fa",
+  purpleDim:   "rgba(196,168,250,0.10)",
+  orange:      "#fb9b3a",
+  orangeDim:   "rgba(251,155,58,0.10)",
+  radar:       "#34d4c0",
+  radarDim:    "rgba(52,212,192,0.10)",
+  radarBorder: "rgba(52,212,192,0.28)",
+  edge:        "#d4a843",         // gold IS the edge signal — unified
+  edgeDim:     "rgba(212,168,67,0.12)",
+  edgeBorder:  "rgba(212,168,67,0.35)",
+  red:         "#f87171",
+  redDim:      "rgba(248,113,113,0.10)",
+  amber:       "#d4a843",
+  amberDim:    "rgba(212,168,67,0.12)",
+  dc:          "#f4a0c8",
+  dcDim:       "rgba(244,160,200,0.09)",
+  silver:      "#9a8f80",
+  silverDim:   "rgba(154,143,128,0.08)",
+
+  track:       "#171410",
+  skeleton:    "rgba(240,235,227,0.05)",
+  skeletonHi:  "rgba(240,235,227,0.10)",
+
+  // High-contrast serif with old-money weight
+  font:        '"Playfair Display","Georgia","Times New Roman",serif',
+  btnRadius:   2,               // hard edge — machined, not soft
+  cardRadius:  4,
+  scrollThumb: "#2a2318",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Registry & helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_OPENCODE, THEME_GRM, THEME_MILK, THEME_CUPERTINO, THEME_VELOCI];
+export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_GRM, THEME_NOIR, THEME_DUSK, THEME_OBSIDIAN];
 export const THEME_MAP = {
-  dark:       THEME_DARK,
-  claude:     THEME_CLAUDE,
-  opencode:   THEME_OPENCODE,
-  grm:        THEME_GRM,
-  milk:       THEME_MILK,
-  cupertino:  THEME_CUPERTINO,
-  veloci:     THEME_VELOCI,
+  dark:     THEME_DARK,
+  claude:   THEME_CLAUDE,
+  grm:      THEME_GRM,
+  noir:     THEME_NOIR,
+  dusk:     THEME_DUSK,
+  obsidian: THEME_OBSIDIAN,
 };
 
 const LS_KEY = "grm_theme_v1";
@@ -525,5 +441,4 @@ export function saveTheme(id) {
   try { localStorage.setItem(LS_KEY, id); } catch {}
 }
 
-// Clamp pill/button radius — Veyron uses 2px which is fine, Apple uses 10
 export const clampR = (r, max = 30) => Math.min(r, max);
