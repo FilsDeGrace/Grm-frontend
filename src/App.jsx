@@ -11520,6 +11520,51 @@ export default function GRMPro() {
   // Sync before first paint (no flash)
   syncC(theme);
 
+  // UX-FIX: blank/white first-paint on fresh installs (new phone, incognito) until the
+  // user taps the address bar. Tapping the address bar forces the mobile browser to
+  // recalculate the viewport (its toolbar collapses) which triggers a repaint — the page
+  // was actually fine, it just never got that first repaint nudge. We force the same
+  // recalculation ourselves shortly after mount so it doesn't depend on the user noticing.
+  useEffect(() => {
+    const nudge = () => {
+      window.dispatchEvent(new Event("resize"));
+      // Tiny scroll-and-back forces layout recalculation on stubborn mobile WebViews
+      window.scrollTo(0, 1);
+      window.scrollTo(0, 0);
+    };
+    const t1 = setTimeout(nudge, 60);
+    const t2 = setTimeout(nudge, 400);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, []);
+
+  // UX-FIX: "new version available" banner pushed to all users on stale code, without
+  // needing a backend endpoint or service worker. We periodically re-fetch the deployed
+  // index page (same-origin, no-store so Vercel's edge cache is bypassed) and compare its
+  // ETag/Last-Modified — when it changes, Vercel has shipped a new build and the open tab
+  // is still running the old bundle, so we surface a Refresh prompt instead of relying on
+  // the user to think to reload.
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const buildFingerprintRef = useRef(null);
+  useEffect(() => {
+    let stopped = false;
+    const checkForUpdate = async () => {
+      try {
+        const res = await fetch(`${window.location.origin}/`, { cache: "no-store" });
+        const fingerprint = res.headers.get("etag") || res.headers.get("last-modified") || (await res.text()).slice(0, 500);
+        if (buildFingerprintRef.current === null) {
+          buildFingerprintRef.current = fingerprint;
+        } else if (fingerprint !== buildFingerprintRef.current && !stopped) {
+          setUpdateAvailable(true);
+        }
+      } catch { /* offline or blocked — skip this check, try again next interval */ }
+    };
+    checkForUpdate();
+    const id = setInterval(checkForUpdate, 90000); // check every 90s
+    const onFocus = () => checkForUpdate(); // also check whenever the tab regains focus
+    window.addEventListener("focus", onFocus);
+    return () => { stopped = true; clearInterval(id); window.removeEventListener("focus", onFocus); };
+  }, []);
+
   const pickTheme = (t) => { setTheme(t); saveTheme(t.id); setThemePickerOpen(false); };
 
   const [activeTab, setActiveTab] = useState("live");
@@ -13444,6 +13489,19 @@ export default function GRMPro() {
           geminiApiKey={window.__GRM_GEMINI_KEY || null}
         />,
         document.body
+      )}
+
+      {/* UX-FIX: new-version banner — shown to any user still running stale code after a deploy */}
+      {updateAvailable && (
+        <div style={{ position:"fixed", bottom:20, left:"50%", transform:"translateX(-50%)", zIndex:10000,
+                      background:C.gold, borderRadius:12, padding:"10px 16px 10px 18px",
+                      display:"flex", alignItems:"center", gap:14, boxShadow:"0 4px 24px rgba(0,0,0,0.5)" }}>
+          <span style={{ fontSize:11, fontWeight:800, color:C.accentText }}>Update available</span>
+          <button onClick={() => window.location.reload()}
+            style={{ background:"#fff", color:C.gold, border:"none", borderRadius:8, padding:"6px 16px", fontSize:11, fontWeight:900, cursor:"pointer" }}>
+            Refresh
+          </button>
+        </div>
       )}
 
     </div>
