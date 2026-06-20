@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://1b061edf721079.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://6bead3dbe5f21d.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
