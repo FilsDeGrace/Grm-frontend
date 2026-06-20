@@ -1964,7 +1964,7 @@ const IcoCheckSm = ({size=9,col}) => (
   </svg>
 );
 
-export function StatusBadge({ state, time }) {
+export function StatusBadge({ state, time, minute }) {
   const s = (state || "").toLowerCase().replace(/[_\-\s]/g, "");
   // Live / in-play states
   if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
@@ -1972,10 +1972,13 @@ export function StatusBadge({ state, time }) {
                 : (s === "extratime" || s === "et") ? "ET"
                 : s === "penaltyshootout"            ? "PEN"
                 : "LIVE";
+    // Only "LIVE" carries a meaningful running clock — HT/ET/PEN don't map
+    // to a single elapsed-minute number the way regular play does.
+    const showMinute = label === "LIVE" && minute != null;
     return (
       <span style={{ display:"inline-flex",alignItems:"center",gap:4,fontSize:8,fontWeight:800,color:C.green,letterSpacing:".1em" }}>
         <IcoLiveDot col={C.green}/>
-        {label}
+        {label}{showMinute ? ` ${minute}'` : ""}
       </span>
     );
   }
@@ -3164,7 +3167,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
               In Draft
             </span>
           )}
-          <StatusBadge state={displayF.state} time={f.time} />
+          <StatusBadge state={displayF.state} time={f.time} minute={displayF.minute} />
           {displayF.hGoals != null && (
             <span style={{ fontSize:12, fontWeight:800, color:C.text,
                            padding:"1px 8px", background:C.surface, borderRadius:5 }}>
@@ -3492,7 +3495,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
                 <div style={{ fontSize:8,color:C.text }}>{f.teams.home} vs {f.teams.away} · {f.league}</div>
               </div>
               <div style={{ fontSize:8,color:C.text,textAlign:"center" }}>
-                <StatusBadge state={f.state} time={f.time} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} />
               </div>
               <span style={{ fontSize:13,fontWeight:800,color:C.radar }}>{Math.round(e.prob)}%</span>
               <span style={{ fontSize:10,fontWeight:700,color:C.text,textAlign:"right" }}>
@@ -4487,7 +4490,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ minWidth:0 }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
                 <div style={{ fontSize:8,color:C.text,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
-                  <StatusBadge state={f.state} time={f.time} />
+                  <StatusBadge state={f.state} time={f.time} minute={f.minute} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
                 </div>
                 <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4 }}>
@@ -4532,7 +4535,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 </div>
               </div>
               <div style={{ alignSelf:"center",fontSize:9,color:C.text }}>
-                <StatusBadge state={f.state} time={f.time} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} />
               </div>
               <div style={{ alignSelf:"center" }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
@@ -6016,7 +6019,7 @@ function CopyCodeButton({ code }) {
 // ── N19: GRM SHARE MENU (3-dot) ──────────────────────────────────────────
 // Lazy — only hits /api/ticket/share on first tap.
 // Shows on both built tickets (Saved tab) and Draft ticket.
-function GrmShareMenu({ ticket, bookieResult = null }) {
+function GrmShareMenu({ ticket, bookieResult = null, align = "right" }) {
   const [open,       setOpen]       = useState(false);
   const [grmCode,    setGrmCode]    = useState(null);
   const [generating, setGenerating] = useState(false);
@@ -6120,7 +6123,8 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
 
       {/* Share popover */}
       {open && (
-        <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
+        <div style={{ position:"absolute", top:"calc(100% + 6px)",
+                      ...(align === "left" ? { left:0 } : { right:0 }), zIndex:9999,
                       background:C.surface, border:`1px solid ${C.border}`, borderRadius:10,
                       padding:"6px 0", minWidth:198, boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
 
@@ -10589,7 +10593,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   {/* Row 2: action buttons */}
                   <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:8 }}>
                     <CopyCodeButton code={t.code} />
-                    <GrmShareMenu ticket={t} />
+                    <GrmShareMenu ticket={t} align="left" />
                     <button onClick={() => { setDraftLegs(t.legs||[]); setView("parlay"); scrollPanelToTop(); }} className="gb-ghost"
                       style={{ padding:"3px 10px",fontSize:9,color:C.accent,borderColor:`${C.accent}40`,
                                display:"flex",alignItems:"center",gap:4 }}>
