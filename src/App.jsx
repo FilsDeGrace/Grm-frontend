@@ -17,6 +17,24 @@ const SAVED_TICKETS_KEY  = "grm_saved_tickets_v15";
 // on the same day but are not carried forward to tomorrow.
 const BUILT_TICKETS_KEY  = (date) => `grm_built_tickets_${date}`;
 
+// UX-FIX: shared helper to translate raw fetch/network error text into a graceful,
+// actionable message instead of showing the browser's literal "Failed to fetch" (or
+// similar low-level strings) to the user. Used anywhere a fetch() call can throw —
+// the main FETCH flow, snapshot loading, booking, uploads, etc.
+function friendlyError(e, context = "Server") {
+  const msg = (e && e.message) || String(e || "");
+  if (/Failed to fetch|NetworkError|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|net::ERR|TypeError: Load failed/i.test(msg)) {
+    return "Can't reach the server — check your connection and try again.";
+  }
+  if (/timed? ?out|ETIMEDOUT|AbortError/i.test(msg)) {
+    return "That took too long to respond. Try again in a moment.";
+  }
+  if (/50\d\b/.test(msg)) {
+    return `${context} is having issues right now — try again shortly.`;
+  }
+  return msg || `${context} error — please try again.`;
+}
+
 // C7-FIX: Prune stale Jarvis cache entries on startup.
 // Cache keys are date-suffixed (grm_fm_<id>_YYYY-MM-DD, grm_ca_jarvis_..._YYYY-MM-DD,
 // grm_rvl_jarvis_YYYY-MM-DD_...). Without pruning they accumulate indefinitely —
@@ -2053,7 +2071,7 @@ function JarvisMindBox({ fixtures, date, backtestSummary }) {
           setError("No mindbox data");
         }
       })
-      .catch(e => setError(e.message))
+      .catch(e => setError(friendlyError(e, "Jarvis")))
       .finally(() => setLoading(false));
   }, [fixtures?.length > 0, date]);
 
@@ -4325,8 +4343,46 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       </div>
 
       {/* List header */}
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
-        <span style={{ fontSize:9,color:C.text }}>{rows.length} matches</span>
+      {/* UX-FIX: Select All is now a persistent control in this top bar — always visible and always
+          clickable (before, during, and after partial selection), with a readable "N selected" count
+          and a separate Clear action, instead of vanishing once any item is selected. */}
+      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap" }}>
+        <div style={{ display:"flex",alignItems:"center",gap:12,flexWrap:"wrap" }}>
+          <span style={{ fontSize:9,color:C.text }}>{rows.length} matches</span>
+          {(() => {
+            const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+            const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
+            const hasPartial  = selectedIds.size > 0 && !allSelected;
+            if (eligibleIds.length === 0) return null;
+            return (
+              <button onClick={() => { allSelected ? clearSelection() : setSelectedIds(new Set(eligibleIds)); }}
+                title={allSelected ? "Deselect all" : "Select all fixtures"}
+                style={{ display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",padding:0 }}>
+                <div style={{ width:14,height:14,borderRadius:4,
+                              border:`1.5px solid ${allSelected||hasPartial?C.edge:C.text}`,
+                              opacity:allSelected||hasPartial?1:.4,
+                              background:allSelected?C.edge:"transparent",flexShrink:0,
+                              display:"flex",alignItems:"center",justifyContent:"center" }}>
+                  {allSelected && <span style={{ fontSize:8,color:C.accentText,fontWeight:900 }}>✓</span>}
+                  {hasPartial && <div style={{ width:6,height:1.5,background:C.edge,borderRadius:1 }} />}
+                </div>
+                <span style={{ fontSize:9,fontWeight:800,color:allSelected||hasPartial?C.edge:C.muted,
+                               textTransform:"uppercase",letterSpacing:".04em" }}>
+                  Select All
+                </span>
+              </button>
+            );
+          })()}
+          {selectedIds.size > 0 && (
+            <span style={{ display:"flex",alignItems:"center",gap:8 }}>
+              <span style={{ fontSize:9,fontWeight:800,color:C.edge }}>{selectedIds.size} selected</span>
+              <button onClick={clearSelection} title="Clear selection"
+                style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,fontWeight:700,padding:0 }}>
+                Clear
+              </button>
+            </span>
+          )}
+        </div>
         {rows.length > 0 && (
           <button onClick={saveListToJSON} className="gb"
             style={{ padding:"3px 10px",background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,fontSize:9,display:"flex",alignItems:"center",gap:4 }}>
@@ -4338,15 +4394,29 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       {/* Column headers */}
       {!isMobile && (
         <div style={{ display:"grid",gridTemplateColumns:hasResults?"24px 50px 1fr 140px 60px 60px 72px":"24px 50px 1fr 140px 60px 60px",gap:8,padding:"6px 14px",borderBottom:`1px solid ${C.border}`,fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
-          {/* P10-FIX: labelled Select All / Clear All */}
+          {/* UX-FIX: compact checkbox mirrors per-row checkboxes for visual consistency;
+              primary Select All control with full label now lives in the list header above */}
           <span>
-            {selectedIds.size > 0
-              ? <button onClick={clearSelection} title="Clear selection" style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button>
-              : <button onClick={() => {
-                  const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
-                  setSelectedIds(new Set(eligibleIds));
-                }} title="Select all fixtures" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9,padding:0,lineHeight:1,letterSpacing:".04em",fontWeight:800,textTransform:"uppercase" }}>ALL</button>
-            }
+            {(() => {
+              const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+              const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
+              const hasPartial  = selectedIds.size > 0 && !allSelected;
+              if (eligibleIds.length === 0) return null;
+              return (
+                <button onClick={() => { allSelected ? clearSelection() : setSelectedIds(new Set(eligibleIds)); }}
+                  title={allSelected ? "Deselect all" : "Select all fixtures"}
+                  style={{ background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center" }}>
+                  <div style={{ width:14,height:14,borderRadius:4,
+                                border:`1.5px solid ${allSelected||hasPartial?C.edge:C.text}`,
+                                opacity:allSelected||hasPartial?1:.35,
+                                background:allSelected?C.edge:"transparent",
+                                display:"flex",alignItems:"center",justifyContent:"center" }}>
+                    {allSelected && <span style={{ fontSize:8,color:C.accentText,fontWeight:900 }}>✓</span>}
+                    {hasPartial && <div style={{ width:6,height:1.5,background:C.edge,borderRadius:1 }} />}
+                  </div>
+                </button>
+              );
+            })()}
           </span>
           <span>Time</span><span>Match</span><span>Pick</span><span>Prob</span><span>Odds</span>
           {hasResults && <span>Score</span>}
@@ -4354,14 +4424,29 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       )}
       {isMobile && (
         <div style={{ display:"grid",gridTemplateColumns:hasResults?"20px 1fr 44px 44px":"20px 1fr 44px",gap:6,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:4 }}>
+          {/* UX-FIX: compact checkbox mirrors per-row checkboxes; full-label Select All + count
+              now live persistently in the list header above this column-header row */}
           <span>
-            {selectedIds.size > 0
-              ? <button onClick={clearSelection} title="Clear selection" style={{ background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:9,padding:0 }}>✕</button>
-              : <button onClick={() => {
-                  const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
-                  setSelectedIds(new Set(eligibleIds));
-                }} title="Select all fixtures" style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9,padding:0,lineHeight:1,letterSpacing:".04em",fontWeight:800,textTransform:"uppercase" }}>ALL</button>
-            }
+            {(() => {
+              const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+              const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
+              const hasPartial  = selectedIds.size > 0 && !allSelected;
+              if (eligibleIds.length === 0) return null;
+              return (
+                <button onClick={() => { allSelected ? clearSelection() : setSelectedIds(new Set(eligibleIds)); }}
+                  title={allSelected ? "Deselect all" : "Select all fixtures"}
+                  style={{ background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",justifyContent:"center" }}>
+                  <div style={{ width:14,height:14,borderRadius:4,
+                                border:`1.5px solid ${allSelected||hasPartial?C.edge:C.text}`,
+                                opacity:allSelected||hasPartial?1:.35,
+                                background:allSelected?C.edge:"transparent",
+                                display:"flex",alignItems:"center",justifyContent:"center" }}>
+                    {allSelected && <span style={{ fontSize:8,color:C.accentText,fontWeight:900 }}>✓</span>}
+                    {hasPartial && <div style={{ width:6,height:1.5,background:C.edge,borderRadius:1 }} />}
+                  </div>
+                </button>
+              );
+            })()}
           </span>
           <span>Match / Pick</span><span style={{ textAlign:"right" }}>%</span>
           {hasResults && <span style={{ textAlign:"right" }}>Score</span>}
@@ -4522,7 +4607,7 @@ function UploadBacktester() {
       try { data = JSON.parse(t); } catch { throw new Error(`Server error: ${t.slice(0,200)}`); }
       if (!res.ok) throw new Error(data.error || res.statusText);
       setResult(data);
-    } catch(e) { setError(e.message); }
+    } catch(e) { setError(friendlyError(e, "Backtest")); }
     setUploading(false);
   };
 
@@ -4539,7 +4624,7 @@ function UploadBacktester() {
     try {
       const text = await file.text(), payload = JSON.parse(text);
       await evaluateTicket(payload);
-    } catch(e) { setError(e.message); setUploading(false); }
+    } catch(e) { setError(friendlyError(e, "Backtest")); setUploading(false); }
   };
 
   const onDrop = e => { e.preventDefault(); setDragging(false); const f=e.dataTransfer.files?.[0]; if(f) processFile(f); };
@@ -4789,8 +4874,7 @@ function BacktestTab({ loadSnapshot, adminMode, adminToken = "", onReloadFixture
       const text = await res.text(); let data;
       try { data = JSON.parse(text); } catch { throw new Error(`Server returned non-JSON.\n${text.slice(0,120)}`); }
       if (!res.ok) throw new Error(data?.error || res.statusText);
-      setBtData(data);
-    } catch(e) { setError(e.message); }
+    } catch(e) { setError(friendlyError(e, "Backtest")); }
     setLoading(false);
   };
 
@@ -6237,7 +6321,7 @@ function GrmLoadPanel({ onLoaded }) {
       setInput("");
       if (onLoaded) onLoaded(ticket, code);
     } catch (e) {
-      setError(e.message);
+      setError(friendlyError(e, "Ticket lookup"));
     } finally {
       setLoading(false);
     }
@@ -11928,7 +12012,8 @@ export default function GRMPro() {
         })();
       }
     } catch(e) {
-      setError(e.message); setProgressStage("error"); setProgressMsg(e.message);
+      const friendly = friendlyError(e, "GRM Pro");
+      setError(friendly); setProgressStage("error"); setProgressMsg(friendly);
     } finally {
       // Only stop loading on the synchronous path.
       // The 202 async path sets isSyncPath=false and manages its own loading state.
@@ -11993,7 +12078,7 @@ export default function GRMPro() {
       // P-FIX: report success so callers (e.g. the GRM shared-ticket flow) know
       // the fetch actually worked, instead of assuming silently.
       return true;
-    } catch(e) { setError(e.message); return false; }
+    } catch(e) { setError(friendlyError(e, "GRM Pro")); return false; }
     finally { setLoading(false); }
   }, []);
 
