@@ -11500,7 +11500,7 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   );
 }
 
-export default function GRMPro() {
+function GRMProInner() {
 
   // ── THEME ─────────────────────────────────────────────────────────────────
   const [theme, setTheme] = useState(loadSavedTheme);
@@ -11526,14 +11526,22 @@ export default function GRMPro() {
   // was actually fine, it just never got that first repaint nudge. We force the same
   // recalculation ourselves shortly after mount so it doesn't depend on the user noticing.
   useEffect(() => {
-    const nudge = () => {
-      window.dispatchEvent(new Event("resize"));
-      // Tiny scroll-and-back forces layout recalculation on stubborn mobile WebViews
-      window.scrollTo(0, 1);
-      window.scrollTo(0, 0);
+    // UX-FIX v2: the previous resize+scrollTo nudge doesn't force a true engine
+    // repaint — dispatching a synthetic "resize" event only notifies JS listeners,
+    // and scrollTo is a no-op if the body has no scrollable overflow (common in
+    // app-shell layouts). This version forces an actual reflow by removing and
+    // reinserting the root element from the render tree, which works regardless
+    // of scroll state and is the standard fix for the "first frame not committed
+    // until a touch/input event" class of mobile WebView/Chrome rendering bugs.
+    const forceRepaint = () => {
+      const el = document.documentElement;
+      const prevDisplay = el.style.display;
+      el.style.display = "none";
+      void el.offsetHeight; // reading layout forces synchronous reflow
+      el.style.display = prevDisplay;
     };
-    const t1 = setTimeout(nudge, 60);
-    const t2 = setTimeout(nudge, 400);
+    const t1 = setTimeout(forceRepaint, 50);
+    const t2 = setTimeout(forceRepaint, 350);
     return () => { clearTimeout(t1); clearTimeout(t2); };
   }, []);
 
@@ -11549,7 +11557,7 @@ export default function GRMPro() {
     let stopped = false;
     const checkForUpdate = async () => {
       try {
-        const res = await fetch(`${window.location.origin}/`, { cache: "no-store" });
+        const res = await fetch(`${window.location.origin}/?_t=${Date.now()}`, { cache: "no-store" });
         const fingerprint = res.headers.get("etag") || res.headers.get("last-modified") || (await res.text()).slice(0, 500);
         if (buildFingerprintRef.current === null) {
           buildFingerprintRef.current = fingerprint;
@@ -13508,3 +13516,49 @@ export default function GRMPro() {
   );
 }
 
+// UX-FIX: root-level error boundary. On a fresh device/incognito profile, storage
+// access (localStorage/sessionStorage) can throw under unusual privacy settings
+// instead of just being empty — if that happens during initial render, React
+// unmounts to a blank white screen with nothing visible and no way to recover.
+// This catches any such render-time crash and shows a real, actionable screen
+// instead of silence, with a one-tap reload.
+class GRMErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    try { console.error("GRM Pro crashed during render:", error, info); } catch {}
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center",
+                      justifyContent:"center", gap:16, background:"#0a0a0f", color:"#fff", padding:24,
+                      textAlign:"center", fontFamily:"sans-serif" }}>
+          <div style={{ fontSize:14, fontWeight:800, letterSpacing:".05em" }}>Something went wrong loading GRM Pro</div>
+          <div style={{ fontSize:12, color:"#999", maxWidth:320 }}>
+            This can happen on a fresh browser profile with strict privacy settings. Reloading usually fixes it.
+          </div>
+          <button onClick={() => window.location.reload()}
+            style={{ background:"#fff", color:"#0a0a0f", border:"none", borderRadius:8,
+                     padding:"10px 24px", fontSize:13, fontWeight:900, cursor:"pointer" }}>
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function GRMPro() {
+  return (
+    <GRMErrorBoundary>
+      <GRMProInner />
+    </GRMErrorBoundary>
+  );
+}
