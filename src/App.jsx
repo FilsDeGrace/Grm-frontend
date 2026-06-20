@@ -5963,7 +5963,10 @@ function GrmShareMenu({ ticket, bookieResult = null }) {
     const code = await ensureGrmCode();
     if (!code) return;
     const base = window.location.origin + window.location.pathname;
-    copyToClipboard(`${base}?grm=${code}`, () => flash("link"));
+    // P-FIX: preset branded message instead of a bare URL. Pasted straight into
+    // WhatsApp/SMS/Twitter, a raw link with zero context reads as spam — this
+    // gives it a recognizable, shareable framing.
+    copyToClipboard(`Check out this GRM ticket: ${base}?grm=${code}`, () => flash("link"));
   };
 
   const copyBookieCode = () => {
@@ -6270,6 +6273,16 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   const [addLegsOpen,      setAddLegsOpen]      = useState(false);
   const [makeChangesOpen,  setMakeChangesOpen]  = useState(false);
   const [selectedLegs,     setSelectedLegs]     = useState(new Set());
+  const sheetRef = useRef(null);
+
+  // P-FIX: on a long ticket, opening this sheet while scrolled near the top
+  // blurs the background but the sheet itself can render below the fold —
+  // looks like nothing happened. Bring it into view the instant it opens.
+  useEffect(() => {
+    if (makeChangesOpen) {
+      sheetRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [makeChangesOpen]);
 
   const toggleLegSelect = (id) => setSelectedLegs(prev => {
     const next = new Set(prev);
@@ -6371,7 +6384,7 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
                       background:"rgba(0,0,0,.55)", backdropFilter:"blur(4px)",
                       display:"flex", alignItems:"flex-end" }}
           onClick={() => { setMakeChangesOpen(false); setAddLegsOpen(false); setSelectedLegs(new Set()); }}>
-          <div onClick={e => e.stopPropagation()} style={{
+          <div onClick={e => e.stopPropagation()} ref={sheetRef} style={{
             width:"100%", background:C.surface,
             borderRadius:"20px 20px 0 0",
             border:`1px solid ${C.border}`,
@@ -9321,7 +9334,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
@@ -9330,6 +9343,14 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
   const [jarvisResearch, setJarvisResearch] = useState(false); // Research Mode — pre-scores candidates before building
+  // P-FIX: ref on this panel's own scroll container (the panel itself scrolls —
+  // it's a fixed, full-screen overlay, not the page). Used to bring newly
+  // created UI state (a draft, a freshly loaded ticket) into view instead of
+  // leaving the user wherever they happened to be scrolled.
+  const panelRef = useRef(null);
+  const scrollPanelToTop = () => {
+    requestAnimationFrame(() => panelRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+  };
   const [remixingId, setRemixingId]        = useState(null);  // ticketId currently being remixed (null = idle)
   const [autoMessage, setAutoMessage] = useState(null);
   const [analysing, setAnalysing] = useState(false); // Gemini analysis state for auto ticket
@@ -9401,8 +9422,20 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   }, [jarvisBuiltTicket]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // N19-FIX: Auto-load from ?grm= URL — fires once when code arrives
-  const [grmToast, setGrmToast] = useState(null);
-  const handleGrmLoaded = useCallback((ticket, code) => {
+  // P-FIX: grmToast (plain string) replaced with grmNotice (typed object) so
+  // we can tell the user what actually happened — not just "loaded", but
+  // "loaded, and by the way this is a past/future date" or "loaded, but we
+  // couldn't find fixture data for that date — here's how to fetch it."
+  const [grmNotice, setGrmNotice] = useState(null); // { type, date?, code?, message? }
+  const showGrmNotice = (notice, autoDismissMs = null) => {
+    setGrmNotice(notice);
+    if (autoDismissMs) {
+      // Only clear if a newer notice hasn't already replaced this one.
+      setTimeout(() => setGrmNotice(prev => (prev === notice ? null : prev)), autoDismissMs);
+    }
+  };
+
+  const handleGrmLoaded = useCallback(async (ticket, code) => {
     const newTicket = {
       ...ticket,
       id:        ticket.id || ("grm_" + code),
@@ -9410,6 +9443,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       savedAt:   new Date().toISOString(),
       slotLabel: ticket.label || `Shared ${code}`,
     };
+    // Keep a copy in Saved so the link remains revisitable later.
     setSavedTickets(prev => {
       // Don't duplicate if already loaded
       if (prev.find(t => t.id === newTicket.id)) return prev;
@@ -9417,20 +9451,60 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       persistTickets(updated);
       return updated;
     });
-    setView("saved");
-    setGrmToast(`Ticket ${code} loaded`);
-    setTimeout(() => setGrmToast(null), 3000);
-  }, [setSavedTickets]);
+
+    // P-FIX: resolve whether we need to fetch fixtures for the ticket's date
+    // BEFORE touching `tickets`. loadSnapshot clears `tickets` as a side
+    // effect of switching the working date — doing this after adding the
+    // ticket would immediately wipe it back out.
+    const today = todayStr();
+    const needsFetch = !!(ticket.date && ensureFixturesForDate && (ticket.date !== date || !fixtures.length));
+    let fetchOk = true;
+    if (needsFetch) fetchOk = await ensureFixturesForDate(ticket.date);
+
+    // P-FIX: take the user straight to the built ticket in Builder instead of
+    // dropping them on Saved and making them tap Load — that hop was the main
+    // source of friction on the shared-ticket-link flow.
+    setTickets(prev => {
+      if (prev.find(t => t.id === newTicket.id)) return prev;
+      return [{ ...newTicket, exhausted: false }, ...prev];
+    });
+    setActiveTicketId(newTicket.id);
+    setView("parlay");
+
+    // Bring the newly loaded ticket card into view — it's appended above the
+    // builder form, but on a tall screen or with other tickets present it can
+    // still land below the fold.
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        document.getElementById(`grm-ticket-${newTicket.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 60);
+    });
+
+    // P-FIX: be explicit about the date context instead of silently switching
+    // it (past/future) or silently failing to find fixtures (missing snapshot).
+    if (ticket.date && !fetchOk) {
+      // No snapshot exists for that date — don't pretend it worked. Tell the
+      // user and give them a one-tap way to go fetch it themselves; this
+      // notice stays up until dismissed since it needs action.
+      showGrmNotice({ type: "missing", date: ticket.date, code });
+    } else if (ticket.date && ticket.date < today) {
+      showGrmNotice({ type: "past", date: ticket.date, code }, 6000);
+    } else if (ticket.date && ticket.date > today) {
+      showGrmNotice({ type: "future", date: ticket.date, code }, 6000);
+    } else {
+      showGrmNotice({ type: "loaded", code }, 3000);
+    }
+  }, [setSavedTickets, ensureFixturesForDate, date, fixtures.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!grmInboundCode) return;
     (async () => {
       try {
         const res = await fetch(`${SERVER}/api/ticket/${grmInboundCode}`);
-        if (!res.ok) { setGrmToast("Could not load shared ticket."); setTimeout(()=>setGrmToast(null),3000); return; }
+        if (!res.ok) { showGrmNotice({ type: "error", message: "Could not load shared ticket." }, 3500); return; }
         const { ticket } = await res.json();
-        handleGrmLoaded(ticket, grmInboundCode);
-      } catch { setGrmToast("Could not load shared ticket."); setTimeout(()=>setGrmToast(null),3000); }
+        await handleGrmLoaded(ticket, grmInboundCode);
+      } catch { showGrmNotice({ type: "error", message: "Could not load shared ticket." }, 3500); }
       finally { onGrmInboundConsumed?.(); }
     })();
   }, [grmInboundCode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -9870,7 +9944,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   );
 
   return (
-    <div style={{ position:"fixed",inset:0,background:C.bg,zIndex:200,overflowY:"auto",overscrollBehavior:"contain",padding:0,paddingBottom:120 }}>
+    <div ref={panelRef} style={{ position:"fixed",inset:0,background:C.bg,zIndex:200,overflowY:"auto",overscrollBehavior:"contain",padding:0,paddingBottom:120 }}>
       {/* Top nav bar — inline styles only, grm-header class is position:fixed globally */}
       <div style={{
         position:"sticky", top:0, zIndex:10,
@@ -9918,17 +9992,59 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
       <div style={{ padding:16 }}>
 
-        {/* N19-FIX: GRM inbound/load toast */}
-        {grmToast && (
-          <div style={{ marginBottom:12, padding:"9px 14px", background:`${C.green}12`,
-                        border:`1px solid ${C.green}35`, borderRadius:8,
-                        display:"flex", alignItems:"center", gap:8 }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.green} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-            <span style={{ fontSize:10, fontWeight:700, color:C.green }}>{grmToast}</span>
-          </div>
-        )}
+        {/* N19-FIX / P-FIX: GRM inbound/load notice — tone + content adapt to
+            what actually happened (plain success, past/future date context,
+            or a missing snapshot that needs a manual fetch). */}
+        {grmNotice && (() => {
+          const palette = {
+            loaded:  C.green,
+            past:    C.gold,
+            future:  C.edge,
+            missing: C.red,
+            error:   C.red,
+          }[grmNotice.type] || C.muted;
+
+          const text = {
+            loaded:  `Ticket ${grmNotice.code} loaded.`,
+            past:    `Ticket ${grmNotice.code} loaded — heads up, this ticket is from ${grmNotice.date} (already played).`,
+            future:  `Ticket ${grmNotice.code} loaded — heads up, this ticket is for ${grmNotice.date} (upcoming).`,
+            missing: `Ticket ${grmNotice.code} loaded, but no fixture data is saved for ${grmNotice.date} — fetch that date to view full models for its legs.`,
+          }[grmNotice.type] || grmNotice.message || "Could not load shared ticket.";
+
+          const isAlert = grmNotice.type === "missing" || grmNotice.type === "error";
+
+          return (
+            <div style={{ marginBottom:12, padding:"9px 14px", background:`${palette}12`,
+                          border:`1px solid ${palette}35`, borderRadius:8,
+                          display:"flex", alignItems:"flex-start", gap:8 }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={palette} strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0, marginTop:1 }}>
+                {isAlert
+                  ? <><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>
+                  : <polyline points="20 6 9 17 4 12"/>}
+              </svg>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:10, fontWeight:700, color:palette, lineHeight:1.5 }}>{text}</div>
+                {grmNotice.type === "missing" && goToFetchDate && (
+                  <button onClick={() => goToFetchDate(grmNotice.date)}
+                    style={{ marginTop:8, padding:"6px 12px", fontSize:9, fontWeight:800, borderRadius:7,
+                             background:"transparent", border:`1px solid ${palette}50`,
+                             color:palette, cursor:"pointer", fontFamily:C.font }}>
+                    Go fetch {grmNotice.date} →
+                  </button>
+                )}
+              </div>
+              {isAlert && (
+                <button onClick={() => setGrmNotice(null)}
+                  style={{ background:"none", border:"none", color:palette, opacity:.6, cursor:"pointer", padding:0, flexShrink:0 }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                  </svg>
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         {/* PARLAY BUILDER */}
         {view === "parlay" && (
@@ -10225,7 +10341,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 </div>
                 <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
                   {tickets.map(t => (
-                    <TicketCard key={t.id} ticket={t} date={date} isJarvis={!!t.isAuto}
+                    <div key={t.id} id={`grm-ticket-${t.id}`}>
+                    <TicketCard ticket={t} date={date} isJarvis={!!t.isAuto}
                       remixing={remixingId === t.id}
                       onRemove={() => setTickets(prev => prev.filter(x => x.id !== t.id))}
                       onRemoveLeg={i => setTickets(prev => prev.map(tx => tx.id !== t.id ? tx : {
@@ -10239,6 +10356,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       onEditDraft={legs => {
                         setDraftLegs(legs);
                         setView("parlay");
+                        // P-FIX: the draft renders at the top of this view — without
+                        // this the user stays wherever they were scrolled and the
+                        // new draft looks like it never appeared.
+                        scrollPanelToTop();
                       }}
                       onAddLegs={{ fixtures: parlayFixtures, addLeg: (f, pick) => {
                         // Append a new leg directly to this ticket — no draft copy needed.
@@ -10317,6 +10438,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       }
                       onSwapLeg={legIdx => swapLeg(t.id, legIdx)}
                     />
+                    </div>
                   ))}
                 </div>
               </>
@@ -10352,7 +10474,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:8 }}>
                     <CopyCodeButton code={t.code} />
                     <GrmShareMenu ticket={t} />
-                    <button onClick={() => { setDraftLegs(t.legs||[]); setView("parlay"); }} className="gb-ghost"
+                    <button onClick={() => { setDraftLegs(t.legs||[]); setView("parlay"); scrollPanelToTop(); }} className="gb-ghost"
                       style={{ padding:"3px 10px",fontSize:9,color:C.accent,borderColor:`${C.accent}40`,
                                display:"flex",alignItems:"center",gap:4 }}>
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -11847,7 +11969,10 @@ export default function GRMPro() {
           }
         } catch {} // silently ignore — results file may not exist for this date
       }
-    } catch(e) { setError(e.message); }
+      // P-FIX: report success so callers (e.g. the GRM shared-ticket flow) know
+      // the fetch actually worked, instead of assuming silently.
+      return true;
+    } catch(e) { setError(e.message); return false; }
     finally { setLoading(false); }
   }, []);
 
@@ -13079,6 +13204,16 @@ export default function GRMPro() {
           onJarvisBuiltTicketConsumed={() => setJarvisBuiltTicket(null)}
           grmInboundCode={grmInboundCode}
           onGrmInboundConsumed={() => setGrmInboundCode(null)}
+          ensureFixturesForDate={loadSnapshot}
+          goToFetchDate={(d) => {
+            // P-FIX: missing-snapshot CTA — pre-fill the date and drop the user
+            // on Live Model where the existing fetch flow (with its own
+            // progress UI) already lives, rather than duplicating it here.
+            setDate(d);
+            setParlayJarvisOpen(false);
+            setMainView("main");
+            setActiveTab("live");
+          }}
         />
       )}
 
