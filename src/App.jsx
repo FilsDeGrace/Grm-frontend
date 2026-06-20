@@ -266,6 +266,16 @@ function getCustomPick(f, family, C) {
     if (!best) return null;
     return { label:best.pick, prob:best.prob, odds:best.odds||io(best.prob), color:C?.radar, market:"TeamTotal" };
   }
+  if (family === "dc1x") {
+    const prob = m.dc1X ?? (m.homeWin != null && m.draw != null ? Math.min(99, m.homeWin + m.draw) : null);
+    if (prob == null) return null;
+    return { label:"Home or Draw", prob, odds:f.odds?.dc1X || io(prob), color:C?.gold, market:"DC" };
+  }
+  if (family === "dc2x") {
+    const prob = m.dcX2 ?? (m.draw != null && m.awayWin != null ? Math.min(99, m.draw + m.awayWin) : null);
+    if (prob == null) return null;
+    return { label:"Away or Draw", prob, odds:f.odds?.dcX2 || io(prob), color:C?.gold, market:"DC" };
+  }
   // Legacy safeBet/valuePick compat for old snapshots
   if (family === "safeBet") {
     if (!f.safeBet) return null;
@@ -302,6 +312,7 @@ const CUSTOM_FAMILIES = [
   { id:"under15",label:"U1.5" }, { id:"under25",label:"U2.5" }, { id:"under35",label:"U3.5" }, { id:"under45",label:"U4.5" },
   { id:"bttsyes",label:"BTTS Yes" }, { id:"bttsno",label:"BTTS No" },
   { id:"homewin",label:"Home Win" }, { id:"draw",label:"Draw" }, { id:"awaywin",label:"Away Win" },
+  { id:"dc1x",label:"DC 1X" }, { id:"dc2x",label:"DC X2" },
   { id:"homeo05",label:"H O0.5" }, { id:"homeo15",label:"H O1.5" }, { id:"awayo05",label:"A O0.5" }, { id:"awayo15",label:"A O1.5" },
 ];
 
