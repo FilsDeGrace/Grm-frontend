@@ -4157,12 +4157,21 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       </div>
 
       {/* ── ADVANCED ── collapsible, designed to signal there's content inside */}
+      {/* UX-FIX: unified active-filter count covers thresholds, condition toggles, AND exclude-market rules,
+          so the indicator is accurate no matter which kind of advanced filter is active or whether the panel is open/closed */}
       <div style={{ marginBottom:14 }}>
         {/* Header row — full-width tap target, visually distinct */}
+        {(() => {
+          const advThrCount  = [thrBtts,xgBoth,xgHome,xgAway,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw].filter(v=>v!=null).length;
+          const advCondCount = ["xg_home_dom","xg_away_dom","def_weak_home","def_weak_away","low_xg","volatile"].filter(id=>statFilters.includes(id)).length;
+          const advExclCount = excludedMarkets.size;
+          const advActiveCount = advThrCount + advCondCount + advExclCount;
+          const advHasActive = advActiveCount > 0;
+          return (
         <button onClick={()=>setAdvancedOpen(v=>!v)}
                 style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center",
-                         background: advancedOpen ? `${C.gold}12` : C.surface,
-                         border: `1px solid ${advancedOpen ? `${C.gold}50` : C.border}`,
+                         background: advancedOpen ? `${C.gold}12` : (advHasActive ? `${C.gold}08` : C.surface),
+                         border: `1px solid ${advancedOpen ? `${C.gold}50` : (advHasActive ? `${C.gold}35` : C.border)}`,
                          borderRadius: advancedOpen ? "8px 8px 0 0" : 8,
                          cursor:"pointer", padding:"10px 14px",
                          transition:"all .15s" }}>
@@ -4172,21 +4181,23 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </svg>
             <span style={{ fontSize:9, fontWeight:800, color: advancedOpen ? C.gold : C.text,
                            textTransform:"uppercase", letterSpacing:".1em" }}>Advanced Filters</span>
-            {/* P21-FIX: active count badge — shows number of active filters when collapsed */}
-            {!advancedOpen && (() => {
-              const count = [thrBtts,xgBoth,xgHome,xgAway,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw].filter(v=>v!=null).length;
-              return count > 0 ? (
+            {/* UX-FIX: active count badge now reflects thresholds + condition toggles + exclude-market rules,
+                and is shown whenever any filter is active, not only when the panel is collapsed */}
+            {advHasActive && (
                 <span style={{ background:C.gold, color:C.accentText, borderRadius:10,
                                fontSize:7, fontWeight:900, padding:"1px 7px", lineHeight:1.5,
                                minWidth:18, textAlign:"center" }}>
-                  {count}
+                  {advActiveCount}
                 </span>
-              ) : null;
-            })()}
+            )}
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:6 }}>
             {!advancedOpen && (() => {
-              // P21-FIX: show active filter labels when collapsed, otherwise hint
+              // UX-FIX: show active filter labels when collapsed, now including condition toggles and exclude-market count
+              const condLabels = {
+                xg_home_dom:"HxG Dom", xg_away_dom:"AxG Dom", def_weak_home:"Weak HDef",
+                def_weak_away:"Weak ADef", low_xg:"Low xG", volatile:"Volatile"
+              };
               const active = [
                 xgBoth  != null && `xG≥${xgBoth}`,
                 xgHome  != null && `HxG≥${xgHome}`,
@@ -4198,6 +4209,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 thrACS  != null && `ACS≥${thrACS}%`,
                 thrOdds != null && `Odds≥${thrOdds}`,
                 thrDraw != null && `Draw≥${thrDraw}%`,
+                ...Object.entries(condLabels).filter(([id])=>statFilters.includes(id)).map(([,label])=>label),
+                advExclCount > 0 && `${advExclCount} excluded`,
               ].filter(Boolean);
               return active.length > 0
                 ? <span style={{ fontSize:8, color:C.gold, fontWeight:700 }}>{active.slice(0,3).join(" · ")}{active.length>3?` +${active.length-3}`:""}</span>
@@ -4207,6 +4220,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                            transform: advancedOpen ? "rotate(180deg)" : "none", transition:"transform .2s" }}>▾</span>
           </div>
         </button>
+          );
+        })()}
 
         {advancedOpen && (
           <div style={{ border:`1px solid ${C.gold}30`, borderTop:"none", borderRadius:"0 0 8px 8px",
@@ -4262,41 +4277,47 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </div>
             </div>
 
-            {/* ── Market Exclusion ── */}
-            {/* Excluded market: fixture still shows but uses its next-best non-excluded pick */}
-            <div>
-              <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>
-                Exclude Markets
-                {excludedMarkets.size > 0 && (
-                  <button onClick={() => setExcludedMarkets(new Set())}
-                    style={{ marginLeft:8,fontSize:7,color:C.red,background:"none",border:"none",cursor:"pointer",fontFamily:C.font }}>
-                    Clear
-                  </button>
-                )}
-              </div>
-              <div style={{ fontSize:8,color:C.muted,marginBottom:6,lineHeight:1.4 }}>
-                Fixtures with excluded picks show their next-best market instead.
-              </div>
-              <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
-                {EXCLUDE_SELECTION_GROUPS.map(group => (
-                  <div key={group.label}>
-                    <div style={{ fontSize:7,color:C.muted,letterSpacing:".08em",fontWeight:700,textTransform:"uppercase",marginBottom:4 }}>
-                      {group.label}
+            {/* ── Market Exclusion — UX-FIX: visually walled off from the condition filters above ──
+                 dashed divider + red-tinted panel + red heading make it unmistakably a separate, exclusion-only group */}
+            <div style={{ marginTop:4, paddingTop:14, borderTop:`1px dashed ${C.red}40` }}>
+              <div style={{ background:`${C.red}08`, border:`1px solid ${C.red}25`, borderRadius:8, padding:"10px 10px 12px" }}>
+                <div style={{ fontSize:7,color:C.red,letterSpacing:".1em",fontWeight:800,textTransform:"uppercase",
+                              marginBottom:6, display:"flex", alignItems:"center", gap:5 }}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+                  </svg>
+                  Exclude Markets
+                  {excludedMarkets.size > 0 && (
+                    <button onClick={() => setExcludedMarkets(new Set())}
+                      style={{ marginLeft:8,fontSize:7,color:C.red,background:"none",border:"none",cursor:"pointer",fontFamily:C.font,textTransform:"none",letterSpacing:0,fontWeight:700 }}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize:8,color:C.muted,marginBottom:6,lineHeight:1.4 }}>
+                  Fixtures with excluded picks show their next-best market instead.
+                </div>
+                <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                  {EXCLUDE_SELECTION_GROUPS.map(group => (
+                    <div key={group.label}>
+                      <div style={{ fontSize:7,color:C.muted,letterSpacing:".08em",fontWeight:700,textTransform:"uppercase",marginBottom:4 }}>
+                        {group.label}
+                      </div>
+                      <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
+                        {group.options.map(({ id, label }) => {
+                          const on = excludedMarkets.has(id);
+                          return (
+                            <button key={id} onClick={() => toggleExcludeMarket(id)} className="gb"
+                              style={{ padding:"4px 10px", fontSize:9, textTransform:"none",
+                                       ...(on ? chipOn(C.red) : chipOff) }}>
+                              {on ? `✕ ${label}` : label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div style={{ display:"flex",flexWrap:"wrap",gap:5 }}>
-                      {group.options.map(({ id, label }) => {
-                        const on = excludedMarkets.has(id);
-                        return (
-                          <button key={id} onClick={() => toggleExcludeMarket(id)} className="gb"
-                            style={{ padding:"4px 10px", fontSize:9, textTransform:"none",
-                                     ...(on ? chipOn(C.red) : chipOff) }}>
-                            {on ? `✕ ${label}` : label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
           </div>
