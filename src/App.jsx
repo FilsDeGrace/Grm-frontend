@@ -4103,17 +4103,30 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
   const rows = useMemo(() => {
     const s = search.toLowerCase();
-    // Market exclusion fallback: when a fixture's primary pick uses an excluded market,
-    // try to find a second-best pick from a non-excluded market rather than hiding the fixture.
-    const ALL_FAMILY_IDS = ["theRead","home_win","away_win","draw","over25","under25",
-                            "over35","under35","bttsyes","bttsno","dc","teamtotal"];
+    // Market exclusion fallback: when a fixture's primary pick uses an excluded
+    // market, find the genuine next-best pick — the highest-probability
+    // non-excluded alternative — rather than hiding the fixture.
+    // P-FIX: this used to (1) loop in a FIXED order and return the first valid
+    // match instead of the best one, and (2) contain several family ids that
+    // didn't actually match getCustomPick's keys ("home_win"/"away_win"/"dc"/
+    // "teamtotal" vs the real "homewin"/"awaywin"/"dc1x"+"dc2x"/"homeo05" etc.),
+    // so those entries silently returned null every time. Net effect: Draw —
+    // early in the list and almost always non-null — won nearly every
+    // fallback by default, not by merit. Both are fixed below: correct ids,
+    // and the best-probability candidate wins instead of the first one found.
+    const ALL_FAMILY_IDS = ["theRead","homewin","awaywin","draw","over25","under25",
+                            "over35","under35","bttsyes","bttsno","dc1x","dc2x",
+                            "homeo05","homeo15","awayo05","awayo15"];
     const getFallbackPick = (f) => {
+      let best = null;
       for (const fam of ALL_FAMILY_IDS) {
         if (fam === family) continue; // already tried primary
         const p = getCustomPick(f, fam, C);
-        if (p && p.prob > 0 && !excludedMarkets.has(getExcludeSelectionId(p, f))) return p;
+        if (!p || p.prob <= 0) continue;
+        if (excludedMarkets.has(getExcludeSelectionId(p, f))) continue;
+        if (!best || p.prob > best.prob) best = p;
       }
-      return null;
+      return best;
     };
 
     // P23-FIX: live + upcoming are mutually exclusive if applied as hard filters.
@@ -12185,6 +12198,18 @@ function GRMProInner() {
   const [mainFocusFixture, setMainFocusFixture] = useState(null); // Full Model page overlay
   const [fullModelReturnTab, setFullModelReturnTab] = useState(null); // where to go back to
   const [drawerOpen, setDrawerOpen]             = useState(false); // right-side filter drawer
+  // P-FIX: the filter drawer holds a lot (league filter, sort, theme, the
+  // Tickets correlation toggle, admin tools) but the button itself is just a
+  // small icon that blends in. Shake it periodically while closed so people
+  // actually notice it's there and tap it.
+  const [filterBtnShake, setFilterBtnShake] = useState(false);
+  useEffect(() => {
+    if (drawerOpen) return;
+    const shakeOnce = () => { setFilterBtnShake(true); setTimeout(() => setFilterBtnShake(false), 600); };
+    shakeOnce();
+    const id = setInterval(shakeOnce, 9000);
+    return () => clearInterval(id);
+  }, [drawerOpen]);
   // P-FIX: cross-ticket correlation checking — opt-in (default off). When on,
   // a leg reused across two of the user's currently built/saved tickets gets
   // flagged, same as a previously-booked leg always does.
@@ -13207,6 +13232,7 @@ function GRMProInner() {
                   borderColor:(leagueFilter||sortActive.size>0)?C.accentBorder:"transparent",
                   color:(leagueFilter||sortActive.size>0)?C.accent:C.muted,
                   border:"1px solid",
+                  animation: filterBtnShake ? "grm-risk-shake .6s ease" : "none",
                 }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
