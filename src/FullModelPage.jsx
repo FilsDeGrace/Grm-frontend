@@ -1212,6 +1212,16 @@ const SOURCE_FULL_NAMES = {
 function SourceRow({ s }) {
   const pct = v => (v != null ? `${Math.round(v)}%` : "—");
   const fullName = SOURCE_FULL_NAMES[s.source] || s.source;
+
+  // A 0% reading almost always means a scraping/parsing failure, not a real
+  // prediction — no legitimate source predicts exactly 0% on any outcome.
+  // Hide the whole market group rather than show a flawed number.
+  const has1x2  = (s.homePer || 0) > 0 && (s.drawPer || 0) > 0 && (s.awayPer || 0) > 0;
+  const hasGoals = (s.over25 || 0) > 0 && (s.under25 || 0) > 0;
+  const hasBtts  = (s.bts || 0) > 0 && (s.ots || 0) > 0;
+
+  if (!has1x2 && !hasGoals && !hasBtts) return null; // nothing usable from this source
+
   return (
     <div style={{
       display: "grid",
@@ -1224,6 +1234,7 @@ function SourceRow({ s }) {
         {fullName}
       </div>
       {/* 1X2 — clear H/D/A breakdown */}
+      {has1x2 && (
       <div>
         <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>1X2</div>
         <div style={{ display: "flex", gap: 1, height: 5, borderRadius: 2, overflow: "hidden", marginBottom: 3 }}>
@@ -1246,7 +1257,9 @@ function SourceRow({ s }) {
           </div>
         </div>
       </div>
+      )}
       {/* Goals */}
+      {hasGoals && (
       <div>
         <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>GOALS</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -1260,7 +1273,9 @@ function SourceRow({ s }) {
           </div>
         </div>
       </div>
+      )}
       {/* BTTS */}
+      {hasBtts && (
       <div>
         <div style={{ fontSize: 8, color: C.muted, marginBottom: 3 }}>BTTS</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -1274,6 +1289,7 @@ function SourceRow({ s }) {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -1295,7 +1311,7 @@ function ConsensusBlock({ consensus, total }) {
         fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
         textTransform: "uppercase", color: C.muted, marginBottom: 2,
       }}>
-        Consensus · {total} source{total !== 1 ? "s" : ""}
+        Consensus
       </div>
       {rows.map(r => {
         const d = dirs[r.key];
@@ -1340,42 +1356,28 @@ function JarvisExtBlock({ text, fixture, onAddToParlay }) {
       </div>
       <div style={{ fontSize: 11, color: C.text, lineHeight: 1.7 }}>{text}</div>
 
-      {/* CTAs */}
+      {/* CTA — Use Custom Pick only. The "Add to Ticket" buttons here had no
+          guard against finished/live fixtures and no real state binding, so
+          they're removed. Custom Pick panel (FixtureBookNow) is the one
+          real, stateful way to add a pick — point the user there. */}
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-        {addSignal && anchor && onAddToParlay && (
-          <AddBtn
-            compact
-            color={C.accent}
-            label={`Add ${anchor.pick} to Ticket`}
-            onClick={() => onAddToParlay({ pick: anchor.pick, prob: anchor.prob, market: anchor.market })}
-          />
-        )}
-        {customSignal && (
-          <button
-            onClick={() => {
-              const el = document.getElementById("grm-custom-pick-anchor");
-              if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-            }}
-            style={{
-              padding: "7px 10px", borderRadius: 8,
-              border: `1px solid ${C.border}`, background: "transparent",
-              fontSize: 9, fontWeight: 700, color: C.text,
-              letterSpacing: ".06em", textTransform: "uppercase", cursor: "pointer",
-            }}
-          >
-            Use Custom Pick
-          </button>
-        )}
-        {/* Fallback — always show add if no strong signal either way */}
-        {!addSignal && !customSignal && anchor && onAddToParlay && (
-          <AddBtn
-            compact
-            variant="ghost"
-            color={C.accent}
-            label={`Add ${anchor.pick}`}
-            onClick={() => onAddToParlay({ pick: anchor.pick, prob: anchor.prob, market: anchor.market })}
-          />
-        )}
+        <button
+          onClick={() => {
+            const el = document.getElementById("grm-custom-pick-anchor");
+            if (el) {
+              const top = el.getBoundingClientRect().top + window.scrollY - 64; // offset for sticky header
+              window.scrollTo({ top, behavior: "smooth" });
+            }
+          }}
+          style={{
+            padding: "7px 10px", borderRadius: 8,
+            border: `1px solid ${C.border}`, background: "transparent",
+            fontSize: 9, fontWeight: 700, color: C.text,
+            letterSpacing: ".06em", textTransform: "uppercase", cursor: "pointer",
+          }}
+        >
+          Use Custom Pick
+        </button>
       </div>
     </div>
   );
@@ -1391,7 +1393,9 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
   const date  = fixture?.date || new Date().toISOString().slice(0, 10);
   const fxId  = String(fixture?.id || "");
 
-  // Fire fetch when section is first opened
+  const [forceFlag, setForceFlag] = useState(0); // bump to force a fresh fetch bypassing cache
+
+  // Fire fetch when section is first opened, or when forced via Retry/Refresh
   useEffect(() => {
     if (!open || status !== "idle") return;
 
@@ -1403,6 +1407,7 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
     if (fixture?.theRead?.anchor?.pick)   params.set("readPick",   fixture.theRead.anchor.pick);
     if (fixture?.theRead?.anchor?.prob)   params.set("readConf",   fixture.theRead.anchor.prob);
     if (fixture?.theRead?.anchor?.market) params.set("readMarket", fixture.theRead.anchor.market);
+    if (forceFlag > 0) params.set("force", "1");
 
     fetch(`${SERVER}/api/ext-predictions?${params}`, {
       method: "GET",
@@ -1465,6 +1470,27 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
               textTransform: "uppercase",
             }}>
               {data.sources.length} found
+            </span>
+          )}
+          {(status === "done" || status === "error" || status === "unavailable") && (
+            <span
+              role="button"
+              title="Force a fresh fetch"
+              onClick={(e) => {
+                e.stopPropagation();
+                setForceFlag(f => f + 1);
+                setData(null);
+                setStatus("idle");
+                if (!open) setOpen(true);
+              }}
+              style={{
+                width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
+                borderRadius: 5, border: `1px solid ${C.border}`, cursor: "pointer",
+              }}
+            >
+              <svg width="9" height="9" viewBox="0 0 16 16" fill="none">
+                <path d="M13.65 2.35A7.95 7.95 0 0 0 8 0C3.58 0 0 3.58 0 8s3.58 8 8 8a8 8 0 0 0 7.5-5.2.5.5 0 0 0-.94-.34A7 7 0 1 1 8 1a6.96 6.96 0 0 1 4.95 2.05L10 6h6V0l-2.35 2.35z" fill={C.muted} />
+              </svg>
             </span>
           )}
         </div>
@@ -1676,7 +1702,7 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
           </div>
           <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>{f.league}</div>
         </div>
-        <StatusBadge state={f.state} time={f.time} />
+        <StatusBadge state={f.state} time={f.time} minute={f.minute} />
       </div>
 
       {/* ══ MATCH IDENTITY ══════════════════════════════════════════════════ */}

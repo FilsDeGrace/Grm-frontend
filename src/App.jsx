@@ -11593,6 +11593,8 @@ function GRMProInner() {
   const [activeTab, setActiveTab] = useState("live");
   const [date, setDate]           = useState(todayStr());
   const [fixtures, setFixtures]   = useState([]);
+  const fixturesRef = useRef([]);
+  useEffect(() => { fixturesRef.current = fixtures; }, [fixtures]);
   const [loading, setLoadingState] = useState(false);
   const loadingRef                 = useRef(false);
   // Wrapper keeps the ref in sync so startAutoRefresh reads current value without stale closure
@@ -11950,6 +11952,36 @@ function GRMProInner() {
 
   // Apply finished flag from injectResults to state immediately on load
   // So past dates show "FT" without waiting for the live ticker
+  // ── Preserve live status across snapshot/auto-refresh reloads ────────────
+  // fetchData() replaces `fixtures` wholesale from /api/grm-pro-data, whose
+  // snapshot has no concept of "currently in progress" — that's exclusively
+  // pollLiveStates' job. Without this, every auto-refresh (which fires
+  // whenever results.json's mtime advances — i.e. constantly during live
+  // matches) reset every live fixture back to its pre-kickoff snapshot state
+  // for the few seconds until the next live-states poll re-patched it. That's
+  // the "live briefly disappears" bug — it's a frontend reset on the app
+  // side, not a server-side flicker.
+  const preserveLiveStates = useCallback((freshArr, prevArr) => {
+    if (!prevArr?.length) return freshArr;
+    const prevMap = new Map(prevArr.map(f => [f.id, f]));
+    const LIVE_STATES = new Set([
+      "inprogress","live","1h","firsthalf","ht","halftime",
+      "2h","secondhalf","et","extratime","pen","penalties","pause","break",
+    ]);
+    return freshArr.map(f => {
+      const prev = prevMap.get(f.id);
+      if (!prev) return f;
+      if (f.finished === true) return f; // fresh data has an authoritative result — let it through
+      const prevNorm = (prev.stateNorm || prev.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+      if (!LIVE_STATES.has(prevNorm)) return f;
+      // Carry the known-live status forward until the next live-states poll
+      // (within seconds, not up to 30s+) confirms or corrects it — instead of
+      // snapping back to whatever pre-kickoff state the snapshot had.
+      return { ...f, state: prev.state, stateNorm: prev.stateNorm, minute: prev.minute,
+               isLive: prev.isLive, isDone: prev.isDone, isPPD: prev.isPPD, isCancelled: prev.isCancelled };
+    });
+  }, []);
+
   const applyFinishedStates = useCallback((fixturesArr) => {
     return fixturesArr.map(f => {
       if (f.finished === true) {
@@ -12027,7 +12059,7 @@ function GRMProInner() {
               const json = await snap.json();
               const data = Array.isArray(json.data) ? json.data : [];
               const capturedDate = date; // hoist so startAutoRefresh and pool save share same value
-              const _fd1 = applyFinishedStates(data); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
+              const _fd1 = applyFinishedStates(preserveLiveStates(data, fixturesRef.current)); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
               // existed in the sync 200 path. This caused results to never auto-inject
               // after the first fetch (pipeline always returns 202 on a fresh date).
@@ -12064,7 +12096,7 @@ function GRMProInner() {
       }
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      const _fd2 = applyFinishedStates(data); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
+      const _fd2 = applyFinishedStates(preserveLiveStates(data, fixturesRef.current)); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
       startAutoRefresh(date);
 
       if (json.legacySchema) setLegacySnapshot(true);
@@ -12087,7 +12119,7 @@ function GRMProInner() {
       // The 202 async path sets isSyncPath=false and manages its own loading state.
       if (isSyncPath) { stopPolling(); setLoading(false); }
     }
-  }, [date]);
+  }, [date, preserveLiveStates]);
 
   const loadSnapshot = useCallback(async snapDate => {
     stopPolling();
@@ -12265,6 +12297,22 @@ function GRMProInner() {
 
   const liveTickerRef = useRef(null);
 
+  // ── Live minute "twin clock" ────────────────────────────────────────────
+  // Anchors: for each live fixture, the last AUTHORITATIVE (minute, wall-clock-
+  // time-it-was-true) pair, set whenever the server (or our own time-math
+  // fallback) gives us a fresh minute. localClockTick recomputes the displayed
+  // minute every few seconds purely from elapsed wall-clock time since that
+  // anchor — no network call — so the minute counts up smoothly between polls
+  // instead of sitting frozen at the last poll's value for up to 30s. When the
+  // next poll/results tick lands, the anchor is replaced with the corrected
+  // server value, so any drift (stoppage time, restarts, etc.) auto-adjusts.
+  const liveMinuteAnchorsRef = useRef(new Map()); // id → { minute, atMs }
+  const localClockRef = useRef(null);
+  const setMinuteAnchor = useCallback((id, minute) => {
+    if (minute == null) return;
+    liveMinuteAnchorsRef.current.set(id, { minute, atMs: Date.now() });
+  }, []);
+
   // ── Auto-refresh: detects when results.json has updated and re-fetches ──
   // Problem: when the results loop writes new scores, fixture cards stay stale
   // until the user manually refreshes the browser.
@@ -12316,8 +12364,13 @@ function GRMProInner() {
         setFixtures(prev => prev.map(f => {
           const p = patchMap.get(f.id);
           if (p) {
-            // Server patch — trust it fully
-            if (p.state === f.state && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
+            setMinuteAnchor(f.id, p.minute);
+            // Server patch — trust it fully.
+            // BUG FIX: this used to skip the update whenever state/scores were
+            // unchanged, which silently dropped minute updates for the whole
+            // back half of a match (state stays "inprogress" the entire time) —
+            // the badge would look frozen on whatever minute it first saw.
+            if (p.state === f.state && p.minute === f.minute && p.hScore === f.scores?.hGoals && p.aScore === f.scores?.aGoals) return f;
             return {
               ...f,
               state:       p.state,
@@ -12332,7 +12385,9 @@ function GRMProInner() {
           }
           // Not in server's patch — apply time-based inference so kickoffs show LIVE
           const inferred = inferStateFromTime(f);
-          if (!inferred || inferred.state === f.state) return f;
+          if (!inferred) return f;
+          setMinuteAnchor(f.id, inferred.minute);
+          if (inferred.state === f.state && inferred.minute === f.minute) return f;
           return { ...f, ...inferred };
         }));
         if (data.liveCount > 0) setLastResultsRefresh(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
@@ -12341,7 +12396,8 @@ function GRMProInner() {
         setFixtures(prev => prev.map(f => {
           const inferred = inferStateFromTime(f);
           if (!inferred) return f;
-          if (inferred.state === f.state) return f;
+          setMinuteAnchor(f.id, inferred.minute);
+          if (inferred.state === f.state && inferred.minute === f.minute) return f;
           return { ...f, ...inferred };
         }));
       }
@@ -12350,7 +12406,8 @@ function GRMProInner() {
       setFixtures(prev => prev.map(f => {
         const inferred = inferStateFromTime(f);
         if (!inferred) return f;
-        if (inferred.state === f.state) return f;
+        setMinuteAnchor(f.id, inferred.minute);
+        if (inferred.state === f.state && inferred.minute === f.minute) return f;
         return { ...f, ...inferred };
       }));
     }
@@ -12369,7 +12426,7 @@ function GRMProInner() {
         }
       } catch {}
     }
-  }, [inferStateFromTime, mergeResultsIntoFixtures]);
+  }, [inferStateFromTime, mergeResultsIntoFixtures, setMinuteAnchor]);
 
   useEffect(() => {
     if (!fixtures.length || activeTab !== "live") return;
@@ -12381,6 +12438,38 @@ function GRMProInner() {
     liveTickerRef.current = setInterval(() => pollLiveStates(date), 30_000);
     return () => { if (liveTickerRef.current) clearInterval(liveTickerRef.current); };
   }, [fixtures.length > 0, date, activeTab]);
+
+  // ── Twin clock: client-side minute math, runs alongside pollLiveStates ──
+  // Pure formula, zero network calls — ticks the displayed minute up every
+  // 10s from whatever the last authoritative anchor was (server patch or
+  // time-math fallback), so the badge counts up smoothly instead of sitting
+  // frozen for up to 30s between polls. pollLiveStates remains the source of
+  // truth: every time it lands, the anchor gets replaced with the corrected
+  // value, so this clock can never drift permanently — it just fills the gap.
+  useEffect(() => {
+    if (!fixtures.length || activeTab !== "live") return;
+    const tick = () => {
+      const anchors = liveMinuteAnchorsRef.current;
+      if (!anchors.size) return;
+      const nowMs = Date.now();
+      setFixtures(prev => {
+        let changed = false;
+        const next = prev.map(f => {
+          if (f.stateNorm !== "inprogress") return f; // HT/ET/PEN/FT don't tick this way
+          const a = anchors.get(f.id);
+          if (!a) return f;
+          const est = Math.min(130, a.minute + Math.floor((nowMs - a.atMs) / 60_000));
+          if (est === f.minute) return f;
+          changed = true;
+          return { ...f, minute: est };
+        });
+        return changed ? next : prev;
+      });
+    };
+    tick();
+    localClockRef.current = setInterval(tick, 10_000);
+    return () => { if (localClockRef.current) clearInterval(localClockRef.current); };
+  }, [fixtures.length > 0, activeTab]);
 
   // Tab counts
   const counts = useMemo(() => ({
