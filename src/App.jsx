@@ -316,6 +316,176 @@ const CUSTOM_FAMILIES = [
   { id:"homeo05",label:"H O0.5" }, { id:"homeo15",label:"H O1.5" }, { id:"awayo05",label:"A O0.5" }, { id:"awayo15",label:"A O1.5" },
 ];
 
+// ══════════════════════════════════════════════════════════════════════════
+// SA PATTERN ENGINE — client-side port of strategy-analyst.mjs's feature
+// extraction, so validated patterns from sa-patterns.json can be matched
+// against live fixtures. Every formula below is a 1:1 mirror of the offline
+// miner (same buckets, same thresholds) so a fixture that would have matched
+// a pattern during training matches it here too. Admin-only feature.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Market name → how to read its probability/odds off a live fixture.
+const SA_MARKETS = {
+  "TB:Over 1.5":      { probKey:"over15",  oddsKey:"over15odds"  },
+  "TB:Over 2.5":      { probKey:"over25",  oddsKey:"over25odds"  },
+  "TB:Under 3.5":     { probKey:"under35", oddsKey:"under35odds" },
+  "TB:Under 4.5":     { probKey:"under45", oddsKey:"under45odds" },
+  "TB:BTTS":          { probKey:"bttsYes", oddsKey:"bttsYesOdds" },
+  "TB:DC1X":          { computeProb: m => (+(m.homeWin??0)) + (+(m.draw??0)), oddsKey:"dc1X" },
+  "TB:DCX2":          { computeProb: m => (+(m.draw??0)) + (+(m.awayWin??0)), oddsKey:"dcX2" },
+  "TB:1X2-Home":      { probKey:"homeWin", oddsKey:"o1" },
+  "TB:1X2-Draw":      { probKey:"draw",    oddsKey:"oX" },
+  "TB:1X2-Away":      { probKey:"awayWin", oddsKey:"o2" },
+  "TB:Home Over 0.5": { probKey:"homeOver05", oddsKey:null },
+  "TB:Home Over 1.5": { probKey:"homeOver15", oddsKey:null },
+  "TB:Away Over 0.5": { probKey:"awayOver05", oddsKey:null },
+  "TB:Away Over 1.5": { probKey:"awayOver15", oddsKey:null },
+};
+const SA_MARKET_LABELS = Object.keys(SA_MARKETS).map(id => ({ id, label: id.replace(/^TB:/, "") }));
+
+function saTheReadToTBMarket(anchor) {
+  if (!anchor) return null;
+  const mkt = anchor.market, dcV = anchor.dcVariant;
+  if (mkt === "DC") return dcV === "1X" ? "TB:DC1X" : dcV === "X2" ? "TB:DCX2" : null;
+  const MAP = {
+    "Over 1.5":"TB:Over 1.5","Over 2.5":"TB:Over 2.5","Under 3.5":"TB:Under 3.5","Under 4.5":"TB:Under 4.5",
+    "BTTS":"TB:BTTS","Home Over 0.5":"TB:Home Over 0.5","Away Over 0.5":"TB:Away Over 0.5",
+    "Home Win":"TB:1X2-Home","Away Win":"TB:1X2-Away","Draw":"TB:1X2-Draw",
+  };
+  return MAP[mkt] ?? null;
+}
+
+const saProbBand = p => p>=90?"90+":p>=85?"85-90":p>=80?"80-85":p>=75?"75-80":p>=70?"70-75":p>=65?"65-70":"<65";
+const saCalBand = w => w==null?"unknown":w>=80?"80+":w>=60?"60-80":w>=40?"40-60":w>=20?"20-40":"<20";
+const saSeasonBand = n => !n?"unknown":n>=30?"30+":n>=20?"20-30":n>=8?"8-20":"<8";
+const saGamesUsedBand = n => !n?"unknown":n>=60?"60+":n>=30?"30-60":n>=15?"15-30":"<15";
+const saLeagueTier = rank => !rank?"unknown":rank<=10?"elite":rank<=20?"top":rank<=50?"mid":"lower";
+const saXgRatioBand = (h,a) => { if(!h||!a||h<=0||a<=0) return "unknown"; const r=Math.max(h/a,a/h); return r>=3?"3+":r>=2?"2-3":r>=1.5?"1.5-2":"<1.5"; };
+const saTotalXGBand = t => !t||t<=0?"unknown":t>=4?"4+":t>=3?"3-4":t>=2?"2-3":"<2";
+const saOddsDiscrepBand = (modelProb, bkOdds) => {
+  if (!bkOdds || bkOdds<=1) return "no-bk";
+  const bkP = (1/bkOdds)*100, d = modelProb - bkP;
+  return d>15?"strong-edge":d>5?"mild-edge":d>-5?"aligned":d>-15?"mild-against":"strong-against";
+};
+const saTablePosBand = pos => pos==null?"unknown":pos<=3?"top3":pos<=6?"top6":pos<=10?"mid":"bottom";
+const saPosDiffBand  = d => d==null?"unknown":d<=3?"close":d<=7?"mid":"large";
+const saBacktestWtBand = w => w==null?"unknown":w>=50?"50+":w>=30?"30-50":w>=15?"15-30":"<15";
+
+// Computes the same feature dimensions strategy-analyst.mjs mined patterns
+// against, off a LIVE fixture instead of a snapshot file. Returned object is
+// keyed identically to sa-patterns.json's `conditions`, values stringified
+// the same way (DIMS in the miner wraps booleans/bands in String()).
+function computeSAFeatures(f, market) {
+  const def = SA_MARKETS[market];
+  if (!def) return null;
+  const m = f.markets || {};
+  const prob   = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
+  const bkOdds = def.oddsKey ? +(f.odds?.[def.oddsKey] ?? 0) : 0;
+
+  const hXG = +(m.homeXG ?? 0), aXG = +(m.awayXG ?? 0);
+  const tot = hXG + aXG, gap = Math.abs(hXG - aXG);
+
+  const calW   = m._calibrationWeight ?? null;
+  const sGames = m._seasonGames ?? null;
+  const gUsed  = m._gamesUsed ?? null;
+  const btW    = m._backtestWeight ?? null;
+  const isLowConf = !!(m._lowConfidence ?? false);
+
+  const lRank = f.leagueRank ?? null;
+  const isVol = !!(f.volatileLeague ?? false);
+
+  const hAtk = +(m.homeAttackStrength ?? 0), aAtk = +(m.awayAttackStrength ?? 0);
+  const hDef = +(m.homeDefenceStrength ?? 0), aDef = +(m.awayDefenceStrength ?? 0);
+
+  const tp = f.tablePosition || {};
+  const hPos = tp.homePosition ?? null, aPos = tp.awayPosition ?? null;
+  const posDiff = (hPos!=null && aPos!=null) ? Math.abs(hPos-aPos) : null;
+
+  const hSt = f.teamStats?.home || {}, aSt = f.teamStats?.away || {};
+
+  const readAnchor     = f.theRead?.anchor;
+  const readStrong     = !!(readAnchor?.strong ?? false);
+  const readTBMkt      = saTheReadToTBMarket(readAnchor);
+  const readMatchesMkt = readTBMkt === market;
+
+  const o25 = +(m.over25 ?? 0), btts = +(m.bttsYes ?? m.btts ?? 0), draw = +(m.draw ?? 0);
+  const tags = f.strategyTags || [];
+
+  return {
+    probBand: saProbBand(prob),
+    leagueTier: saLeagueTier(lRank),
+    isEliteLeague: String(lRank!=null && lRank<999 && lRank<=10),
+    isTopLeague:   String(lRank!=null && lRank<999 && lRank<=20),
+    isVolatile: String(isVol),
+    country: f.country || "unknown",
+    calBand: saCalBand(calW),
+    isHighCalib: String(calW!=null && calW>=70),
+    gamesUsedBand: saGamesUsedBand(gUsed),
+    isLowConf: String(isLowConf),
+    backtestWtBand: saBacktestWtBand(btW),
+    seasonBand: saSeasonBand(sGames),
+    isLateSeason: String(sGames!=null && sGames>30),
+    isEarlySeason: String(sGames!=null && sGames<8),
+    xgRatioBand: saXgRatioBand(hXG, aXG),
+    totalXGBand: saTotalXGBand(tot),
+    xgBalanced: String(gap < 0.5),
+    xgDomHome: String(hXG>0 && aXG>0 && hXG>=aXG*2 && gap>=1),
+    xgDomAway: String(hXG>0 && aXG>0 && aXG>=hXG*2 && gap>=1),
+    highTotalXG: String(tot >= 3),
+    lowTotalXG: String(tot > 0 && tot < 1.5),
+    xgSourceType: f.xgSource || "unknown",
+    homeAttackStrong: String(hAtk >= 1.3),
+    awayAttackStrong: String(aAtk >= 1.3),
+    homeDefenceWeak: String(hDef >= 1.2),
+    awayDefenceWeak: String(aDef >= 1.2),
+    homeTablePos: saTablePosBand(hPos),
+    awayTablePos: saTablePosBand(aPos),
+    tablePosDiff: saPosDiffBand(posDiff),
+    homeCsHigh: String((hSt.csRate ?? -1) >= 40),
+    awayCsHigh: String((aSt.csRate ?? -1) >= 40),
+    homeScoreLow: String((hSt.scoredRate ?? 101) <= 40),
+    awayScoreLow: String((aSt.scoredRate ?? 101) <= 40),
+    homeFtsHigh: String((hSt.ftsRate ?? -1) >= 40),
+    awayFtsHigh: String((aSt.ftsRate ?? -1) >= 40),
+    goalRange: f.goalRange || "unknown",
+    highO25: String(o25 > 40),
+    lowBtts: String(btts > 0 && btts < 35),
+    highBtts: String(btts > 55),
+    highDraw: String(draw > 30),
+    hasBkOdds: String(!!(bkOdds && bkOdds>1)),
+    oddsDiscrep: saOddsDiscrepBand(prob, bkOdds),
+    readStrong: String(readStrong),
+    readMatchesMkt: String(readMatchesMkt),
+    hasLowScoring: String(tags.includes("low_scoring")),
+    hasOver25Quality: String(tags.includes("over25_quality")),
+    hasHomeWin: String(tags.includes("home_win")),
+    hasAwayWin: String(tags.includes("away_win")),
+    hasBttsValue: String(tags.includes("btts_value")),
+    hasDrawTag: String(tags.includes("draw")),
+    hasHomeGoalfest: String(tags.includes("home_goalfest")),
+    hasAwayGoalfest: String(tags.includes("away_goalfest")),
+  };
+}
+
+// Matches a fixture's computed features against every pattern for `market`.
+// Returns { positive: [...matched, lift desc], avoid: [...matched, worst-first] }.
+// Both single-condition and pair-condition patterns are handled the same way
+// — every key in `p.conditions` must match the fixture's computed feature.
+function matchSAPatterns(f, market, patterns) {
+  const feats = computeSAFeatures(f, market);
+  if (!feats || !patterns?.length) return { positive: [], avoid: [] };
+  const positive = [], avoid = [];
+  for (const p of patterns) {
+    if (p.market !== market) continue;
+    const matches = Object.entries(p.conditions).every(([k, v]) => feats[k] === v);
+    if (!matches) continue;
+    (p.direction === "positive" ? positive : avoid).push(p);
+  }
+  positive.sort((a,b) => b.lift - a.lift);
+  avoid.sort((a,b) => a.lift - b.lift); // most negative lift first — worst offenders surfaced first within the flagged group
+  return { positive, avoid };
+}
+
 // ── EXCLUDE SELECTION GROUPS ─────────────────────────────────────────────
 // Same two-tier shape as Custom Pick (market family → individual line/option),
 // but used for exclusion: each option gets its own toggle so a single line
@@ -3521,7 +3691,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
 // ── CUSTOM LIST VIEW ──────────────────────────────────────────────────────
 // getCustomPick, xgHomeDominant, xgAwayDominant → engine.js
 
-function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary }) {
+function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "" }) {
   const isMobile = useIsMobile();
   const SS_KEY = "grm_clv_state_v1";
   const loadSS = (k, fallback) => { try { const s = sessionStorage.getItem(SS_KEY); if (!s) return fallback; const d = JSON.parse(s); return d[k] !== undefined ? d[k] : fallback; } catch { return fallback; } };
@@ -3532,6 +3702,24 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [selected,       setSelected]       = useState(null);
   const [activeStrategy, setActiveStrategyState] = useState(() => loadSS("activeStrategy", null));
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
+
+  // ── SA Pattern mode (admin-only) ──────────────────────────────────────
+  // Separate from `family`: family picks WHICH market off a fixture's model
+  // probabilities; SA Pattern instead filters fixtures by whether they match
+  // a validated (out-of-sample tested) historical pattern for a given market.
+  const [saMarket,  setSaMarket]  = useState(null); // e.g. "TB:Over 1.5", or null = off
+  const [saPatterns, setSaPatterns] = useState(null); // raw sa-patterns.json payload
+  const [saLoading, setSaLoading] = useState(false);
+  const [saError,   setSaError]   = useState(null);
+  useEffect(() => {
+    if (!adminMode || saPatterns || saLoading) return;
+    setSaLoading(true);
+    fetch(`${SERVER}/api/sa-patterns?adminToken=${encodeURIComponent(adminToken)}`)
+      .then(r => r.json())
+      .then(d => { if (d?.patterns) setSaPatterns(d); else setSaError(d?.error || "No patterns found"); })
+      .catch(e => setSaError(e.message))
+      .finally(() => setSaLoading(false));
+  }, [adminMode, adminToken, saPatterns, saLoading]);
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -3901,6 +4089,41 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
   }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets]);
 
+  // SA Pattern mode — separate list, only built when an admin has a market selected.
+  // Reuses the same { f, pick } shape as `rows` so the existing row JSX renders it
+  // unchanged; pick.label/color come from whichever pattern matched (or a plain
+  // market label when only an avoid pattern matched and there's no positive one).
+  const saRows = useMemo(() => {
+    if (!saMarket || !saPatterns?.patterns?.length) return [];
+    const s = search.toLowerCase();
+    const def = SA_MARKETS[saMarket];
+    if (!def) return [];
+    const out = [];
+    for (const f of fixtures) {
+      if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+      const m = f.markets || {};
+      const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
+      if (!prob || prob <= 0) continue;
+      const { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
+      if (!positive.length && !avoid.length) continue; // SA Pattern mode only shows patterned games
+      const odds   = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
+      const flagged = positive.length === 0; // matched ONLY an avoid pattern — good prob, bad SA history
+      out.push({
+        f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: flagged ? C.red : C.green },
+        _saPositive: positive, _saAvoid: avoid, _saFlagged: flagged,
+      });
+    }
+    out.sort((a, b) => {
+      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1; // flagged-only rows sink to the bottom
+      return a._saFlagged
+        ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)   // within flagged group: worst lift first
+        : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0); // within validated group: best lift first
+    });
+    return out;
+  }, [saMarket, saPatterns, fixtures, search]);
+
+  const displayRows = saMarket ? saRows : rows;
+
   const saveListToJSON = () => {
     const payload = {
       date:todayStr(), savedAt:new Date().toISOString(), family, count:rows.length,
@@ -4166,7 +4389,42 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </div>
       </div>
 
-      {/* ── SIGNAL ── binary toggles only, no threshold chips */}
+      {/* ── SA PATTERN (admin-only) ── */}
+      {adminMode && (
+        <div style={{ marginBottom:10 }}>
+          <div style={{ display:"flex",alignItems:"center",gap:6,marginBottom:6 }}>
+            <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>SA Pattern</div>
+            <span style={{ fontSize:7,color:C.red,background:`${C.red}15`,border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 5px",fontWeight:800 }}>ADMIN</span>
+            {saLoading && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
+            {saError    && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
+          </div>
+          <div className="cscroll">
+            {saMarket && (
+              <button onClick={()=>setSaMarket(null)} className="gb"
+                style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                         background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
+                ✕ Off
+              </button>
+            )}
+            {SA_MARKET_LABELS.map(mk => (
+              <button key={mk.id} onClick={()=>setSaMarket(saMarket===mk.id?null:mk.id)} className="gb"
+                style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                         background:saMarket===mk.id?C.red:"transparent",
+                         color:saMarket===mk.id?"#fff":C.muted,
+                         border:`1px solid ${saMarket===mk.id?C.red:C.faint}` }}>
+                {mk.label}
+              </button>
+            ))}
+          </div>
+          {saMarket && (
+            <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:5 }}>
+              Showing only fixtures matching a validated SA pattern for {saMarket.replace(/^TB:/,"")}.
+              Games matching only an "avoid" pattern (good model probability, bad historically) are flagged and sorted to the bottom.
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ marginBottom:10 }}>
         <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Signal</div>
         <div style={{ display:"flex",flexWrap:"wrap",gap:6,alignItems:"center" }}>
@@ -4362,9 +4620,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           and a separate Clear action, instead of vanishing once any item is selected. */}
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap" }}>
         <div style={{ display:"flex",alignItems:"center",gap:12,flexWrap:"wrap" }}>
-          <span style={{ fontSize:9,color:C.text }}>{rows.length} matches</span>
+          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket?" (SA Pattern)":""}</span>
           {(() => {
-            const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+            const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
             const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
             const hasPartial  = selectedIds.size > 0 && !allSelected;
             if (eligibleIds.length === 0) return null;
@@ -4397,7 +4655,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </span>
           )}
         </div>
-        {rows.length > 0 && (
+        {displayRows.length > 0 && (
           <button onClick={saveListToJSON} className="gb"
             style={{ padding:"3px 10px",background:"transparent",border:`1px solid ${C.radar}50`,color:C.radar,fontSize:9,display:"flex",alignItems:"center",gap:4 }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
@@ -4412,7 +4670,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               primary Select All control with full label now lives in the list header above */}
           <span>
             {(() => {
-              const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+              const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
               const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
               const hasPartial  = selectedIds.size > 0 && !allSelected;
               if (eligibleIds.length === 0) return null;
@@ -4442,7 +4700,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               now live persistently in the list header above this column-header row */}
           <span>
             {(() => {
-              const eligibleIds = rows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
+              const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
               const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
               const hasPartial  = selectedIds.size > 0 && !allSelected;
               if (eligibleIds.length === 0) return null;
@@ -4469,7 +4727,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Rows */}
       <div style={{ display:"flex",flexDirection:"column",gap:2,paddingBottom:selectedIds.size > 0 ? 60 : 0 }}>
-        {rows.map(({ f, pick, _usedFallback, _excludedMarket }) => {
+        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged }) => {
           const probColor = pick.prob >= 75 ? C.green : pick.prob >= 60 ? C.gold : C.muted;
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
@@ -4507,6 +4765,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     <span style={{ marginLeft:5,fontSize:7,color:C.amber,background:`${C.amber}15`,
                                    border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
                       ↓ {_excludedMarket} excluded
+                    </span>
+                  )}
+                  {_saFlagged && (
+                    <span title={`Avoid: ${_saAvoid?.[0]?.id||""} (testHR ${_saAvoid?.[0]?.testHR}%)`}
+                      style={{ marginLeft:5,fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ SA avoid
+                    </span>
+                  )}
+                  {!_saFlagged && _saPositive?.length > 0 && (
+                    <span title={`${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
+                      style={{ marginLeft:5,fontSize:7,color:C.green,background:`${C.green}15`,
+                               border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ SA +{_saPositive[0].lift}pp
                     </span>
                   )}
                 </div>
@@ -4552,6 +4824,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                   {pick.label}
+                  {_saFlagged && (
+                    <span title={`Avoid: ${_saAvoid?.[0]?.id||""} (testHR ${_saAvoid?.[0]?.testHR}%)`}
+                      style={{ fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ SA avoid
+                    </span>
+                  )}
+                  {!_saFlagged && _saPositive?.length > 0 && (
+                    <span title={`${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
+                      style={{ fontSize:7,color:C.green,background:`${C.green}15`,
+                               border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ SA +{_saPositive[0].lift}pp
+                    </span>
+                  )}
                 </div>
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
@@ -4565,8 +4851,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </div>
           );
         })}
-        {rows.length === 0 && (
-          <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches</div>
+        {displayRows.length === 0 && (
+          <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
+            {saMarket ? "No fixtures match SA patterns for this market" : "No matches"}
+          </div>
         )}
       </div>
 
@@ -13206,6 +13494,7 @@ function GRMProInner() {
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
                     onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
+                    adminMode={adminMode} adminToken={adminToken}
                     onAddToTicket={ticket => {
                       setDraftLegs(prev => {
                         const existingMap = new Map(prev.map(l => [l.fixtureId, l]));
