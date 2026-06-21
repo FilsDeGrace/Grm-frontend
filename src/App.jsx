@@ -691,6 +691,71 @@ function loadSavedTickets() {
   } catch { return []; }
 }
 function persistTickets(tickets) { try { localStorage.setItem(SAVED_TICKETS_KEY, JSON.stringify(tickets)); } catch {} }
+
+// P-FIX: Correlation risk tracker — replaces the old "same league within one
+// ticket" check, which fired on totally unrelated games just because they
+// shared a league. The only thing that matters now is whether a leg has
+// actually been booked before. Populated EXCLUSIVELY by a successful Book Now
+// call (the real bookmaker API booking) — building, saving, or drafting a
+// ticket never touches this list.
+const BOOKED_LEGS_KEY = "grm_booked_legs_v1";
+function loadBookedLegs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(BOOKED_LEGS_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function persistBookedLegs(legs) {
+  try {
+    // Cap growth so this doesn't silently bloat localStorage forever.
+    localStorage.setItem(BOOKED_LEGS_KEY, JSON.stringify(legs.slice(-300)));
+  } catch {}
+}
+function recordBookedLegs(legs, ticketCode) {
+  if (!Array.isArray(legs) || !legs.length) return;
+  const stamped = legs
+    .filter(l => l.fixtureId || l.game)
+    .map(l => ({
+      fixtureId: l.fixtureId || l.game,
+      game:      l.game,
+      pick:      l.pick,
+      market:    l.market,
+      league:    l.league,
+      ticketCode,
+      bookedAt:  new Date().toISOString(),
+    }));
+  if (!stamped.length) return;
+  persistBookedLegs([...loadBookedLegs(), ...stamped]);
+}
+
+// P-FIX: a leg is correlated if it was already booked before (always checked —
+// real money risk, can't be toggled off), or — only when cross-ticket checking
+// is on — if it also shows up in another ticket the user currently has built
+// or saved. Two different games in the same league are NOT correlated; that
+// was the bug this replaces.
+function computeCorrelationRisks(ticket, { bookedLegs = [], otherTickets = [], crossCheckEnabled = false } = {}) {
+  const legs = ticket?.legs || [];
+  if (!legs.length) return [];
+  const bookedByFixture = new Map();
+  bookedLegs.forEach(b => { if (b.fixtureId && !bookedByFixture.has(b.fixtureId)) bookedByFixture.set(b.fixtureId, b); });
+
+  const risks = [];
+  legs.forEach(l => {
+    const fid = l.fixtureId || l.game;
+    if (!fid) return;
+    const booked = bookedByFixture.get(fid);
+    if (booked) {
+      risks.push({ type:"booked", game: l.game || booked.game, pick: l.pick, bookedPick: booked.pick, ticketCode: booked.ticketCode });
+    }
+    if (crossCheckEnabled) {
+      const match = otherTickets.find(t => t.id !== ticket.id && (t.legs||[]).some(ol => (ol.fixtureId || ol.game) === fid));
+      if (match) {
+        risks.push({ type:"session", game: l.game, pick: l.pick, otherLabel: match.slotLabel || match.code || `Ticket #${match.id}` });
+      }
+    }
+  });
+  return risks;
+}
 function generateTicketCode() {
   // Use 8 chars of random base-36 — virtually no collision risk
   return "T" + Math.random().toString(36).slice(2, 6).toUpperCase()
@@ -1646,6 +1711,7 @@ function injectStyles(T) {
     @keyframes spinRing{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
     @keyframes bounce{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(-4px);opacity:1}}
     @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+    @keyframes grm-risk-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-3px)}40%{transform:translateX(3px)}60%{transform:translateX(-2px)}80%{transform:translateX(2px)}}
 
     /* ── Header — 2-level premium shell ─────────────────────────────── */
     .grm-header{
@@ -4098,9 +4164,25 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const s = search.toLowerCase();
     const def = SA_MARKETS[saMarket];
     if (!def) return [];
+
+    // P-FIX: SA Pattern mode used to ignore the Upcoming/Live status filters
+    // entirely, showing finished/live/upcoming fixtures all mixed together
+    // regardless of what was toggled. Same status-filter logic as the main
+    // `rows` list above now applies here too.
+    const hasLiveFilter      = statFilters.includes("live");
+    const hasScheduledFilter = statFilters.includes("scheduled");
+    const bothOrNeither      = (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
+    const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
+
     const out = [];
     for (const f of fixtures) {
       if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+      if (!bothOrNeither) {
+        const st = (f.state||"").toLowerCase();
+        if (hasLiveFilter && !liveStates.has(st)) continue;
+        if (hasScheduledFilter && !isScheduledState(st)) continue;
+      }
       const m = f.markets || {};
       const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
       if (!prob || prob <= 0) continue;
@@ -4114,13 +4196,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     out.sort((a, b) => {
+      // P-FIX: same live-first sort as `rows` when both/neither status filter is active.
+      if (bothOrNeither) {
+        const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+        const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+        if (aLive !== bLive) return aLive - bLive;
+      }
       if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1; // flagged-only rows sink to the bottom
       return a._saFlagged
         ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)   // within flagged group: worst lift first
         : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0); // within validated group: best lift first
     });
     return out;
-  }, [saMarket, saPatterns, fixtures, search]);
+  }, [saMarket, saPatterns, fixtures, search, statFilters]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -5453,6 +5541,10 @@ function TicketBookNowButton({ legs }) {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Booking failed");
       setResult({ ...data, bookieId: bookie });
+      // P-FIX: this is the one and only place correlation tracking gets fed —
+      // a real, successful bookmaker booking. Building or saving a ticket
+      // never reaches here.
+      if (data?.code) recordBookedLegs(legs, data.code);
     } catch(e) {
       const msg = e.message || "";
       setError(
@@ -6944,7 +7036,7 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   );
 }
 
-function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs }) {
+function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false }) {
   const [stakeInput, setStakeInput] = useState(ticket.stake > 0 ? String(ticket.stake) : "");
   const stake      = parseFloat(stakeInput) || 0;
   const potential  = parseFloat((stake * parseFloat(ticket.totalOdds)).toFixed(2));
@@ -6954,30 +7046,28 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
   const accentBdr   = isJarvis ? C.edgeBorder : C.goldBorder;
   const isManual    = ticket.source === "card_add" || ticket.source === "custom_selection";
 
-  // P13-FIX: Correlation risk — detect legs from the same league or same match
+  // P-FIX: Correlation risk — no longer "same league within this ticket"
+  // (two unrelated games in the same league aren't correlated — that was the
+  // bug). Now it's: this leg was already booked before (always checked), or,
+  // only when cross-ticket checking is enabled, this leg also appears in
+  // another ticket the user currently has built or saved.
   const [corrOpen, setCorrOpen] = useState(false);
-  const corrRisks = (() => {
-    const legs = ticket.legs || [];
-    const leagueCounts = {};
-    const matchCounts  = {};
-    legs.forEach(l => {
-      if (l.league) leagueCounts[l.league] = (leagueCounts[l.league] || 0) + 1;
-      const matchKey = l.fixtureId || l.game;
-      if (matchKey) matchCounts[matchKey] = (matchCounts[matchKey] || 0) + 1;
-    });
-    const risks = [];
-    Object.entries(leagueCounts).forEach(([league, count]) => {
-      if (count >= 2) risks.push({ type: "league", label: league, count });
-    });
-    Object.entries(matchCounts).forEach(([key, count]) => {
-      if (count >= 2) {
-        const leg = legs.find(l => (l.fixtureId || l.game) === key);
-        risks.push({ type: "match", label: leg?.game || key, count });
-      }
-    });
-    return risks;
-  })();
+  const corrRisks = useMemo(
+    () => computeCorrelationRisks(ticket, { bookedLegs: loadBookedLegs(), otherTickets, crossCheckEnabled }),
+    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled]
+  );
   const hasCorr = corrRisks.length > 0;
+
+  // P-FIX: periodic shake so the badge actually gets noticed — this is the
+  // whole reason it doesn't need its own separate floating button.
+  const [corrShake, setCorrShake] = useState(false);
+  useEffect(() => {
+    if (!hasCorr) return;
+    const shakeOnce = () => { setCorrShake(true); setTimeout(() => setCorrShake(false), 600); };
+    shakeOnce();
+    const id = setInterval(shakeOnce, 8000);
+    return () => clearInterval(id);
+  }, [hasCorr]);
 
 
 
@@ -7022,14 +7112,18 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
           <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
-          {/* P13-FIX: Correlation risk badge — renamed "Risk" for clarity */}
+          {/* P-FIX: Correlation risk badge — now driven by actual booking
+              history (always) and, optionally, reuse across the user's other
+              current tickets (toggle-gated). Shakes periodically so it
+              actually gets noticed instead of sitting quietly. */}
           {hasCorr && (
             <div style={{ position:"relative" }}>
               <button onClick={() => setCorrOpen(o => !o)}
-                title="Tap to see which legs share a match or league"
+                title="Tap to see which legs were already booked or reused"
                 style={{ background:`${C.amber}15`, border:`1px solid ${C.amber}40`,
                          borderRadius:7, padding:"3px 8px", cursor:"pointer",
-                         display:"flex", alignItems:"center", gap:4, fontFamily:C.font }}>
+                         display:"flex", alignItems:"center", gap:4, fontFamily:C.font,
+                         animation: corrShake ? "grm-risk-shake .6s ease" : "none" }}>
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
                   stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
@@ -7040,22 +7134,22 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               {corrOpen && (
                 <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
                               background:C.surface, border:`1px solid ${C.amber}40`,
-                              borderRadius:10, padding:"10px 14px", minWidth:210,
+                              borderRadius:10, padding:"10px 14px", minWidth:230,
                               boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
                   <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
                                 textTransform:"uppercase", marginBottom:6 }}>
                     Leg Risk — what this means
                   </div>
                   <div style={{ fontSize:9, color:C.muted, lineHeight:1.6, marginBottom:8 }}>
-                    Some legs in this ticket share a match or league. When legs are connected, one outcome can cancel another — parlay math assumes they're independent.
+                    One or more legs here are tied to a game you've already got money on. If that game's result swings one way, it affects both tickets — not the same as independent legs.
                   </div>
                   {corrRisks.map((r, i) => (
                     <div key={i} style={{ fontSize:9, color:C.text, marginBottom:5, lineHeight:1.5,
-                      padding:"5px 8px", background:`${C.amber}08`, borderRadius:6,
-                      border:`1px solid ${C.amber}20` }}>
-                      {r.type === "match"
-                        ? <><span style={{ color:C.red, fontWeight:700 }}>Same match</span> — {r.count} legs from <em>{r.label}</em>. Their outcomes are directly linked.</>
-                        : <><span style={{ color:C.amber, fontWeight:700 }}>Same league</span> — {r.count} legs from <em>{r.label}</em>. Results can move together.</>
+                      padding:"5px 8px", background:`${r.type === "booked" ? C.red : C.amber}08`, borderRadius:6,
+                      border:`1px solid ${r.type === "booked" ? C.red : C.amber}20` }}>
+                      {r.type === "booked"
+                        ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked ({r.bookedPick}). This leg: {r.pick}.</>
+                        : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
                       }
                     </div>
                   ))}
@@ -9742,7 +9836,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false }) {
   const [view, setView] = useState("parlay");
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
@@ -9764,6 +9858,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [analysing, setAnalysing] = useState(false); // Gemini analysis state for auto ticket
   const [autoAnalysis, setAutoAnalysis] = useState(null);
   const [savedTickets, setSavedTickets] = useState(() => { try { return loadSavedTickets() || []; } catch { return []; } });
+  // P-FIX: comparison pool for the (opt-in) cross-ticket correlation check —
+  // every ticket currently built plus every saved ticket. computeCorrelationRisks
+  // excludes the ticket being checked from this list by id, so a ticket never
+  // flags itself.
+  const corrOtherTickets = useMemo(() => [...tickets, ...savedTickets], [tickets, savedTickets]);
   const [savedCodes, setSavedCodes] = useState(() => {
     try { return JSON.parse(localStorage.getItem("grm_saved_codes_v15") || "{}"); } catch { return {}; }
   });
@@ -10474,6 +10573,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   onOpenFixture={id => openFixture(id)}
                   onSaveInternal={stake => { saveTicketInternal(draftTicket, stake); setDraftLegs([]); }}
                   savedCode={savedCodes[ticketContentKey(draftTicket)]}
+                  otherTickets={corrOtherTickets}
+                  crossCheckEnabled={crossCheckEnabled}
                 />
               </div>
             )}
@@ -10761,6 +10862,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       onOpenFixture={id => openFixture(id)}
                       onSaveInternal={stake => saveTicketInternal(t, stake)}
                       savedCode={savedCodes[ticketContentKey(t)]}
+                      otherTickets={corrOtherTickets}
+                      crossCheckEnabled={crossCheckEnabled}
                       onEditDraft={legs => {
                         setDraftLegs(legs);
                         setView("parlay");
@@ -12082,6 +12185,15 @@ function GRMProInner() {
   const [mainFocusFixture, setMainFocusFixture] = useState(null); // Full Model page overlay
   const [fullModelReturnTab, setFullModelReturnTab] = useState(null); // where to go back to
   const [drawerOpen, setDrawerOpen]             = useState(false); // right-side filter drawer
+  // P-FIX: cross-ticket correlation checking — opt-in (default off). When on,
+  // a leg reused across two of the user's currently built/saved tickets gets
+  // flagged, same as a previously-booked leg always does.
+  const [corrCrossCheckEnabled, setCorrCrossCheckEnabled] = useState(() => {
+    try { return localStorage.getItem("grm_corr_cross_check_v1") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("grm_corr_cross_check_v1", corrCrossCheckEnabled ? "1" : "0"); } catch {}
+  }, [corrCrossCheckEnabled]);
   const DRAFT_KEY = "grm_draft_legs";
   const [draftLegs, setDraftLegs] = useState(() => {
     try {
@@ -13188,6 +13300,51 @@ function GRMProInner() {
                 </button>
               </div>
 
+              {/* Divider */}
+              <div style={{ height:1,background:C.border }} />
+
+              {/* P-FIX: Tickets — cross-ticket correlation toggle. Off by
+                  default; a previously-booked leg always gets flagged
+                  regardless of this setting. */}
+              <div>
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Tickets</div>
+                <button onClick={() => setCorrCrossCheckEnabled(v => !v)}
+                  style={{
+                    width:"100%", padding:"10px 14px",
+                    borderRadius:10, cursor:"pointer", fontFamily:C.font,
+                    background: corrCrossCheckEnabled ? `${C.amber}12` : "transparent",
+                    border:`1px solid ${corrCrossCheckEnabled ? C.amber : C.border}`,
+                    display:"flex", alignItems:"center", gap:10,
+                    transition:"all .15s",
+                  }}>
+                  <div style={{
+                    width:34, height:20, borderRadius:10, flexShrink:0,
+                    background: corrCrossCheckEnabled ? C.amber : C.faint,
+                    border:`1px solid ${corrCrossCheckEnabled ? C.amber : C.border}`,
+                    position:"relative", transition:"background .2s",
+                  }}>
+                    <div style={{
+                      position:"absolute", top:2,
+                      left: corrCrossCheckEnabled ? 16 : 2,
+                      width:14, height:14, borderRadius:"50%",
+                      background: corrCrossCheckEnabled ? C.accentText : C.muted,
+                      transition:"left .2s",
+                      boxShadow:"0 1px 3px rgba(0,0,0,.2)",
+                    }}/>
+                  </div>
+                  <div style={{ textAlign:"left", flex:1 }}>
+                    <div style={{ fontSize:10, fontWeight:800,
+                      color: corrCrossCheckEnabled ? C.amber : C.text }}>
+                      Cross-Ticket Correlation Check
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
+                      Flag a leg if it's reused across two of your built or saved tickets. A previously booked leg is always flagged either way.
+                    </div>
+                  </div>
+                </button>
+              </div>
+
               {/* Admin controls */}
               {adminMode && (
                 <div>
@@ -13635,39 +13792,6 @@ function GRMProInner() {
       )}
 
       <DraftTicketBanner draftLegs={draftLegs} onOpen={() => setParlayJarvisOpen(true)} onClear={() => setDraftLegs([])} />
-      {/* N3-FIX: persistent correlation warning FAB — shows when draft has correlated legs */}
-      {(() => {
-        if (!draftLegs.length) return null;
-        const leagueCounts = {}, matchCounts = {};
-        draftLegs.forEach(l => {
-          if (l.league) leagueCounts[l.league] = (leagueCounts[l.league]||0)+1;
-          const mk = l.fixtureId || l.game;
-          if (mk) matchCounts[mk] = (matchCounts[mk]||0)+1;
-        });
-        const hasMatch  = Object.values(matchCounts).some(c => c >= 2);
-        const hasLeague = Object.values(leagueCounts).some(c => c >= 2);
-        if (!hasMatch && !hasLeague) return null;
-        return (
-          <div style={{ position:"fixed", bottom:160, left:0, right:0, zIndex:199,
-                        display:"flex", justifyContent:"center", pointerEvents:"none" }}>
-            <div onClick={() => setParlayJarvisOpen(true)}
-              style={{ pointerEvents:"all", background:`${C.amber}18`,
-                       border:`1px solid ${C.amber}50`, borderRadius:12,
-                       padding:"8px 16px", display:"flex", alignItems:"center", gap:8,
-                       cursor:"pointer", boxShadow:"0 4px 16px rgba(0,0,0,.2)",
-                       maxWidth:360, width:"calc(100% - 48px)" }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-              </svg>
-              <span style={{ fontSize:9, fontWeight:800, color:C.amber }}>
-                {hasMatch ? "Same-match legs in draft" : "Same-league legs in draft"} · tap to review
-              </span>
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Duplicate fixture conflict prompt */}
       {draftConflicts.length > 0 && pendingTicket && (
@@ -13766,6 +13890,7 @@ function GRMProInner() {
             setMainView("main");
             setActiveTab("live");
           }}
+          crossCheckEnabled={corrCrossCheckEnabled}
         />
       )}
 
