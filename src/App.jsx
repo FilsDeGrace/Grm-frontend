@@ -11997,19 +11997,20 @@ function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       style={{
-        position: "fixed", right: 6, top, width: 28, height: thumbH,
-        borderRadius: 14, zIndex: 9999,
+        position: "fixed", right: 8, top, width: 16, height: thumbH,
+        borderRadius: 999, zIndex: 9999,
         pointerEvents: "auto",
         background: dragging ? "rgba(120,120,140,0.55)" : "rgba(120,120,140,0.32)",
         border: "1px solid rgba(255,255,255,0.15)",
         boxShadow: dragging ? "0 4px 16px rgba(0,0,0,0.35)" : "0 2px 8px rgba(0,0,0,0.2)",
         display: "flex", alignItems: "center", justifyContent: "center",
         touchAction: "none", cursor: "grab",
-        transition: dragging ? "none" : "background .15s, box-shadow .15s",
+        transition: dragging ? "none" : "background .15s, box-shadow .15s, opacity .15s",
+        opacity: visible ? 1 : 0,
       }}
       aria-label="Drag to scroll"
     >
-      <div style={{ width: 4, height: 18, borderRadius: 2, background: "rgba(255,255,255,0.6)" }} />
+      <div style={{ width: 3, height: 18, borderRadius: 2, background: "rgba(255,255,255,0.6)" }} />
     </div>
   );
 }
@@ -12280,12 +12281,28 @@ function GRMProInner() {
     }
   }, []);
 
-  // Scroll-to-top FAB — appears after user scrolls past the header
+  // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
+  // then fades away again after a brief pause so it does not sit there constantly.
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const scrollTopHideTimer = useRef(null);
   useEffect(() => {
-    const onScroll = () => setShowScrollTop(window.scrollY > 320);
+    const onScroll = () => {
+      if (window.scrollY <= 320) {
+        setShowScrollTop(false);
+        if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+        return;
+      }
+      setShowScrollTop(true);
+      if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+      scrollTopHideTimer.current = setTimeout(() => setShowScrollTop(false), 900);
+    };
+
     window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    onScroll(); // sync once on mount
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+    };
   }, []);
 
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
