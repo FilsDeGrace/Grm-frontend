@@ -11998,7 +11998,8 @@ function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
       onPointerCancel={onPointerUp}
       style={{
         position: "fixed", right: 6, top, width: 28, height: thumbH,
-        borderRadius: 14, zIndex: 199,
+        borderRadius: 14, zIndex: 9999,
+        pointerEvents: "auto",
         background: dragging ? "rgba(120,120,140,0.55)" : "rgba(120,120,140,0.32)",
         border: "1px solid rgba(255,255,255,0.15)",
         boxShadow: dragging ? "0 4px 16px rgba(0,0,0,0.35)" : "0 2px 8px rgba(0,0,0,0.2)",
