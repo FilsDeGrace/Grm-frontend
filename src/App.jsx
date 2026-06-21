@@ -343,6 +343,20 @@ const SA_MARKETS = {
 };
 const SA_MARKET_LABELS = Object.keys(SA_MARKETS).map(id => ({ id, label: id.replace(/^TB:/, "") }));
 
+// Selecting an SA Pattern market should make the normal Pick Market filter
+// follow it, so both selectors stay in sync instead of showing two different
+// markets at once. CUSTOM_FAMILIES uses different (lowercase, unprefixed)
+// ids than SA_MARKETS — this is the explicit mapping between the two schemes.
+const SA_TO_FAMILY_ID = {
+  "TB:Over 1.5": "over15", "TB:Over 2.5": "over25",
+  "TB:Under 3.5": "under35", "TB:Under 4.5": "under45",
+  "TB:BTTS": "bttsyes",
+  "TB:DC1X": "dc1x", "TB:DCX2": "dc2x",
+  "TB:1X2-Home": "homewin", "TB:1X2-Draw": "draw", "TB:1X2-Away": "awaywin",
+  "TB:Home Over 0.5": "homeo05", "TB:Home Over 1.5": "homeo15",
+  "TB:Away Over 0.5": "awayo05", "TB:Away Over 1.5": "awayo15",
+};
+
 function saTheReadToTBMarket(anchor) {
   if (!anchor) return null;
   const mkt = anchor.market, dcV = anchor.dcVariant;
@@ -4508,7 +4522,18 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </button>
             )}
             {SA_MARKET_LABELS.map(mk => (
-              <button key={mk.id} onClick={()=>setSaMarket(saMarket===mk.id?null:mk.id)} className="gb"
+              <button key={mk.id} onClick={()=>{
+                const turningOn = saMarket !== mk.id;
+                setSaMarket(turningOn ? mk.id : null);
+                // Pick Market follows the SA selection — same fixture list,
+                // same market, both selectors agree. Only when SA is being
+                // turned ON for a market we actually have a mapping for;
+                // turning SA off leaves Pick Market wherever it is.
+                if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
+                  setFamily(SA_TO_FAMILY_ID[mk.id]);
+                  setActiveStrategy(null);
+                }
+              }} className="gb"
                 style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
                          background:saMarket===mk.id?C.red:"transparent",
                          color:saMarket===mk.id?"#fff":C.muted,
@@ -11919,6 +11944,75 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   );
 }
 
+// ── DRAGGABLE SCROLL THUMB ───────────────────────────────────────────────────
+// A floating handle on the right edge that tracks scroll position and can be
+// dragged to jump anywhere on the page instantly, instead of only offering a
+// "scroll to top" tap. Uses Pointer Events so the same code handles mouse,
+// touch, and pen — setPointerCapture lets the drag keep tracking the same
+// pointer even once it moves outside the thumb's own bounds.
+function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
+  const [top, setTop] = useState(topInset);
+  const [dragging, setDragging] = useState(false);
+  const thumbH = 44;
+
+  const trackTop = topInset;
+  const trackBottom = () => window.innerHeight - bottomInset;
+  const trackH = () => Math.max(40, trackBottom() - trackTop - thumbH);
+
+  const scrollMax = () => Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+
+  // Keep the thumb's position synced to actual scroll, except while the
+  // user is actively dragging it (dragging drives scroll, not the other way).
+  useEffect(() => {
+    if (dragging) return;
+    const sync = () => {
+      const ratio = window.scrollY / scrollMax();
+      setTop(trackTop + ratio * trackH());
+    };
+    sync();
+    window.addEventListener("scroll", sync, { passive: true });
+    window.addEventListener("resize", sync);
+    return () => { window.removeEventListener("scroll", sync); window.removeEventListener("resize", sync); };
+  }, [dragging, topInset, bottomInset]);
+
+  const moveTo = (clientY) => {
+    const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH / 2) / trackH()));
+    setTop(trackTop + ratio * trackH());
+    window.scrollTo({ top: ratio * scrollMax(), behavior: "auto" });
+  };
+
+  const onPointerDown = (e) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+    moveTo(e.clientY);
+  };
+  const onPointerMove = (e) => { if (dragging) moveTo(e.clientY); };
+  const onPointerUp = (e) => { setDragging(false); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {} };
+
+  if (!visible) return null;
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      style={{
+        position: "fixed", right: 6, top, width: 28, height: thumbH,
+        borderRadius: 14, zIndex: 199,
+        background: dragging ? "rgba(120,120,140,0.55)" : "rgba(120,120,140,0.32)",
+        border: "1px solid rgba(255,255,255,0.15)",
+        boxShadow: dragging ? "0 4px 16px rgba(0,0,0,0.35)" : "0 2px 8px rgba(0,0,0,0.2)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        touchAction: "none", cursor: "grab",
+        transition: dragging ? "none" : "background .15s, box-shadow .15s",
+      }}
+      aria-label="Drag to scroll"
+    >
+      <div style={{ width: 4, height: 18, borderRadius: 2, background: "rgba(255,255,255,0.6)" }} />
+    </div>
+  );
+}
+
 function GRMProInner() {
 
   // ── THEME ─────────────────────────────────────────────────────────────────
@@ -13936,31 +14030,11 @@ function GRMProInner() {
         }} />
       )}
 
-      {/* ── SCROLL TO TOP FAB ─────────────────────────────────────────────── */}
-      {showScrollTop && !parlayJarvisOpen && !mainFocusFixture && (
-        <button
-          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-          style={{
-            position:"fixed",
-            right:16,
-            bottom: isDesktop ? 24 : `calc(90px + env(safe-area-inset-bottom))`,
-            zIndex:198,
-            width:40, height:40,
-            borderRadius:"50%",
-            background:C.surface,
-            border:`1px solid ${C.border}`,
-            color:C.muted,
-            boxShadow:"0 2px 12px rgba(0,0,0,0.18)",
-            cursor:"pointer",
-            display:"flex", alignItems:"center", justifyContent:"center",
-            fontSize:16, lineHeight:1,
-            transition:"opacity .2s, transform .2s",
-            WebkitTapHighlightColor:"transparent",
-          }}
-          aria-label="Scroll to top">
-          ↑
-        </button>
-      )}
+      {/* ── DRAGGABLE SCROLL THUMB ────────────────────────────────────────── */}
+      <ScrollThumb
+        visible={showScrollTop && !parlayJarvisOpen && !mainFocusFixture}
+        bottomInset={isDesktop ? 40 : 106}
+      />
 
       {/* ── HALO BOTTOM NAV ───────────────────────────────────────────────── */}
       <BottomNav
