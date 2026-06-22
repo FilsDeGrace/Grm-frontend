@@ -21,6 +21,11 @@ const BUILT_TICKETS_KEY  = (date) => `grm_built_tickets_${date}`;
 // actionable message instead of showing the browser's literal "Failed to fetch" (or
 // similar low-level strings) to the user. Used anywhere a fetch() call can throw —
 // the main FETCH flow, snapshot loading, booking, uploads, etc.
+//
+// Also handles raw bookmaker API error text that leaks through as non-JSON responses
+// (e.g. SportyBet / Duel returning plain-text "Internal Server Error" or HTML pages).
+// sanitizeBookmakerError() is the booking-specific path — it strips HTML tags, trims
+// to a safe length, and maps known bookmaker phrases to actionable user messages.
 function friendlyError(e, context = "Server") {
   const msg = (e && e.message) || String(e || "");
   if (/Failed to fetch|NetworkError|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|net::ERR|TypeError: Load failed/i.test(msg)) {
@@ -29,10 +34,53 @@ function friendlyError(e, context = "Server") {
   if (/timed? ?out|ETIMEDOUT|AbortError/i.test(msg)) {
     return "That took too long to respond. Try again in a moment.";
   }
-  if (/50\d\b/.test(msg)) {
+  if (/\b50[0-9]\b/.test(msg)) {
     return `${context} is having issues right now — try again shortly.`;
   }
+  if (/\b401\b|unauthori[sz]ed/i.test(msg)) {
+    return `${context} rejected the request — session may have expired. Refresh and try again.`;
+  }
+  if (/\b403\b|forbidden/i.test(msg)) {
+    return `${context} denied access — the bookmaker may have blocked this request temporarily.`;
+  }
+  if (/\b429\b|too many requests|rate.?limit/i.test(msg)) {
+    return "Too many requests — wait a moment and try again.";
+  }
   return msg || `${context} error — please try again.`;
+}
+
+// Sanitize raw bookmaker error text into a short, user-safe message.
+// Called when res.json() fails (backend returned plain text / HTML) OR when
+// data.error contains a raw bookmaker API message the backend forwarded as-is.
+// Strips HTML tags, collapses whitespace, caps length, then maps known phrases.
+function sanitizeBookmakerError(raw, bookmakerLabel = "Bookmaker") {
+  if (!raw) return `${bookmakerLabel} returned an error — please try again.`;
+  // Strip HTML tags (backend may forward HTML error pages)
+  const stripped = String(raw).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const low = stripped.toLowerCase();
+  // Map known bookmaker/server phrases to friendly messages
+  if (/internal server error|500/i.test(low))
+    return `${bookmakerLabel} is having issues right now — try again in a moment.`;
+  if (/not found|404/i.test(low))
+    return `${bookmakerLabel} couldn't find this fixture — it may not be listed yet.`;
+  if (/unauthori[sz]ed|401/i.test(low))
+    return `${bookmakerLabel} rejected the session — refresh and try again.`;
+  if (/forbidden|403/i.test(low))
+    return `${bookmakerLabel} denied this request — try again shortly.`;
+  if (/timeout|timed out|etimedout/i.test(low))
+    return `${bookmakerLabel} took too long to respond — try again.`;
+  if (/rate.?limit|too many/i.test(low))
+    return "Too many requests — wait a moment and try again.";
+  if (/invalid.?bet|invalid.?selection|market.?not.?avail/i.test(low))
+    return "One or more selections aren't available on this bookmaker right now.";
+  if (/match.?not.?found|event.?not.?found|fixture.?not.?found/i.test(low))
+    return `Match not found on ${bookmakerLabel} — it may not be listed yet.`;
+  // Unknown raw text — truncate to 120 chars so nothing scary leaks to UI
+  const safe = stripped.length > 120 ? stripped.slice(0, 120) + "…" : stripped;
+  // If it looks like it still has HTML remnants or non-human text, replace entirely
+  if (/[<>{};]|DOCTYPE|html|script/i.test(safe))
+    return `${bookmakerLabel} returned an unexpected response — please try again.`;
+  return safe || `${bookmakerLabel} returned an error — please try again.`;
 }
 
 // C7-FIX: Prune stale Jarvis cache entries on startup.
@@ -1375,8 +1423,6 @@ const mktStyle = m => {
 //   • Restrained glow — accent appears in ≤2 places per view
 function injectStyles(T) {
   if (typeof document === "undefined") return;
-  const old = document.getElementById("grm-styles");
-  if (old) old.remove();
 
   // ── Light/dark detection ──────────────────────────────────────────
   // FIX: Old "#f..." prefix missed Claude (#eeeade), Apple (#e8e8ec). Use WCAG luminance.
@@ -1453,8 +1499,14 @@ function injectStyles(T) {
   // ── Input background — visible on both light and dark ────────────
   const inputBg = T.inputBg || (isLight ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.04)");
 
-  const s = document.createElement("style");
-  s.id = "grm-styles";
+  // S3-FIX: reuse the existing <style> tag rather than removing it and inserting
+  // a new one. The old remove()+createElement+appendChild sequence left a single
+  // frame with no grm-styles present, causing a visible FOUC on theme switches
+  // (especially noticeable on low-end Android). Reusing the element and updating
+  // textContent is atomic from the browser's perspective — no unstyled frame.
+  const old = document.getElementById("grm-styles");
+  const s = old || document.createElement("style");
+  if (!old) { s.id = "grm-styles"; document.head.appendChild(s); }
   s.textContent = `
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700;800&display=swap');
 
@@ -3156,15 +3208,20 @@ function BookNowButton({ fixture }) {
         headers: { "Content-Type":"application/json" },
         body: JSON.stringify({ legs }),
       });
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || "Booking failed");
+      // S6-FIX: backend (or SportyBet API) may return plain text / HTML on errors
+      // instead of JSON. res.json() would throw a SyntaxError exposing raw junk to the UI.
+      // Always read as text first, then parse safely.
+      const rawText = await res.text();
+      let data;
+      try { data = JSON.parse(rawText); }
+      catch { throw new Error(sanitizeBookmakerError(rawText, "SportyBet")); }
+      if (!res.ok || data.error) throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, "SportyBet"));
       setResult(data);
     } catch(e) {
-      // Translate raw network errors into user-friendly messages
       const msg = e.message || "";
-      if (msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("net::ERR")) {
+      if (/ERR_NAME_NOT_RESOLVED|Failed to fetch|NetworkError|net::ERR/i.test(msg)) {
         setError("Can't reach SportyBet — check your connection and try again.");
-      } else if (msg.includes("429") || msg.includes("already in progress")) {
+      } else if (/429|already in progress/i.test(msg)) {
         setError("A booking is already in progress. Please wait a moment.");
       } else {
         setError(msg || "Booking failed — please try again.");
@@ -5576,8 +5633,15 @@ function TicketBookNowButton({ legs }) {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ legs: sl }),
       });
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || "Booking failed");
+      // S6-FIX: bookmaker APIs (SportyBet, Duel, LL) may return plain text or HTML on
+      // errors rather than JSON. Always read as text first, parse safely — never let
+      // a SyntaxError or raw HTML leak to the UI.
+      const bmLabel = selectedBookie?.label || "Bookmaker";
+      const rawText = await res.text();
+      let data;
+      try { data = JSON.parse(rawText); }
+      catch { throw new Error(sanitizeBookmakerError(rawText, bmLabel)); }
+      if (!res.ok || data.error) throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, bmLabel));
       setResult({ ...data, bookieId: bookie });
       // P-FIX: this is the one and only place correlation tracking gets fed —
       // a real, successful bookmaker booking. Building or saving a ticket
@@ -5586,7 +5650,7 @@ function TicketBookNowButton({ legs }) {
     } catch(e) {
       const msg = e.message || "";
       setError(
-        msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("Failed to fetch") || msg.includes("net::ERR")
+        /ERR_NAME_NOT_RESOLVED|Failed to fetch|net::ERR/i.test(msg)
           ? "Can't reach bookmaker — check your connection and try again."
           : msg || "Booking failed — please try again."
       );
@@ -11950,6 +12014,14 @@ function JarvisFAB({ C, isDesktop, onClick }) {
 // "scroll to top" tap. Uses Pointer Events so the same code handles mouse,
 // touch, and pen — setPointerCapture lets the drag keep tracking the same
 // pointer even once it moves outside the thumb's own bounds.
+//
+// S2-FIX (Vercel): PlayCode previews the app in an iframe where <body> naturally
+// overflows and window.scrollY works. Vercel's production build may produce a
+// layout where the root div is the scroll container instead of <body>, making
+// window.scrollY always 0 and window.scrollTo() a no-op. Fix: use cross-browser
+// helpers (getScrollY / setScrollY / getScrollMax) that check
+// document.documentElement.scrollTop and document.body.scrollTop as fallbacks,
+// and also listen on `document` in addition to `window` for scroll events.
 function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
   const [top, setTop] = useState(topInset);
   const [dragging, setDragging] = useState(false);
@@ -11959,26 +12031,56 @@ function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
   const trackBottom = () => window.innerHeight - bottomInset;
   const trackH = () => Math.max(40, trackBottom() - trackTop - thumbH);
 
-  const scrollMax = () => Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  // Cross-browser scroll helpers — handle cases where body is not the scroll
+  // container (Vite/Vercel production builds, iframe embeddings, etc.)
+  const getScrollY = () =>
+    window.scrollY ||
+    document.documentElement.scrollTop ||
+    document.body.scrollTop ||
+    0;
+
+  const getScrollMax = () => {
+    const docH = Math.max(
+      document.documentElement.scrollHeight,
+      document.body.scrollHeight,
+      document.documentElement.offsetHeight,
+    );
+    return Math.max(1, docH - window.innerHeight);
+  };
+
+  const setScrollY = (px) => {
+    // Try window.scrollTo first (standard path), then fall back to direct
+    // scrollTop assignment (works when the root <html> element is the scroller).
+    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+    document.documentElement.scrollTop = px;
+    document.body.scrollTop = px; // iOS Safari legacy fallback
+  };
 
   // Keep the thumb's position synced to actual scroll, except while the
   // user is actively dragging it (dragging drives scroll, not the other way).
   useEffect(() => {
     if (dragging) return;
     const sync = () => {
-      const ratio = window.scrollY / scrollMax();
+      const ratio = getScrollY() / getScrollMax();
       setTop(trackTop + ratio * trackH());
     };
     sync();
+    // Listen on both window AND document — production builds may fire scroll
+    // events on document when the root element (not body) is the scroller.
     window.addEventListener("scroll", sync, { passive: true });
+    document.addEventListener("scroll", sync, { passive: true });
     window.addEventListener("resize", sync);
-    return () => { window.removeEventListener("scroll", sync); window.removeEventListener("resize", sync); };
-  }, [dragging, topInset, bottomInset]);
+    return () => {
+      window.removeEventListener("scroll", sync);
+      document.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+    };
+  }, [dragging, topInset, bottomInset]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const moveTo = (clientY) => {
     const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH / 2) / trackH()));
     setTop(trackTop + ratio * trackH());
-    window.scrollTo({ top: ratio * scrollMax(), behavior: "auto" });
+    setScrollY(ratio * getScrollMax());
   };
 
   const onPointerDown = (e) => {
@@ -12172,7 +12274,9 @@ function GRMProInner() {
   // the user returns to where they were, not to the top of the page.
   useEffect(() => {
     if (parlayJarvisOpen) {
-      const scrollY = window.scrollY;
+      // S2-FIX: use cross-browser scroll position — window.scrollY is 0 on some
+      // Vercel builds where the root element (not body) is the scroll container.
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12183,6 +12287,7 @@ function GRMProInner() {
         document.body.style.top       = "";
         document.body.style.width     = "";
         window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
   }, [parlayJarvisOpen]);
@@ -12195,7 +12300,8 @@ function GRMProInner() {
   // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
   useEffect(() => {
     if (jarvisOpen) {
-      const scrollY = window.scrollY;
+      // S2-FIX: cross-browser scroll capture (see parlayJarvisOpen effect above)
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12206,6 +12312,7 @@ function GRMProInner() {
         document.body.style.top       = "";
         document.body.style.width     = "";
         window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
   }, [jarvisOpen]);
@@ -12283,11 +12390,16 @@ function GRMProInner() {
 
   // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
   // then fades away again after a brief pause so it does not sit there constantly.
+  // S2-FIX: also listen on `document` for scroll events — on Vercel production builds
+  // the scroll container may be <html>/<body> rather than window, so window "scroll"
+  // never fires and showScrollTop stays false permanently (thumb never appears).
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
+    const getScrollY = () =>
+      window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
     const onScroll = () => {
-      if (window.scrollY <= 320) {
+      if (getScrollY() <= 320) {
         setShowScrollTop(false);
         if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
         return;
@@ -12298,9 +12410,11 @@ function GRMProInner() {
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("scroll", onScroll, { passive: true });
     onScroll(); // sync once on mount
     return () => {
       window.removeEventListener("scroll", onScroll);
+      document.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
   }, []);
