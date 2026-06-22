@@ -4928,8 +4928,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:mCols,gap:6,padding:"8px 10px",
                                      background:isFT?`${C.surface}60`:isSelected?"rgba(99,102,241,0.1)":C.surface,
                                      borderRadius:8,border:`1px solid ${isSelected?C.edge:C.border}`,
-                                     cursor:isFT?"default":"pointer",opacity:isFT?.5:1,transition:"all .15s",alignItems:"center" }}
-              onClick={() => isFT ? null : onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}>
+                                     cursor:"pointer",opacity:isFT?.5:1,transition:"all .15s",alignItems:"center" }}
+              onClick={() => isFT ? onFullModel?.(f) : onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}>
               <div onClick={e=>{e.stopPropagation(); if(!isFT) toggleSelect(f.id);}}>
                 <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isFT?C.muted:isSelected?C.edge:C.text}`,opacity:isFT?.3:isSelected?1:.3,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
                   {isSelected && <span style={{ fontSize:9,color:C.accentText,fontWeight:900 }}>✓</span>}
@@ -4987,10 +4987,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:cols,gap:8,padding:"8px 14px",
                                      background:isFT?`${C.surface}60`:isSelected?"rgba(99,102,241,0.1)":C.surface,
                                      borderRadius:8,border:`1px solid ${isSelected?C.edge:C.border}`,
-                                     cursor:isFT?"default":"pointer",opacity:isFT?.5:1,transition:"all .15s" }}
-              onClick={() => isFT ? null : onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}
-              onMouseEnter={e=>{ if(!isSelected&&!isFT){ e.currentTarget.style.borderColor=C.borderHi; e.currentTarget.style.background=C.surfaceHi; }}}
-              onMouseLeave={e=>{ if(!isSelected&&!isFT){ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.background=C.surface; }}}>
+                                     cursor:"pointer",opacity:isFT?.5:1,transition:"all .15s" }}
+              onClick={() => isFT ? onFullModel?.(f) : onOpenFixture ? onOpenFixture(f.id) : setSelected(f)}
+              onMouseEnter={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.borderHi; e.currentTarget.style.background=isFT?`${C.surface}80`:C.surfaceHi; }}}
+              onMouseLeave={e=>{ if(!isSelected){ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.background=isFT?`${C.surface}60`:C.surface; }}}>
               <div style={{ alignSelf:"center" }} onClick={e=>{e.stopPropagation(); if(!isFT) toggleSelect(f.id);}}>
                 <div style={{ width:16,height:16,borderRadius:4,border:`1.5px solid ${isFT?C.muted:isSelected?C.edge:C.text}`,opacity:isFT?.3:isSelected?1:.3,background:isSelected?C.edge:"transparent",display:"flex",alignItems:"center",justifyContent:"center" }}>
                   {isSelected && <span style={{ fontSize:9,color:C.accentText,fontWeight:900 }}>✓</span>}
