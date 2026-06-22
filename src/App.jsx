@@ -4288,26 +4288,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     out.sort((a, b) => {
-      // Live-first when both/neither status filter active
+      // P-FIX: same live-first sort as `rows` when both/neither status filter is active.
       if (bothOrNeither) {
         const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
         const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
         if (aLive !== bLive) return aLive - bLive;
       }
-      // Flagged-only (avoid pattern, no positive) always sinks to the bottom
-      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1;
-      if (a._saFlagged) {
-        // Within flagged group: worst avoid lift (most negative) first as a warning
-        return (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0);
-      }
-      // Within validated group: composite score blending model prob (60% weight)
-      // and SA lift (40% weight). Neither alone dominates:
-      // - 90% prob + 1.2pp lift  → 54.0 + 4.8  = 58.8
-      // - 72% prob + 3.5pp lift  → 43.2 + 14.0 = 57.2
-      // - 65% prob + 5.0pp lift  → 39.0 + 20.0 = 59.0
-      const scoreA = (a.pick.prob||0) * 0.6 + (a._saPositive[0]?.lift||0) * 4;
-      const scoreB = (b.pick.prob||0) * 0.6 + (b._saPositive[0]?.lift||0) * 4;
-      return scoreB - scoreA;
+      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1; // flagged-only rows sink to the bottom
+      return a._saFlagged
+        ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)   // within flagged group: worst lift first
+        : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0); // within validated group: best lift first
     });
     return out;
   }, [saMarket, saPatterns, fixtures, search, statFilters, isPastDate]);
@@ -12040,72 +12030,79 @@ function JarvisFAB({ C, isDesktop, onClick }) {
 // helpers (getScrollY / setScrollY / getScrollMax) that check
 // document.documentElement.scrollTop and document.body.scrollTop as fallbacks,
 // and also listen on `document` in addition to `window` for scroll events.
-// ScrollThumb — draggable scroll indicator.
-// Uses a runtime probe to find the actual scroll container because Vercel's
-// Vite production build can make document.body OR document.documentElement
-// the scroller — and window.scrollY is often 0 regardless.
-function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
+// scrollEl: React ref pointing to the actual scroll container.
+// Vercel's production build may make the root div the scroller instead of
+// <body>, so window.scrollY is always 0. Passing the ref lets us read/write
+// scroll position directly on whichever element is actually scrolling.
+function ScrollThumb({ visible, topInset = 76, bottomInset = 96, scrollEl }) {
   const [top, setTop] = useState(topInset);
   const [dragging, setDragging] = useState(false);
   const thumbH = 44;
-  const probeRef = useRef(null); // cached scroll container
 
   const trackTop = topInset;
   const trackBottom = () => window.innerHeight - bottomInset;
   const trackH = () => Math.max(40, trackBottom() - trackTop - thumbH);
 
-  const getEl = useCallback(() => {
-    if (probeRef.current) return probeRef.current;
-    const de = document.documentElement;
-    const bd = document.body;
-    if (de.scrollTop > 0) { probeRef.current = de; return de; }
-    if (bd.scrollTop > 0) { probeRef.current = bd; return bd; }
-    if (window.scrollY > 0) { probeRef.current = de; return de; }
-    if (de.scrollHeight > de.clientHeight + 1) { probeRef.current = de; return de; }
-    if (bd.scrollHeight > bd.clientHeight + 1) { probeRef.current = bd; return bd; }
-    probeRef.current = de;
-    return de;
-  }, []);
+  // Resolve the actual scroll container — prefer the passed ref, then fall
+  // back through the standard globals. This is the definitive fix for Vercel
+  // where window.scrollY / document.documentElement.scrollTop are both 0.
+  const getEl = () => scrollEl?.current || document.documentElement || document.body;
 
-  const getScrollY = useCallback(() => {
+  const getScrollY = () => {
     const el = getEl();
-    return el.scrollTop || window.scrollY || 0;
-  }, [getEl]);
+    // documentElement / body use scrollTop; window uses scrollY
+    if (el === document.documentElement || el === document.body) return el.scrollTop || window.scrollY || 0;
+    return el.scrollTop || 0;
+  };
 
-  const getScrollMax = useCallback(() => {
+  const getScrollMax = () => {
     const el = getEl();
-    const docH = Math.max(el.scrollHeight, document.documentElement.scrollHeight, document.body.scrollHeight);
-    return Math.max(1, docH - window.innerHeight);
-  }, [getEl]);
+    if (el === document.documentElement || el === document.body) {
+      const docH = Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+        document.documentElement.offsetHeight,
+      );
+      return Math.max(1, docH - window.innerHeight);
+    }
+    return Math.max(1, el.scrollHeight - el.clientHeight);
+  };
 
-  const setScrollY = useCallback((px) => {
+  const setScrollY = (px) => {
     const el = getEl();
-    el.scrollTop = px;
-    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
-  }, [getEl]);
+    if (el === document.documentElement || el === document.body) {
+      try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+      document.documentElement.scrollTop = px;
+      document.body.scrollTop = px;
+    } else {
+      el.scrollTop = px;
+    }
+  };
 
+  // Keep the thumb's position synced to actual scroll, except while the
+  // user is actively dragging it (dragging drives scroll, not the other way).
   useEffect(() => {
     if (dragging) return;
-    // Reset probe when visibility changes so we re-detect after content loads
-    probeRef.current = null;
     const sync = () => {
       const ratio = getScrollY() / getScrollMax();
       setTop(trackTop + ratio * trackH());
     };
     sync();
+    // Listen on window, document, AND the explicit scroll container ref.
+    // Vercel production builds may make the root div the scroller — in that
+    // case window/document never fire scroll events but the element does.
+    const el = scrollEl?.current;
     window.addEventListener("scroll", sync, { passive: true });
     document.addEventListener("scroll", sync, { passive: true });
-    document.documentElement.addEventListener("scroll", sync, { passive: true });
-    document.body.addEventListener("scroll", sync, { passive: true });
+    if (el) el.addEventListener("scroll", sync, { passive: true });
     window.addEventListener("resize", sync);
     return () => {
       window.removeEventListener("scroll", sync);
       document.removeEventListener("scroll", sync);
-      document.documentElement.removeEventListener("scroll", sync);
-      document.body.removeEventListener("scroll", sync);
+      if (el) el.removeEventListener("scroll", sync);
       window.removeEventListener("resize", sync);
     };
-  }, [dragging, topInset, bottomInset, getScrollY, getScrollMax]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dragging, topInset, bottomInset, scrollEl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const moveTo = (clientY) => {
     const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH / 2) / trackH()));
@@ -12304,7 +12301,9 @@ function GRMProInner() {
   // the user returns to where they were, not to the top of the page.
   useEffect(() => {
     if (parlayJarvisOpen) {
-      const scrollY = getScrollY();
+      // S2-FIX: use cross-browser scroll position — window.scrollY is 0 on some
+      // Vercel builds where the root element (not body) is the scroll container.
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12314,10 +12313,11 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        setScrollY(scrollY);
+        window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
-  }, [parlayJarvisOpen, getScrollY, setScrollY]);
+  }, [parlayJarvisOpen]);
 
   // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
@@ -12327,7 +12327,8 @@ function GRMProInner() {
   // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
   useEffect(() => {
     if (jarvisOpen) {
-      const scrollY = getScrollY();
+      // S2-FIX: cross-browser scroll capture (see parlayJarvisOpen effect above)
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12337,10 +12338,11 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        setScrollY(scrollY);
+        window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
-  }, [jarvisOpen, getScrollY, setScrollY]);
+  }, [jarvisOpen]);
 
   // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
   const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
@@ -12405,7 +12407,7 @@ function GRMProInner() {
     }
     if (fixture) {
       // Open Full Model for a specific fixture — keep Jarvis open so user can keep chatting
-      try { sessionStorage.setItem("grm_scroll", String(document.documentElement.scrollTop || document.body.scrollTop || window.scrollY || 0)); } catch {}
+      try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {}
       setFullModelReturnTab("live");
       setMainFocusFixture(fixture);
       setJarvisOpen(false);
@@ -12413,48 +12415,27 @@ function GRMProInner() {
     }
   }, []);
 
-  // SCROLL-FIX: Probe which element is actually scrolling at runtime.
-  // Vercel's Vite production build can make document.body OR document.documentElement
-  // the scroller depending on CSS. window.scrollY is often 0 on both.
-  // We probe once after mount (when content has rendered and page has height)
-  // then cache the result for the session.
-  const scrollElRef = useRef(null); // cached scroll container element
-  const getScrollEl = useCallback(() => {
-    if (scrollElRef.current) return scrollElRef.current;
-    // Probe: whichever has scrollTop > 0 after a tiny scroll must be the scroller.
-    // If the page hasn't scrolled yet, pick the one with scrollHeight > clientHeight.
-    const de = document.documentElement;
-    const bd = document.body;
-    if (de.scrollTop > 0) { scrollElRef.current = de; return de; }
-    if (bd.scrollTop > 0) { scrollElRef.current = bd; return bd; }
-    if (window.scrollY > 0) { scrollElRef.current = de; return de; }
-    // Page hasn't scrolled yet — pick whichever is taller than viewport
-    if (de.scrollHeight > de.clientHeight + 1) { scrollElRef.current = de; return de; }
-    if (bd.scrollHeight > bd.clientHeight + 1) { scrollElRef.current = bd; return bd; }
-    // Last resort — documentElement
-    scrollElRef.current = de;
-    return de;
-  }, []);
+  // appScrollRef: points to the root app div — the definitive scroll container.
+  // On Vercel production builds the root <div> (not <body> or <html>) is the
+  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
+  // Using a ref on the actual element is the only reliable cross-env fix.
+  const appScrollRef = useRef(null);
 
-  const getScrollY = useCallback(() => {
-    const el = getScrollEl();
-    return el.scrollTop || window.scrollY || 0;
-  }, [getScrollEl]);
-
-  const setScrollY = useCallback((px) => {
-    const el = getScrollEl();
-    el.scrollTop = px;
-    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
-  }, [getScrollEl]);
-
+  // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
+  // then fades away again after a brief pause so it does not sit there constantly.
+  // S2-FIX: also listen on appScrollRef (the root div) — on Vercel production builds
+  // the scroll container is the root div, not window/document, so window "scroll"
+  // never fires and showScrollTop stays false permanently (thumb never appears).
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
-    // Reset probe on mount so we re-detect after React renders full content
-    scrollElRef.current = null;
+    const getScrollY = () => {
+      const el = appScrollRef.current;
+      if (el) return el.scrollTop || 0;
+      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    };
     const onScroll = () => {
-      const y = getScrollY();
-      if (y <= 320) {
+      if (getScrollY() <= 320) {
         setShowScrollTop(false);
         if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
         return;
@@ -12463,19 +12444,19 @@ function GRMProInner() {
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
       scrollTopHideTimer.current = setTimeout(() => setShowScrollTop(false), 900);
     };
+
+    const el = appScrollRef.current;
     window.addEventListener("scroll", onScroll, { passive: true });
     document.addEventListener("scroll", onScroll, { passive: true });
-    document.documentElement.addEventListener("scroll", onScroll, { passive: true });
-    document.body.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
+    if (el) el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll(); // sync once on mount
     return () => {
       window.removeEventListener("scroll", onScroll);
       document.removeEventListener("scroll", onScroll);
-      document.documentElement.removeEventListener("scroll", onScroll);
-      document.body.removeEventListener("scroll", onScroll);
+      if (el) el.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
-  }, [getScrollY]);
+  }, []);
 
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
   const [mainView, setMainView] = useState("main");
@@ -12564,8 +12545,8 @@ function GRMProInner() {
   // C1-FIX: save scroll position before navigating to Full Model so Back returns
   // the user to where they were. Previously only the grid/CustomListView paths
   // saved grm_scroll — these two callbacks were missing it entirely.
-  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, [getScrollY]);
-  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, [getScrollY]);
+  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, []);
+  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
 
   // Add a pick from fixture card to draft legs
   const addLegToDraft = useCallback((fixture, pick) => {
@@ -13329,7 +13310,7 @@ function GRMProInner() {
   const isDesktop = useIsDesktop();
 
   return (
-    <div style={{ minHeight:"100vh", background:C.bg, fontFamily:C.font }}>
+    <div ref={appScrollRef} style={{ minHeight:"100vh", background:C.bg, fontFamily:C.font }}>
 
       {/* ── DESKTOP SIDEBAR ─────────────────────────────────────────────── */}
       <SidebarNav
@@ -13960,7 +13941,7 @@ function GRMProInner() {
                     fixtures={filtered} search={search}
                     draftLegs={draftLegs} onAddToParlay={addLegToDraft}
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
-                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
                     adminMode={adminMode} adminToken={adminToken}
                     isPastDate={date && date !== todayStr()}
@@ -14011,7 +13992,7 @@ function GRMProInner() {
                     {filtered.map(f => (
                       <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
                         <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
-                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                           backtestSummary={historicalRates}
                           adminToken={adminToken}
                         />
@@ -14167,7 +14148,7 @@ function GRMProInner() {
               setActiveTab("code");
             }
             setFullModelReturnTab(null);
-            try { setScrollY(parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
+            try { window.scrollTo(0, parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
           }}
           draftLegs={draftLegs}
           onAddToParlay={addLegToDraft}
@@ -14226,6 +14207,7 @@ function GRMProInner() {
       <ScrollThumb
         visible={showScrollTop && !parlayJarvisOpen && !mainFocusFixture}
         bottomInset={isDesktop ? 40 : 106}
+        scrollEl={appScrollRef}
       />
 
       {/* ── HALO BOTTOM NAV ───────────────────────────────────────────────── */}
