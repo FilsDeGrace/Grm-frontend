@@ -889,7 +889,10 @@ function getEmpiricalRate(market, conf, historicalRates) {
 function isLeagueVolatile(league) { return league in CALIBRATION.volatileLeagues; }
 function getVolatileBoost(league) { return CALIBRATION.volatileLeagues[league]?.boostRequired ?? 0; }
 
-function evaluatePick(f, historicalRates) {
+// isPastDate: when true (viewing a historical date), finished games are allowed
+// into the engine pool so backtesting works. Live/in-play and cancelled states
+// are always blocked regardless of date — they have no bookable outcome.
+function evaluatePick(f, historicalRates, isPastDate = false) {
   const anchor = f.theRead?.anchor;
   if (!anchor || f.theRead?.isFallback) return null;
   const { market, prob:conf, odds:rawOdds, pick } = anchor;
@@ -899,15 +902,18 @@ function evaluatePick(f, historicalRates) {
   // Left as a defensive guard in case a future code path sets anchor.role for team-scoped picks.
   if (anchor.role) return null;
   const state = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
-  const BLOCKED_STATES = new Set([
-    // finished
+  // FINISHED_STATES: allowed on past dates (needed for backtesting / pool display).
+  // Blocked on today — can't book a finished game.
+  const FINISHED_STATES = new Set([
     "finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties",
-    // live / in-play — can't book these
+  ]);
+  // ALWAYS_BLOCKED: live in-play and cancelled states — never valid for pool regardless of date.
+  const ALWAYS_BLOCKED = new Set([
     "1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live",
-    // cancelled / disrupted
     "postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted",
   ]);
-  if (BLOCKED_STATES.has(state)) return null;
+  if (ALWAYS_BLOCKED.has(state)) return null;
+  if (!isPastDate && FINISHED_STATES.has(state)) return null;
   if (!conf || conf <= 0) return null;
   if (market === "BTTS" && conf < CALIBRATION.bttsMinConf) return null;
   if (market === "Under 3.5" || market === "Under 3.5 Goals") {
@@ -976,10 +982,10 @@ function shuffle(arr) {
   return a;
 }
 
-function buildUniversalPool(fixtures, historicalRates) {
+function buildUniversalPool(fixtures, historicalRates, isPastDate = false) {
   const pool = [];
   for (const f of fixtures) {
-    const entry = evaluatePick(f, historicalRates);
+    const entry = evaluatePick(f, historicalRates, isPastDate);
     if (entry) {
       // Write empiricalRate and sampleSize back onto the anchor so TheReadSection
       // can display them. evaluatePick computes these but never attaches them to
@@ -3828,7 +3834,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
 // ── CUSTOM LIST VIEW ──────────────────────────────────────────────────────
 // getCustomPick, xgHomeDominant, xgAwayDominant → engine.js
 
-function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "" }) {
+function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "", isPastDate = false }) {
   const isMobile = useIsMobile();
   const SS_KEY = "grm_clv_state_v1";
   const loadSS = (k, fallback) => { try { const s = sessionStorage.getItem(SS_KEY); if (!s) return fallback; const d = JSON.parse(s); return d[k] !== undefined ? d[k] : fallback; } catch { return fallback; } };
@@ -4202,9 +4208,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
     // P23-FIX: live + upcoming are mutually exclusive if applied as hard filters.
     // When both (or neither) are active, skip the status filter and sort live first instead.
+    // PAST-DATE-FIX: on past dates ALL games are finished — "Upcoming" and "Live" filters
+    // from a previous session would wipe the list. Skip status filters entirely for past dates.
     const hasLiveFilter     = statFilters.includes("live");
     const hasScheduledFilter = statFilters.includes("scheduled");
-    const bothOrNeither     = (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const bothOrNeither     = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
     const statusFilters     = new Set(["live", "scheduled"]);
 
     return fixtures
@@ -4237,7 +4245,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         return b.pick.prob - a.pick.prob;
       });
-  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets]);
+  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate]);
 
   // SA Pattern mode — separate list, only built when an admin has a market selected.
   // Reuses the same { f, pick } shape as `rows` so the existing row JSX renders it
@@ -4255,7 +4263,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     // `rows` list above now applies here too.
     const hasLiveFilter      = statFilters.includes("live");
     const hasScheduledFilter = statFilters.includes("scheduled");
-    const bothOrNeither      = (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const bothOrNeither      = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
     const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
     const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
 
@@ -4292,7 +4300,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0); // within validated group: best lift first
     });
     return out;
-  }, [saMarket, saPatterns, fixtures, search, statFilters]);
+  }, [saMarket, saPatterns, fixtures, search, statFilters, isPastDate]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -12022,7 +12030,11 @@ function JarvisFAB({ C, isDesktop, onClick }) {
 // helpers (getScrollY / setScrollY / getScrollMax) that check
 // document.documentElement.scrollTop and document.body.scrollTop as fallbacks,
 // and also listen on `document` in addition to `window` for scroll events.
-function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
+// scrollEl: React ref pointing to the actual scroll container.
+// Vercel's production build may make the root div the scroller instead of
+// <body>, so window.scrollY is always 0. Passing the ref lets us read/write
+// scroll position directly on whichever element is actually scrolling.
+function ScrollThumb({ visible, topInset = 76, bottomInset = 96, scrollEl }) {
   const [top, setTop] = useState(topInset);
   const [dragging, setDragging] = useState(false);
   const thumbH = 44;
@@ -12031,29 +12043,40 @@ function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
   const trackBottom = () => window.innerHeight - bottomInset;
   const trackH = () => Math.max(40, trackBottom() - trackTop - thumbH);
 
-  // Cross-browser scroll helpers — handle cases where body is not the scroll
-  // container (Vite/Vercel production builds, iframe embeddings, etc.)
-  const getScrollY = () =>
-    window.scrollY ||
-    document.documentElement.scrollTop ||
-    document.body.scrollTop ||
-    0;
+  // Resolve the actual scroll container — prefer the passed ref, then fall
+  // back through the standard globals. This is the definitive fix for Vercel
+  // where window.scrollY / document.documentElement.scrollTop are both 0.
+  const getEl = () => scrollEl?.current || document.documentElement || document.body;
+
+  const getScrollY = () => {
+    const el = getEl();
+    // documentElement / body use scrollTop; window uses scrollY
+    if (el === document.documentElement || el === document.body) return el.scrollTop || window.scrollY || 0;
+    return el.scrollTop || 0;
+  };
 
   const getScrollMax = () => {
-    const docH = Math.max(
-      document.documentElement.scrollHeight,
-      document.body.scrollHeight,
-      document.documentElement.offsetHeight,
-    );
-    return Math.max(1, docH - window.innerHeight);
+    const el = getEl();
+    if (el === document.documentElement || el === document.body) {
+      const docH = Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+        document.documentElement.offsetHeight,
+      );
+      return Math.max(1, docH - window.innerHeight);
+    }
+    return Math.max(1, el.scrollHeight - el.clientHeight);
   };
 
   const setScrollY = (px) => {
-    // Try window.scrollTo first (standard path), then fall back to direct
-    // scrollTop assignment (works when the root <html> element is the scroller).
-    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
-    document.documentElement.scrollTop = px;
-    document.body.scrollTop = px; // iOS Safari legacy fallback
+    const el = getEl();
+    if (el === document.documentElement || el === document.body) {
+      try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+      document.documentElement.scrollTop = px;
+      document.body.scrollTop = px;
+    } else {
+      el.scrollTop = px;
+    }
   };
 
   // Keep the thumb's position synced to actual scroll, except while the
@@ -12065,17 +12088,21 @@ function ScrollThumb({ visible, topInset = 76, bottomInset = 96 }) {
       setTop(trackTop + ratio * trackH());
     };
     sync();
-    // Listen on both window AND document — production builds may fire scroll
-    // events on document when the root element (not body) is the scroller.
+    // Listen on window, document, AND the explicit scroll container ref.
+    // Vercel production builds may make the root div the scroller — in that
+    // case window/document never fire scroll events but the element does.
+    const el = scrollEl?.current;
     window.addEventListener("scroll", sync, { passive: true });
     document.addEventListener("scroll", sync, { passive: true });
+    if (el) el.addEventListener("scroll", sync, { passive: true });
     window.addEventListener("resize", sync);
     return () => {
       window.removeEventListener("scroll", sync);
       document.removeEventListener("scroll", sync);
+      if (el) el.removeEventListener("scroll", sync);
       window.removeEventListener("resize", sync);
     };
-  }, [dragging, topInset, bottomInset]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dragging, topInset, bottomInset, scrollEl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const moveTo = (clientY) => {
     const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH / 2) / trackH()));
@@ -12388,16 +12415,25 @@ function GRMProInner() {
     }
   }, []);
 
+  // appScrollRef: points to the root app div — the definitive scroll container.
+  // On Vercel production builds the root <div> (not <body> or <html>) is the
+  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
+  // Using a ref on the actual element is the only reliable cross-env fix.
+  const appScrollRef = useRef(null);
+
   // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
   // then fades away again after a brief pause so it does not sit there constantly.
-  // S2-FIX: also listen on `document` for scroll events — on Vercel production builds
-  // the scroll container may be <html>/<body> rather than window, so window "scroll"
+  // S2-FIX: also listen on appScrollRef (the root div) — on Vercel production builds
+  // the scroll container is the root div, not window/document, so window "scroll"
   // never fires and showScrollTop stays false permanently (thumb never appears).
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
-    const getScrollY = () =>
-      window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    const getScrollY = () => {
+      const el = appScrollRef.current;
+      if (el) return el.scrollTop || 0;
+      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    };
     const onScroll = () => {
       if (getScrollY() <= 320) {
         setShowScrollTop(false);
@@ -12409,12 +12445,15 @@ function GRMProInner() {
       scrollTopHideTimer.current = setTimeout(() => setShowScrollTop(false), 900);
     };
 
+    const el = appScrollRef.current;
     window.addEventListener("scroll", onScroll, { passive: true });
     document.addEventListener("scroll", onScroll, { passive: true });
+    if (el) el.addEventListener("scroll", onScroll, { passive: true });
     onScroll(); // sync once on mount
     return () => {
       window.removeEventListener("scroll", onScroll);
       document.removeEventListener("scroll", onScroll);
+      if (el) el.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
   }, []);
@@ -12722,7 +12761,7 @@ function GRMProInner() {
                 (async () => {
                   let rates = historicalRates;
                   if (!rates) rates = await ensureHistoricalRates();
-                  const pool = buildUniversalPool(data, rates || {});
+                  const pool = buildUniversalPool(data, rates || {}, capturedDate !== todayStr());
                   if (pool.length) savePoolToServer(pool, capturedDate);
                 })();
               }
@@ -12758,7 +12797,7 @@ function GRMProInner() {
           let rates = historicalRates;
           if (!rates || historicalRatesDateRef.current !== todayStr()) rates = await ensureHistoricalRates();
           rates = rates || {};
-          const pool = buildUniversalPool(data, rates);
+          const pool = buildUniversalPool(data, rates, capturedDate !== todayStr());
           if (pool.length) savePoolToServer(pool, capturedDate);
         })();
       }
@@ -13153,8 +13192,9 @@ function GRMProInner() {
   // the pool should reflect what the model scored at fetch time, not live states.
   const enginePool = useMemo(() => {
     const src = frozenFixtures.length ? frozenFixtures : fixtures;
-    return buildUniversalPool(src, historicalRates || {});
-  }, [frozenFixtures, historicalRates]);
+    const isPast = date && date !== todayStr();
+    return buildUniversalPool(src, historicalRates || {}, isPast);
+  }, [frozenFixtures, historicalRates, date]);
 
   const engineFixtureIds = useMemo(() => new Set(enginePool.map(e => e.fixtureId)), [enginePool]);
 
@@ -13270,7 +13310,7 @@ function GRMProInner() {
   const isDesktop = useIsDesktop();
 
   return (
-    <div style={{ minHeight:"100vh", background:C.bg, fontFamily:C.font }}>
+    <div ref={appScrollRef} style={{ minHeight:"100vh", background:C.bg, fontFamily:C.font }}>
 
       {/* ── DESKTOP SIDEBAR ─────────────────────────────────────────────── */}
       <SidebarNav
@@ -13904,6 +13944,7 @@ function GRMProInner() {
                     onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
                     adminMode={adminMode} adminToken={adminToken}
+                    isPastDate={date && date !== todayStr()}
                     onAddToTicket={ticket => {
                       setDraftLegs(prev => {
                         const existingMap = new Map(prev.map(l => [l.fixtureId, l]));
@@ -14166,6 +14207,7 @@ function GRMProInner() {
       <ScrollThumb
         visible={showScrollTop && !parlayJarvisOpen && !mainFocusFixture}
         bottomInset={isDesktop ? 40 : 106}
+        scrollEl={appScrollRef}
       />
 
       {/* ── HALO BOTTOM NAV ───────────────────────────────────────────────── */}
