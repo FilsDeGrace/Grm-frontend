@@ -388,8 +388,15 @@ const SA_MARKETS = {
   "TB:Home Over 1.5": { probKey:"homeOver15", oddsKey:null },
   "TB:Away Over 0.5": { probKey:"awayOver05", oddsKey:null },
   "TB:Away Over 1.5": { probKey:"awayOver15", oddsKey:null },
+  // PE Mix — virtual view: each fixture shows whichever gated market PE assigned
+  // as its home market (strongest SA signal for that game today). Not a real market
+  // key — handled as a special case in the saRows memo below.
+  "PE:Mix":           { _isPEMix: true },
 };
-const SA_MARKET_LABELS = Object.keys(SA_MARKETS).map(id => ({ id, label: id.replace(/^TB:/, "") }));
+const SA_MARKET_LABELS = Object.keys(SA_MARKETS).map(id => ({
+  id,
+  label: id === "PE:Mix" ? "Mix" : id.replace(/^TB:/, ""),
+}));
 
 // Selecting an SA Pattern market should make the normal Pick Market filter
 // follow it, so both selectors stay in sync instead of showing two different
@@ -3850,10 +3857,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // Separate from `family`: family picks WHICH market off a fixture's model
   // probabilities; SA Pattern instead filters fixtures by whether they match
   // a validated (out-of-sample tested) historical pattern for a given market.
-  const [saMarket,  setSaMarket]  = useState(null); // e.g. "TB:Over 1.5", or null = off
+  const [saMarket,  setSaMarket]  = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
   const [saPatterns, setSaPatterns] = useState(null); // raw sa-patterns.json payload
   const [saLoading, setSaLoading] = useState(false);
   const [saError,   setSaError]   = useState(null);
+  // PE Mix home-market assignments — fetched from /api/sa-mix when saMarket === "PE:Mix"
+  const [saMixLegs,     setSaMixLegs]     = useState(null); // array of home-assigned legs or null
+  const [saMixLoading,  setSaMixLoading]  = useState(false);
+  const [saMixError,    setSaMixError]    = useState(null);
+
   useEffect(() => {
     if (!adminMode || saPatterns || saLoading) return;
     setSaLoading(true);
@@ -3863,6 +3875,24 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .catch(e => setSaError(e.message))
       .finally(() => setSaLoading(false));
   }, [adminMode, adminToken, saPatterns, saLoading]);
+
+  // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
+  useEffect(() => {
+    if (!adminMode || saMarket !== "PE:Mix") return;
+    if (saMixLoading) return;
+    setSaMixLoading(true);
+    setSaMixLegs(null);
+    setSaMixError(null);
+    const dateParam = currentDate ? `&date=${currentDate}` : ``;
+    fetch(`${SERVER}/api/sa-mix?adminToken=${encodeURIComponent(adminToken)}${dateParam}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d?.homeLegs) setSaMixLegs(d.homeLegs);
+        else setSaMixError(d?.error || "No mix data");
+      })
+      .catch(e => setSaMixError(e.message))
+      .finally(() => setSaMixLoading(false));
+  }, [adminMode, saMarket, currentDate, adminToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -4252,21 +4282,64 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // unchanged; pick.label/color come from whichever pattern matched (or a plain
   // market label when only an avoid pattern matched and there's no positive one).
   const saRows = useMemo(() => {
-    if (!saMarket || !saPatterns?.patterns?.length) return [];
+    if (!saMarket) return [];
     const s = search.toLowerCase();
     const def = SA_MARKETS[saMarket];
     if (!def) return [];
 
-    // P-FIX: SA Pattern mode used to ignore the Upcoming/Live status filters
-    // entirely, showing finished/live/upcoming fixtures all mixed together
-    // regardless of what was toggled. Same status-filter logic as the main
-    // `rows` list above now applies here too.
     const hasLiveFilter      = statFilters.includes("live");
     const hasScheduledFilter = statFilters.includes("scheduled");
     const bothOrNeither      = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
     const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
     const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
 
+    // ── PE:Mix mode — home-market assignments from PE engine ─────────────────
+    // Each fixture is shown with whichever gated market PE assigned as its
+    // strongest signal. Sorted by combinedZ desc (same order PE uses for tickets).
+    if (def._isPEMix) {
+      if (!saMixLegs?.length) return [];
+      const byGameId = new Map(saMixLegs.map(l => [l.gameId, l]));
+      const out = [];
+      for (const f of fixtures) {
+        const leg = byGameId.get(f.id);
+        if (!leg) continue;
+        if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+        if (!bothOrNeither) {
+          const st = (f.state||"").toLowerCase();
+          if (hasLiveFilter && !liveStates.has(st)) continue;
+          if (hasScheduledFilter && !isScheduledState(st)) continue;
+        }
+        const mktLabel = (leg.market || "").replace(/^TB:/, "");
+        out.push({
+          f,
+          pick: {
+            label: mktLabel,
+            prob:  leg.prob  ?? 0,
+            odds:  leg.odds  ?? null,
+            color: C.accent,
+            market: leg.market,
+          },
+          _saTier:     leg.sa?.tier ?? null,
+          _saZ:        leg.sa?.combinedZ ?? null,
+          _saAdjLift:  leg.sa?.adjLift ?? null,
+          _saFlagged:  false, // all PE home legs passed the gate — no flagged rows
+          _saPositive: [],
+          _saAvoid:    [],
+        });
+      }
+      out.sort((a, b) => {
+        if (bothOrNeither) {
+          const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+          const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+          if (aLive !== bLive) return aLive - bLive;
+        }
+        return (b._saZ ?? 0) - (a._saZ ?? 0); // highest combinedZ first
+      });
+      return out;
+    }
+
+    // ── Standard single-market SA pattern mode ────────────────────────────────
+    if (!saPatterns?.patterns?.length) return [];
     const out = [];
     for (const f of fixtures) {
       if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
@@ -4279,28 +4352,27 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
       if (!prob || prob <= 0) continue;
       const { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
-      if (!positive.length && !avoid.length) continue; // SA Pattern mode only shows patterned games
-      const odds   = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
-      const flagged = positive.length === 0; // matched ONLY an avoid pattern — good prob, bad SA history
+      if (!positive.length && !avoid.length) continue;
+      const odds    = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
+      const flagged = positive.length === 0;
       out.push({
         f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: flagged ? C.red : C.green },
         _saPositive: positive, _saAvoid: avoid, _saFlagged: flagged,
       });
     }
     out.sort((a, b) => {
-      // P-FIX: same live-first sort as `rows` when both/neither status filter is active.
       if (bothOrNeither) {
         const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
         const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
         if (aLive !== bLive) return aLive - bLive;
       }
-      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1; // flagged-only rows sink to the bottom
+      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1;
       return a._saFlagged
-        ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)   // within flagged group: worst lift first
-        : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0); // within validated group: best lift first
+        ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)
+        : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0);
     });
     return out;
-  }, [saMarket, saPatterns, fixtures, search, statFilters, isPastDate]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -4569,14 +4641,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </div>
       </div>
 
-      {/* ── SA PATTERN (admin-only) ── */}
+      {/* ── SA PATTERN + PE MIX (admin-only) ── */}
       {adminMode && (
         <div style={{ marginBottom:10 }}>
           <div style={{ display:"flex",alignItems:"center",gap:6,marginBottom:6 }}>
             <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>SA Pattern</div>
             <span style={{ fontSize:7,color:C.red,background:`${C.red}15`,border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 5px",fontWeight:800 }}>ADMIN</span>
-            {saLoading && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
+            {(saLoading || (saMarket==="PE:Mix" && saMixLoading)) && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
             {saError    && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
+            {saMixError && saMarket==="PE:Mix" && <span style={{ fontSize:8,color:C.red }}>{saMixError}</span>}
           </div>
           <div className="cscroll">
             {saMarket && (
@@ -4586,28 +4659,34 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 ✕ Off
               </button>
             )}
-            {SA_MARKET_LABELS.map(mk => (
-              <button key={mk.id} onClick={()=>{
-                const turningOn = saMarket !== mk.id;
-                setSaMarket(turningOn ? mk.id : null);
-                // Pick Market follows the SA selection — same fixture list,
-                // same market, both selectors agree. Only when SA is being
-                // turned ON for a market we actually have a mapping for;
-                // turning SA off leaves Pick Market wherever it is.
-                if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
-                  setFamily(SA_TO_FAMILY_ID[mk.id]);
-                  setActiveStrategy(null);
-                }
-              }} className="gb"
-                style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
-                         background:saMarket===mk.id?C.red:"transparent",
-                         color:saMarket===mk.id?"#fff":C.muted,
-                         border:`1px solid ${saMarket===mk.id?C.red:C.faint}` }}>
-                {mk.label}
-              </button>
-            ))}
+            {SA_MARKET_LABELS.map(mk => {
+              const isMix = mk.id === "PE:Mix";
+              const isOn  = saMarket === mk.id;
+              return (
+                <button key={mk.id} onClick={()=>{
+                  const turningOn = !isOn;
+                  setSaMarket(turningOn ? mk.id : null);
+                  if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
+                    setFamily(SA_TO_FAMILY_ID[mk.id]);
+                    setActiveStrategy(null);
+                  }
+                }} className="gb"
+                  style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                           background:isOn ? (isMix ? C.accent : C.red) : "transparent",
+                           color:isOn ? "#fff" : isMix ? C.accent : C.muted,
+                           border:`1px solid ${isOn ? (isMix ? C.accent : C.red) : isMix ? `${C.accent}50` : C.faint}`,
+                           fontWeight: isMix ? 800 : undefined }}>
+                  {mk.label}
+                </button>
+              );
+            })}
           </div>
-          {saMarket && (
+          {saMarket === "PE:Mix" && (
+            <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:5 }}>
+              PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
+            </div>
+          )}
+          {saMarket && saMarket !== "PE:Mix" && (
             <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:5 }}>
               Showing only fixtures matching a validated SA pattern for {saMarket.replace(/^TB:/,"")}.
               Games matching only an "avoid" pattern (good model probability, bad historically) are flagged and sorted to the bottom.
@@ -12164,36 +12243,6 @@ function GRMProInner() {
   // Sync before first paint (no flash)
   syncC(theme);
 
-  // appScrollRef: points to the root app div — the definitive scroll container.
-  // On Vercel production builds the root <div> (not <body> or <html>) is the
-  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
-  // Using a ref on the actual element is the only reliable cross-env fix.
-  // S2-FIX: declared here, at the very top of the component, on purpose — every
-  // scroll-position read/write in this component (body-scroll-lock effects,
-  // the "scroll to top" FAB, and the Full Model return-scroll bookmarks) goes
-  // through getScrollY/setScrollY below. An earlier refactor declared
-  // equivalent helpers further down the component, and several effects above
-  // that point referenced them in their dependency arrays — `const` bindings
-  // are not hoisted the way functions are, so that produced a
-  // "Cannot access before initialization" crash on every render. Keeping the
-  // ref + helpers at the top guarantees every consumer in the component body
-  // sees them already initialized, regardless of where it's defined.
-  const appScrollRef = useRef(null);
-
-  const getScrollY = useCallback(() => {
-    const el = appScrollRef.current;
-    if (el) return el.scrollTop || 0;
-    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-  }, []);
-
-  const setScrollY = useCallback((px) => {
-    const el = appScrollRef.current;
-    if (el) { el.scrollTop = px; return; }
-    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
-    document.documentElement.scrollTop = px;
-    document.body.scrollTop = px;
-  }, []);
-
   // UX-FIX: blank/white first-paint on fresh installs (new phone, incognito) until the
   // user taps the address bar. Tapping the address bar forces the mobile browser to
   // recalculate the viewport (its toolbar collapses) which triggers a repaint — the page
@@ -12331,10 +12380,9 @@ function GRMProInner() {
   // the user returns to where they were, not to the top of the page.
   useEffect(() => {
     if (parlayJarvisOpen) {
-      // S2-FIX: use the shared cross-browser scroll helpers (appScrollRef-aware)
-      // instead of a raw window.scrollY read, which is 0 on Vercel builds where
-      // the root element (not body) is the scroller.
-      const scrollY = getScrollY();
+      // S2-FIX: use cross-browser scroll position — window.scrollY is 0 on some
+      // Vercel builds where the root element (not body) is the scroll container.
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12344,10 +12392,11 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        setScrollY(scrollY);
+        window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
-  }, [parlayJarvisOpen, getScrollY, setScrollY]);
+  }, [parlayJarvisOpen]);
 
   // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
@@ -12357,8 +12406,8 @@ function GRMProInner() {
   // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
   useEffect(() => {
     if (jarvisOpen) {
-      // S2-FIX: shared cross-browser scroll capture (see parlayJarvisOpen effect above)
-      const scrollY = getScrollY();
+      // S2-FIX: cross-browser scroll capture (see parlayJarvisOpen effect above)
+      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12368,10 +12417,11 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        setScrollY(scrollY);
+        window.scrollTo(0, scrollY);
+        document.documentElement.scrollTop = scrollY;
       };
     }
-  }, [jarvisOpen, getScrollY, setScrollY]);
+  }, [jarvisOpen]);
 
   // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
   const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
@@ -12436,13 +12486,19 @@ function GRMProInner() {
     }
     if (fixture) {
       // Open Full Model for a specific fixture — keep Jarvis open so user can keep chatting
-      try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {}
+      try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {}
       setFullModelReturnTab("live");
       setMainFocusFixture(fixture);
       setJarvisOpen(false);
       return;
     }
-  }, [getScrollY]);
+  }, []);
+
+  // appScrollRef: points to the root app div — the definitive scroll container.
+  // On Vercel production builds the root <div> (not <body> or <html>) is the
+  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
+  // Using a ref on the actual element is the only reliable cross-env fix.
+  const appScrollRef = useRef(null);
 
   // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
   // then fades away again after a brief pause so it does not sit there constantly.
@@ -12452,6 +12508,11 @@ function GRMProInner() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
+    const getScrollY = () => {
+      const el = appScrollRef.current;
+      if (el) return el.scrollTop || 0;
+      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    };
     const onScroll = () => {
       if (getScrollY() <= 320) {
         setShowScrollTop(false);
@@ -12474,8 +12535,7 @@ function GRMProInner() {
       if (el) el.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
-  }, [getScrollY]);
-
+  }, []);
 
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
   const [mainView, setMainView] = useState("main");
@@ -12564,8 +12624,8 @@ function GRMProInner() {
   // C1-FIX: save scroll position before navigating to Full Model so Back returns
   // the user to where they were. Previously only the grid/CustomListView paths
   // saved grm_scroll — these two callbacks were missing it entirely.
-  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, [getScrollY]);
-  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, [getScrollY]);
+  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, []);
+  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
 
   // Add a pick from fixture card to draft legs
   const addLegToDraft = useCallback((fixture, pick) => {
@@ -13960,7 +14020,7 @@ function GRMProInner() {
                     fixtures={filtered} search={search}
                     draftLegs={draftLegs} onAddToParlay={addLegToDraft}
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
-                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
                     adminMode={adminMode} adminToken={adminToken}
                     isPastDate={date && date !== todayStr()}
@@ -14011,7 +14071,7 @@ function GRMProInner() {
                     {filtered.map(f => (
                       <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
                         <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
-                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
                           backtestSummary={historicalRates}
                           adminToken={adminToken}
                         />
@@ -14167,7 +14227,7 @@ function GRMProInner() {
               setActiveTab("code");
             }
             setFullModelReturnTab(null);
-            try { setScrollY(parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
+            try { window.scrollTo(0, parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
           }}
           draftLegs={draftLegs}
           onAddToParlay={addLegToDraft}
