@@ -12164,6 +12164,36 @@ function GRMProInner() {
   // Sync before first paint (no flash)
   syncC(theme);
 
+  // appScrollRef: points to the root app div — the definitive scroll container.
+  // On Vercel production builds the root <div> (not <body> or <html>) is the
+  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
+  // Using a ref on the actual element is the only reliable cross-env fix.
+  // S2-FIX: declared here, at the very top of the component, on purpose — every
+  // scroll-position read/write in this component (body-scroll-lock effects,
+  // the "scroll to top" FAB, and the Full Model return-scroll bookmarks) goes
+  // through getScrollY/setScrollY below. An earlier refactor declared
+  // equivalent helpers further down the component, and several effects above
+  // that point referenced them in their dependency arrays — `const` bindings
+  // are not hoisted the way functions are, so that produced a
+  // "Cannot access before initialization" crash on every render. Keeping the
+  // ref + helpers at the top guarantees every consumer in the component body
+  // sees them already initialized, regardless of where it's defined.
+  const appScrollRef = useRef(null);
+
+  const getScrollY = useCallback(() => {
+    const el = appScrollRef.current;
+    if (el) return el.scrollTop || 0;
+    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }, []);
+
+  const setScrollY = useCallback((px) => {
+    const el = appScrollRef.current;
+    if (el) { el.scrollTop = px; return; }
+    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+    document.documentElement.scrollTop = px;
+    document.body.scrollTop = px;
+  }, []);
+
   // UX-FIX: blank/white first-paint on fresh installs (new phone, incognito) until the
   // user taps the address bar. Tapping the address bar forces the mobile browser to
   // recalculate the viewport (its toolbar collapses) which triggers a repaint — the page
@@ -12301,9 +12331,10 @@ function GRMProInner() {
   // the user returns to where they were, not to the top of the page.
   useEffect(() => {
     if (parlayJarvisOpen) {
-      // S2-FIX: use cross-browser scroll position — window.scrollY is 0 on some
-      // Vercel builds where the root element (not body) is the scroll container.
-      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      // S2-FIX: use the shared cross-browser scroll helpers (appScrollRef-aware)
+      // instead of a raw window.scrollY read, which is 0 on Vercel builds where
+      // the root element (not body) is the scroller.
+      const scrollY = getScrollY();
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12313,11 +12344,10 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        window.scrollTo(0, scrollY);
-        document.documentElement.scrollTop = scrollY;
+        setScrollY(scrollY);
       };
     }
-  }, [parlayJarvisOpen]);
+  }, [parlayJarvisOpen, getScrollY, setScrollY]);
 
   // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
@@ -12327,8 +12357,8 @@ function GRMProInner() {
   // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
   useEffect(() => {
     if (jarvisOpen) {
-      // S2-FIX: cross-browser scroll capture (see parlayJarvisOpen effect above)
-      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      // S2-FIX: shared cross-browser scroll capture (see parlayJarvisOpen effect above)
+      const scrollY = getScrollY();
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12338,11 +12368,10 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        window.scrollTo(0, scrollY);
-        document.documentElement.scrollTop = scrollY;
+        setScrollY(scrollY);
       };
     }
-  }, [jarvisOpen]);
+  }, [jarvisOpen, getScrollY, setScrollY]);
 
   // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
   const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
@@ -12407,19 +12436,13 @@ function GRMProInner() {
     }
     if (fixture) {
       // Open Full Model for a specific fixture — keep Jarvis open so user can keep chatting
-      try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {}
+      try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {}
       setFullModelReturnTab("live");
       setMainFocusFixture(fixture);
       setJarvisOpen(false);
       return;
     }
-  }, []);
-
-  // appScrollRef: points to the root app div — the definitive scroll container.
-  // On Vercel production builds the root <div> (not <body> or <html>) is the
-  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
-  // Using a ref on the actual element is the only reliable cross-env fix.
-  const appScrollRef = useRef(null);
+  }, [getScrollY]);
 
   // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
   // then fades away again after a brief pause so it does not sit there constantly.
@@ -12429,11 +12452,6 @@ function GRMProInner() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
-    const getScrollY = () => {
-      const el = appScrollRef.current;
-      if (el) return el.scrollTop || 0;
-      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-    };
     const onScroll = () => {
       if (getScrollY() <= 320) {
         setShowScrollTop(false);
@@ -12456,7 +12474,8 @@ function GRMProInner() {
       if (el) el.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
-  }, []);
+  }, [getScrollY]);
+
 
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
   const [mainView, setMainView] = useState("main");
@@ -12545,8 +12564,8 @@ function GRMProInner() {
   // C1-FIX: save scroll position before navigating to Full Model so Back returns
   // the user to where they were. Previously only the grid/CustomListView paths
   // saved grm_scroll — these two callbacks were missing it entirely.
-  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, []);
-  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
+  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, [getScrollY]);
+  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, [getScrollY]);
 
   // Add a pick from fixture card to draft legs
   const addLegToDraft = useCallback((fixture, pick) => {
@@ -13941,7 +13960,7 @@ function GRMProInner() {
                     fixtures={filtered} search={search}
                     draftLegs={draftLegs} onAddToParlay={addLegToDraft}
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
-                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
+                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
                     adminMode={adminMode} adminToken={adminToken}
                     isPastDate={date && date !== todayStr()}
@@ -13992,7 +14011,7 @@ function GRMProInner() {
                     {filtered.map(f => (
                       <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
                         <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
-                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
+                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
                           backtestSummary={historicalRates}
                           adminToken={adminToken}
                         />
@@ -14148,7 +14167,7 @@ function GRMProInner() {
               setActiveTab("code");
             }
             setFullModelReturnTab(null);
-            try { window.scrollTo(0, parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
+            try { setScrollY(parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
           }}
           draftLegs={draftLegs}
           onAddToParlay={addLegToDraft}
