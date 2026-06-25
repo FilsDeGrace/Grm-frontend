@@ -288,6 +288,23 @@ function _detectUnsupported(t) {
   return null;
 }
 
+// Detects "how do I / where is / what is" -style questions about GRM's own
+// UI (themes, filters, tabs, settings, etc.) so they route to handleNavHelp's
+// canned, *correct* answers instead of falling through to the agent, which
+// has no ground truth about this app's actual navigation and will happily
+// invent a plausible-sounding wrong answer (this is exactly what produced
+// the "go to Profile settings → Appearance tab" hallucination for the theme
+// question — GRM has no such screen; themes live under Filters).
+// Requires BOTH a question-shaped opener AND a known app/UI keyword, so
+// genuine football questions phrased with "what's" ("what's the pick for
+// Arsenal vs Chelsea") don't get misrouted — they have no app/UI keyword and
+// fall straight through to the agent unchanged.
+function _detectNavHelp(t) {
+  const isQuestion = /^(how (do|can|to) i|how to|where (is|can i find|do i find|are)|what is|what'?s|how come)\b/i.test(t.trim());
+  if (!isQuestion) return false;
+  return /theme|colour|color|dark mode|light mode|appearance|rollover|\bfilter|league filter|engine tab|the engine\b|custom tab|custom strategy|performance tab|hit.?rate|track.?record|code analy|analyzer|analyser|booking code|slip code|parley system|ticket builder|saved tab|\bbookmark|share.*code|grm code|share.*link|\bjarvis\b|app setting/i.test(t);
+}
+
 // ── MAIN COMPONENT ───────────────────────────────────────────────────────────
 
 export default function ChatLayout({
@@ -441,8 +458,15 @@ export default function ChatLayout({
   // without needing their signatures changed. Set before dispatch, cleared after.
   const pendingToolRef = React.useRef(null);
 
+  // Capped here (not just at persist-time) so a long-lived session can't grow
+  // the live, rendered array — and therefore the DOM — without bound. Without
+  // this, only the sessionStorage copy was ever trimmed; the in-memory array
+  // kept every message for the life of the tab.
   const addMsg = useCallback((msg) => {
-    setMessages(prev => [...(prev || []), msg]);
+    setMessages(prev => {
+      const next = [...(prev || []), msg];
+      return next.length > MAX_RENDERED_MSGS ? next.slice(-MAX_RENDERED_MSGS) : next;
+    });
   }, []);
 
   const replaceLoadingMsg = useCallback((loadingId, finalMsg) => {
@@ -463,6 +487,24 @@ export default function ChatLayout({
   const addJarvisToolMsg = useCallback((content, chips = [], toolName = "", toolArgs = {}) => {
     addMsg(makeJarvisMsg(content, chips, [{ name: toolName, args: toolArgs }]));
   }, [addMsg]);
+
+  // P1-5: root-cause past-date guard. The text-level gate at the top of
+  // handleSend is a fast first pass for typed messages, but it only covers
+  // text the user typed — it does NOT cover the "Remix" fast-path (which
+  // returns before that gate ever runs), chip-triggered rebuilds, or any
+  // future entry point that calls a build function directly. Putting the
+  // guard on the functions that actually generate a ticket (handleBuildParley,
+  // handleRemix, handleAddMoreLegs, handleOddsCorrection) means it can't be
+  // bypassed no matter which path leads there.
+  const blockIfPastDate = useCallback(() => {
+    if (!isPastDate) return false;
+    addJarvisMsg({ type: "TEXT", text:
+      `I'm read-only for ${selectedDate} — that's a past date, so I can't build or modify parleys for it. Switch to today's date to build, or ask me to analyse a slip instead.`
+    }, [
+      { label: "Analyse a slip", text: "Analyse a slip" },
+    ]);
+    return true;
+  }, [isPastDate, selectedDate, addJarvisMsg]);
 
   const simulateTyping = useCallback(async (durationMs = 700) => {
     setIsTyping(true);
@@ -637,6 +679,7 @@ export default function ChatLayout({
   }
 
   async function handleBuildParley(nlParams = null) {
+    if (blockIfPastDate()) return;
     await simulateTyping(400);
     startBuildFlow(nlParams);
   }
@@ -1186,16 +1229,23 @@ export default function ChatLayout({
       legCount = 6;
     }
 
-    // Pre-filter fixtures by minConfidence and excludeMarkets if provided by agent
+    // Pre-filter fixtures by excludeMarkets only — excludes fixtures whose
+    // theRead best-pick market is in the list (relevant when marketFamily is
+    // "theRead", since each fixture's own best market can vary).
+    // minConfidence is intentionally NOT applied here anymore — it used to
+    // check `f.theRead?.anchor?.prob` (the fixture's unrelated best-overall-
+    // pick confidence) or a hardcoded Over 2.5 read, regardless of which
+    // market was actually requested. A "Home over 0.5, min 75%" request would
+    // let through fixtures whose home-to-score confidence was nowhere near
+    // 75%, as long as some other, unrelated number was high. minConfidence
+    // is now passed straight into buildParley below, which checks it against
+    // the correctly market-specific confidence inside buildPool.
     let filteredFixtures = fixtures;
-    if (minConfidence || (Array.isArray(excludeMarkets) && excludeMarkets.length)) {
-      const excludeSet = new Set((excludeMarkets || []).map(m => m.toLowerCase().replace(/\s/g, "")));
+    if (Array.isArray(excludeMarkets) && excludeMarkets.length) {
+      const excludeSet = new Set(excludeMarkets.map(m => m.toLowerCase().replace(/\s/g, "")));
       filteredFixtures = fixtures.filter(f => {
-        const conf   = f.theRead?.anchor?.prob ?? f.markets?.over25 ?? 0;
         const anchor = (f.theRead?.anchor?.market || "").toLowerCase().replace(/\s/g, "");
-        if (minConfidence && conf < minConfidence) return false;
-        if (excludeSet.size && excludeSet.has(anchor)) return false;
-        return true;
+        return !(excludeSet.size && excludeSet.has(anchor));
       });
     }
 
@@ -1208,6 +1258,7 @@ export default function ChatLayout({
           poolSource:       pool || "all",
           engineIds:        engineFixtureIds,
           customFixtureIds: customFixtureIds,
+          minConfidence:    minConfidence || null,
         })
       : null;
 
@@ -1269,6 +1320,7 @@ export default function ChatLayout({
 
   // ── Remix / Add legs
   async function handleRemix() {
+    if (blockIfPastDate()) return;
     if (!chatLastAction?.ticket) { handleBuildParley(); return; }
     const { ticket } = chatLastAction;
     const loadingMsg = makeLoadingMsg();
@@ -1285,6 +1337,7 @@ export default function ChatLayout({
       engineIds:        engineFixtureIds,
       customFixtureIds: customFixtureIds,
       excludeIds:       ticket.legs.map(l => l.fixtureId), // favour fresh fixtures
+      minConfidence:    ticket.minConfidence || null, // carry the original confidence floor forward
     });
 
     if (!result) {
@@ -1306,6 +1359,7 @@ export default function ChatLayout({
   }
 
   async function handleOddsCorrection(targetOdds) {
+    if (blockIfPastDate()) return;
     const target = parseFloat(targetOdds);
     if (!target || target < 2) {
       addJarvisMsg({ type: "TEXT", text: `Minimum odds target is 2×. Try "Build me a ${targetOdds} odds parley" instead.` }, []);
@@ -1323,6 +1377,7 @@ export default function ChatLayout({
   }
 
   async function handleAddMoreLegs(rawText) {
+    if (blockIfPastDate()) return;
     if (!chatLastAction?.ticket) {
       addJarvisMsg({ type: "TEXT", text: "No active ticket to add legs to. Build one first." }, [
         { label: "Build a parley", text: "Build me a parley" },
@@ -1348,6 +1403,7 @@ export default function ChatLayout({
       engineIds:        engineFixtureIds,
       customFixtureIds: customFixtureIds,
       excludeIds:       [],
+      minConfidence:    ticket.minConfidence || null, // carry the original confidence floor forward
     });
 
     if (!result) {
@@ -1528,6 +1584,11 @@ export default function ChatLayout({
     const raw = (text || input || "").trim();
     if (!raw) return;
     if (isGateOpen) return;
+    // P1-3: block a second send while one is already in flight. Chips already
+    // had this protection (pointerEvents disabled while isTyping); free-text
+    // send via Enter/button did not, which let rapid sends race — out-of-order
+    // replies, duplicate typing indicators, duplicate tool calls.
+    if (isTyping) return;
 
     setInput("");
     try { sessionStorage.removeItem(INPUT_DRAFT_KEY); } catch {}
@@ -1551,6 +1612,16 @@ export default function ChatLayout({
         }, [{ label: "Analyse a slip", text: "Analyse a slip" }]);
         return;
       }
+    }
+
+    // ── Nav-help fast-path: "how do I / where is X" about GRM's own UI ─────
+    // Fixes the theme-question bug — these never reach the agent (which has
+    // no knowledge of this app's actual screens), so they can't be hallucinated.
+    if (_detectNavHelp(raw)) {
+      addMsg(makeUserMsg(raw));
+      inputRef.current?.focus();
+      handleNavHelp(raw);
+      return;
     }
 
     // ── Pre-flight: catch unsupported requests instantly ───────────────────
@@ -1879,7 +1950,23 @@ export default function ChatLayout({
                 style={S.helpBtn}
                 onClick={() => {
                   if (window.confirm("Clear chat history?")) {
-                    setMessages([makeJarvisMsg({ type: "GREETING" }, GREETING_CHIPS)]);
+                    // Mirror the first-open welcome logic exactly — including the
+                    // past-date read-only variant — instead of the previous
+                    // `{ type: "GREETING" }` + `GREETING_CHIPS` reference, which
+                    // pointed at a content type with no renderer and a chip
+                    // constant that didn't exist anywhere in this file. That
+                    // combination threw a ReferenceError on every tap, so
+                    // "Clear chat" never actually worked.
+                    const freshMsg = isPastDate
+                      ? makeJarvisMsg({ type: "TEXT", text:
+                          `You're viewing ${selectedDate} — a past date. I can analyse slips from that date, but I can't build new parleys for it. Switch to today to build.`
+                        }, [{ label: "Analyse a slip", text: "Analyse a slip" }])
+                      : makeJarvisMsg({ type: "WELCOME" }, [
+                          { label: "Build me a parley", text: "Build me a parley" },
+                          { label: "Analyse a slip",    text: "Analyse a slip"    },
+                          { label: "Check my Rollover", text: "Check my Rollover" },
+                        ]);
+                    setMessages([freshMsg]);
                     setInput("");
                     setBuildFlow(null);
                     setActiveBuildMsgId(null);
@@ -2013,6 +2100,7 @@ function ChatTab({
   function handleKey(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (isTyping) return;
       onSend(input);
     }
   }
@@ -2121,7 +2209,7 @@ function ChatTab({
             className="grm-send"
             style={S.sendBtn}
             onClick={() => onSend(input)}
-            disabled={!chatEnabled || !input.trim()}
+            disabled={!chatEnabled || !input.trim() || isTyping}
             aria-label="Send"
           >
             <SendIcon size={14} />

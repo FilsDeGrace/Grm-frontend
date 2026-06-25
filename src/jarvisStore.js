@@ -199,7 +199,7 @@ export function inferMarket(pick = "") {
  * @param {Array}  customFixtureIds - IDs in user's custom list (optional)
  * @returns {Array} sorted pool entries
  */
-export function buildPool(fixtures, marketFamily, engineIds = [], poolSource = "all", customFixtureIds = []) {
+export function buildPool(fixtures, marketFamily, engineIds = [], poolSource = "all", customFixtureIds = [], minConfidence = null) {
   if (!fixtures?.length) return [];
 
   const io  = safeImpliedOdds;
@@ -296,7 +296,16 @@ export function buildPool(fixtures, marketFamily, engineIds = [], poolSource = "
         }
     }
 
-    if (pick && pick.conf > 0) entries.push(pick);
+    // Confidence-floor filter — applied here, against the market-specific
+    // `pick.conf` this switch just resolved, not a market-agnostic stand-in.
+    // (Previously this check lived in ChatLayout.jsx's executeBuild against
+    // raw fixtures, before any market-specific resolution happened — it was
+    // comparing the wrong number: a fixture's best-overall-pick confidence,
+    // or a hardcoded Over 2.5 check, regardless of which market was actually
+    // requested. A "Home over 0.5, min 75%" request would let through any
+    // fixture whose unrelated best pick or Over 2.5 number was high, even if
+    // its actual home-to-score confidence was nowhere near 75%.)
+    if (pick && pick.conf > 0 && (!minConfidence || pick.conf >= minConfidence)) entries.push(pick);
   }
 
   return entries.sort((a, b) => b.conf - a.conf);
@@ -349,8 +358,9 @@ export function buildParley({
   engineIds    = [],
   customFixtureIds = [],
   excludeIds   = [],
+  minConfidence = null,
 }) {
-  const pool = buildPool(fixtures, marketFamily, engineIds, poolSource, customFixtureIds)
+  const pool = buildPool(fixtures, marketFamily, engineIds, poolSource, customFixtureIds, minConfidence)
     .filter(p => !excludeIds.includes(p.fixtureId));
 
   const legs = selectLegsFromPool(pool, legCount, leagueFilter);
@@ -374,6 +384,10 @@ export function buildParley({
     marketFamily,
     leagueFilter,
     poolSource,
+    // Stamped so Remix/Add More Legs can re-apply the same floor instead of
+    // silently dropping it on rebuild — without this, a "min 75%" ticket's
+    // confidence requirement would vanish the moment the user hit Remix.
+    minConfidence: minConfidence || null,
   };
 
   return { ticket, partial: legs.length < legCount };

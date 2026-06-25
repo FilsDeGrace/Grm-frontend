@@ -8,13 +8,15 @@ export { SERVER };
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
+import { BasketballGameList, BasketballRolloverView } from "./BasketballPage";
+import { enrichGamesForDate, buildBasketballRolloverPool, buildBasketballRolloverPick } from "./BasketballEngine";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
 // temporal dead zone when called before line 4881 executes.
 const SAVED_TICKETS_KEY  = "grm_saved_tickets_v15";
-// Built tickets are session-scoped and date-keyed — they survive a refresh
-// on the same day but are not carried forward to tomorrow.
+// Built tickets are date-keyed and persist in localStorage — they survive
+// refreshes and tab closes, and remain until the user removes them manually.
 const BUILT_TICKETS_KEY  = (date) => `grm_built_tickets_${date}`;
 
 // UX-FIX: shared helper to translate raw fetch/network error text into a graceful,
@@ -1023,6 +1025,61 @@ function buildUniversalPool(fixtures, historicalRates, isPastDate = false) {
   return pool.sort((a, b) => b.utility - a.utility);
 }
 
+// "All Fixtures" pool for the custom builder — literally what the name says:
+// every fixture that has a Read (non-fallback), an Edge, or a Goal Radar
+// signal, in that priority order, taken at face value. NO quality gate —
+// no empirical-rate floor, no odds floor, no blocked-market check. That gate
+// (evaluatePick, used by buildUniversalPool) is what makes the Engine pool
+// the Engine pool; running fixtures through it first and then calling this
+// "All Fixtures" defeats the entire point of the toggle, which is why
+// "All Fixtures" was silently converging on the Engine pool before this fix.
+function buildSignalPool(fixtures, historicalRates, isPastDate = false) {
+  const oi = oddsOrImplied;
+  const FINISHED_STATES = new Set(["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties"]);
+  const ALWAYS_BLOCKED  = new Set(["1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live","postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted"]);
+  const pool = [];
+
+  for (const f of fixtures) {
+    const state = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+    if (ALWAYS_BLOCKED.has(state)) continue;
+    if (!isPastDate && FINISHED_STATES.has(state)) continue;
+
+    // Read > Edge > Radar — same priority order as buildPool() elsewhere.
+    let sig = null;
+    if (f.theRead?.anchor && !f.theRead.isFallback) {
+      const a = f.theRead.anchor;
+      const o = oi(a.odds, a.prob);
+      if (o) sig = { pick:a.pick, conf:a.prob, market:a.market, odds:o, strong:!!a.strong };
+    }
+    if (!sig && f.theEdge) {
+      const o = oi(f.theEdge.odds, f.theEdge.prob);
+      if (o) sig = { pick:f.theEdge.pick, conf:f.theEdge.prob, market:f.theEdge.market || "Edge", odds:o, strong:false };
+    }
+    if (!sig && f.goalRadar) {
+      const best = f.goalRadar?.home?.prob >= f.goalRadar?.away?.prob ? f.goalRadar?.home : f.goalRadar?.away;
+      if (best) { const o = oi(best.odds, best.prob); if (o) sig = { pick:best.pick, conf:best.prob, market:"TeamTotal", odds:o, strong:false }; }
+    }
+    if (!sig || !sig.odds || !isFinite(sig.odds) || sig.odds <= 1.0) continue;
+
+    const empiricalRate = getEmpiricalRate(sig.market, sig.conf, historicalRates) || (sig.conf / 100);
+    const lnO  = Math.log(sig.odds);
+    const pExp = Math.pow(empiricalRate, POOL_SCORE_P_EXP);
+    let score  = pExp * (lnO / sig.odds);
+    if (sig.strong) score *= CALIBRATION.modifiers.strongBoost;
+    const utility = score / Math.max(0.01, 1 - empiricalRate);
+
+    pool.push({
+      fixtureId: f.id, game: `${f.teams.home} vs ${f.teams.away}`,
+      pick: sig.pick, odds: parseFloat(sig.odds.toFixed(2)), conf: sig.conf, market: sig.market,
+      league: f.league || "", score, utility,
+      empiricalRate: parseFloat((empiricalRate * 100).toFixed(1)),
+      strategyLabel: sig.strong ? "STRONG" : "Read", strategyTags: f.strategyTags || [],
+      isVolatile: isLeagueVolatile(f.league || ""), fixture: f,
+    });
+  }
+  return pool.sort((a, b) => b.utility - a.utility);
+}
+
 // Builds a single parley — runs until pool exhausted or target hit (no leg cap).
 function buildOneParlayFromPool(pool, usedIds, target, stake) {
   const legs = []; let prod = 1.0, hitTarget = false;
@@ -1816,6 +1873,10 @@ function injectStyles(T) {
       padding:0 14px 12px;
       display:flex;align-items:center;gap:8px;
     }
+    .grm-header-controls{
+      padding:0 18px 12px;
+      display:flex;align-items:center;flex-wrap:wrap;gap:8px;
+    }
 
     /* Wordmark */
     .grm-wordmark{
@@ -2128,6 +2189,7 @@ function injectStyles(T) {
       .grm-header-top{ padding:6px 10px !important; min-height:44px !important }
       .grm-header-subnav{ padding:3px 8px !important; gap:3px !important }
       .grm-header-util{ padding:4px 8px !important }
+      .grm-header-controls{ padding:4px 10px 8px !important; gap:6px !important }
       .grm-header{ padding-bottom:2px !important }
       .grm-pill{ font-size:9px !important; padding:4px 8px !important }
       .gi{ font-size:10px !important; padding:5px 8px !important }
@@ -3841,7 +3903,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
 // ── CUSTOM LIST VIEW ──────────────────────────────────────────────────────
 // getCustomPick, xgHomeDominant, xgAwayDominant → engine.js
 
-function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "", isPastDate = false }) {
+function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "", isPastDate = false, date = null }) {
   const isMobile = useIsMobile();
   const SS_KEY = "grm_clv_state_v1";
   const loadSS = (k, fallback) => { try { const s = sessionStorage.getItem(SS_KEY); if (!s) return fallback; const d = JSON.parse(s); return d[k] !== undefined ? d[k] : fallback; } catch { return fallback; } };
@@ -3853,37 +3915,43 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [activeStrategy, setActiveStrategyState] = useState(() => loadSS("activeStrategy", null));
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
 
-  // ── SA Pattern mode (admin-only) ──────────────────────────────────────
+  // ── SA Pattern mode (user-facing, collapsible) ────────────────────────
   // Separate from `family`: family picks WHICH market off a fixture's model
   // probabilities; SA Pattern instead filters fixtures by whether they match
   // a validated (out-of-sample tested) historical pattern for a given market.
-  const [saMarket,  setSaMarket]  = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
-  const [saPatterns, setSaPatterns] = useState(null); // raw sa-patterns.json payload
-  const [saLoading, setSaLoading] = useState(false);
-  const [saError,   setSaError]   = useState(null);
+  // SA4-FIX: moved from admin-only to a collapsible panel visible to all users.
+  // PE:Mix is still gated to adminMode (it pulls from the PE engine internals).
+  const [saExpanded,  setSaExpanded]  = useState(false); // panel collapsed by default
+  const [saMarket,    setSaMarket]    = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
+  const [saPatterns,  setSaPatterns]  = useState(null); // raw sa-patterns.json payload
+  const [saLoading,   setSaLoading]   = useState(false);
+  const [saError,     setSaError]     = useState(null);
   // PE Mix home-market assignments — fetched from /api/sa-mix when saMarket === "PE:Mix"
   const [saMixLegs,     setSaMixLegs]     = useState(null); // array of home-assigned legs or null
   const [saMixLoading,  setSaMixLoading]  = useState(false);
   const [saMixError,    setSaMixError]    = useState(null);
 
   useEffect(() => {
-    if (!adminMode || saPatterns || saLoading) return;
+    // SA4-FIX: fetch patterns when the panel is expanded (was: adminMode only).
+    // adminToken still passed so admins get full data; non-admins pass "".
+    if (!saExpanded || saPatterns || saLoading) return;
     setSaLoading(true);
     fetch(`${SERVER}/api/sa-patterns?adminToken=${encodeURIComponent(adminToken)}`)
       .then(r => r.json())
       .then(d => { if (d?.patterns) setSaPatterns(d); else setSaError(d?.error || "No patterns found"); })
       .catch(e => setSaError(e.message))
       .finally(() => setSaLoading(false));
-  }, [adminMode, adminToken, saPatterns, saLoading]);
+  }, [saExpanded, adminToken, saPatterns, saLoading]);
 
   // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
   useEffect(() => {
+    // PE:Mix remains admin-only — it reads from internal PE engine data
     if (!adminMode || saMarket !== "PE:Mix") return;
     if (saMixLoading) return;
     setSaMixLoading(true);
     setSaMixLegs(null);
     setSaMixError(null);
-    const dateParam = currentDate ? `&date=${currentDate}` : ``;
+    const dateParam = date ? `&date=${date}` : ``;
     fetch(`${SERVER}/api/sa-mix?adminToken=${encodeURIComponent(adminToken)}${dateParam}`)
       .then(r => r.json())
       .then(d => {
@@ -3892,7 +3960,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       })
       .catch(e => setSaMixError(e.message))
       .finally(() => setSaMixLoading(false));
-  }, [adminMode, saMarket, currentDate, adminToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [adminMode, saMarket, date, adminToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -4641,59 +4709,98 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </div>
       </div>
 
-      {/* ── SA PATTERN + PE MIX (admin-only) ── */}
-      {adminMode && (
-        <div style={{ marginBottom:10 }}>
-          <div style={{ display:"flex",alignItems:"center",gap:6,marginBottom:6 }}>
-            <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>SA Pattern</div>
-            <span style={{ fontSize:7,color:C.red,background:`${C.red}15`,border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 5px",fontWeight:800 }}>ADMIN</span>
-            {(saLoading || (saMarket==="PE:Mix" && saMixLoading)) && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
-            {saError    && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
-            {saMixError && saMarket==="PE:Mix" && <span style={{ fontSize:8,color:C.red }}>{saMixError}</span>}
-          </div>
-          <div className="cscroll">
+      {/* ── STRATEGY ANALYST — collapsible, visible to all users ── */}
+      {/* SA4-FIX: was admin-only ({adminMode && ...}). Now a collapsed panel
+          any user can expand. PE:Mix market button still requires adminMode. */}
+      <div style={{ marginBottom:10 }}>
+        {/* Collapse toggle header */}
+        <button
+          onClick={() => { setSaExpanded(v => !v); if (saMarket && !saExpanded) setSaMarket(null); }}
+          style={{ width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
+                   background: saExpanded ? `${C.accent}10` : (saMarket ? `${C.accent}08` : C.surface),
+                   border:`1px solid ${saExpanded ? `${C.accent}40` : (saMarket ? `${C.accent}30` : C.border)}`,
+                   borderRadius: saExpanded ? "8px 8px 0 0" : 8,
+                   cursor:"pointer",padding:"9px 13px",transition:"all .15s" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+            <span style={{ fontSize:9,color: saMarket ? C.accent : C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>
+              Strategy Analyst
+            </span>
             {saMarket && (
-              <button onClick={()=>setSaMarket(null)} className="gb"
-                style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
-                         background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
-                ✕ Off
-              </button>
+              <span style={{ fontSize:8,background:`${C.accent}20`,color:C.accent,border:`1px solid ${C.accent}40`,
+                             borderRadius:4,padding:"1px 6px",fontWeight:800 }}>
+                {saMarket === "PE:Mix" ? "Mix" : saMarket.replace(/^TB:/,"")}
+              </span>
             )}
-            {SA_MARKET_LABELS.map(mk => {
-              const isMix = mk.id === "PE:Mix";
-              const isOn  = saMarket === mk.id;
-              return (
-                <button key={mk.id} onClick={()=>{
-                  const turningOn = !isOn;
-                  setSaMarket(turningOn ? mk.id : null);
-                  if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
-                    setFamily(SA_TO_FAMILY_ID[mk.id]);
-                    setActiveStrategy(null);
-                  }
-                }} className="gb"
-                  style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
-                           background:isOn ? (isMix ? C.accent : C.red) : "transparent",
-                           color:isOn ? "#fff" : isMix ? C.accent : C.muted,
-                           border:`1px solid ${isOn ? (isMix ? C.accent : C.red) : isMix ? `${C.accent}50` : C.faint}`,
-                           fontWeight: isMix ? 800 : undefined }}>
-                  {mk.label}
-                </button>
-              );
-            })}
+            {(saLoading || (saMarket === "PE:Mix" && saMixLoading)) && (
+              <span style={{ fontSize:8,color:C.muted }}>loading…</span>
+            )}
+            {saError && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
+            {saMixError && saMarket === "PE:Mix" && <span style={{ fontSize:8,color:C.red }}>{saMixError}</span>}
           </div>
-          {saMarket === "PE:Mix" && (
-            <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:5 }}>
-              PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
+          <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{saExpanded ? "▲" : "▼"}</span>
+        </button>
+
+        {/* Collapsed hint */}
+        {!saExpanded && (
+          <div style={{ fontSize:8,color:C.muted,padding:"5px 4px 0",lineHeight:1.5 }}>
+            Pattern-based recommendations and insights from the Strategy Analyst engine.
+          </div>
+        )}
+
+        {/* Expanded body */}
+        {saExpanded && (
+          <div style={{ border:`1px solid ${C.accent}30`,borderTop:"none",borderRadius:"0 0 8px 8px",
+                        padding:"10px 12px 12px",background:`${C.accent}04` }}>
+            <div style={{ fontSize:8,color:C.text,opacity:.65,marginBottom:10,lineHeight:1.6 }}>
+              Filters fixtures by validated SA patterns — games that have historically performed well (or poorly) for each market.
+              Avoid-flagged games (⚑) appear at the bottom.
             </div>
-          )}
-          {saMarket && saMarket !== "PE:Mix" && (
-            <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:5 }}>
-              Showing only fixtures matching a validated SA pattern for {saMarket.replace(/^TB:/,"")}.
-              Games matching only an "avoid" pattern (good model probability, bad historically) are flagged and sorted to the bottom.
+            <div className="cscroll" style={{ marginBottom:6 }}>
+              {saMarket && (
+                <button onClick={() => setSaMarket(null)} className="gb"
+                  style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                           background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
+                  ✕ Off
+                </button>
+              )}
+              {SA_MARKET_LABELS.map(mk => {
+                const isMix    = mk.id === "PE:Mix";
+                const isOn     = saMarket === mk.id;
+                // PE:Mix is still admin-only — hide from regular users
+                if (isMix && !adminMode) return null;
+                return (
+                  <button key={mk.id} onClick={() => {
+                    const turningOn = !isOn;
+                    setSaMarket(turningOn ? mk.id : null);
+                    if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
+                      setFamily(SA_TO_FAMILY_ID[mk.id]);
+                      setActiveStrategy(null);
+                    }
+                  }} className="gb"
+                    style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                             background:isOn ? (isMix ? C.accent : C.red) : "transparent",
+                             color:isOn ? "#fff" : isMix ? C.accent : C.muted,
+                             border:`1px solid ${isOn ? (isMix ? C.accent : C.red) : isMix ? `${C.accent}50` : C.faint}`,
+                             fontWeight: isMix ? 800 : undefined }}>
+                    {mk.label}
+                  </button>
+                );
+              })}
             </div>
-          )}
-        </div>
-      )}
+            {saMarket === "PE:Mix" && (
+              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
+                PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
+              </div>
+            )}
+            {saMarket && saMarket !== "PE:Mix" && (
+              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
+                Showing only fixtures matching a validated SA pattern for <strong>{saMarket.replace(/^TB:/,"")}</strong>.
+                Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div style={{ marginBottom:10 }}>
         <div style={{ fontSize:9,color:C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700,marginBottom:6 }}>Signal</div>
@@ -5134,12 +5241,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           <span style={{ fontSize:10,fontWeight:800,color:C.accentText }}>{selectedIds.size} selected</span>
           <button onClick={() => {
             const familyLabel = CUSTOM_FAMILIES.find(cf => cf.id === family)?.label || family;
-            const legs = rows.filter(({ f }) => selectedIds.has(f.id)).map(({ f, pick }) => ({
+            // MIX-FIX: use displayRows (not rows) so that when SA Mix (PE:Mix) is
+            // active, the correct per-fixture market and pick from saMixLegs is used.
+            // Previously this read from `rows` (the normal custom pick market rows),
+            // meaning Mix selections were added with whatever market the normal Custom
+            // section happened to have active — completely wrong market/pick.
+            const legs = displayRows.filter(({ f }) => selectedIds.has(f.id)).map(({ f, pick }) => ({
               fixtureId: f.id, game:`${f.teams.home} vs ${f.teams.away}`,
               league: f.league || "",
               pick:pick.label, market:pick.market && pick.market !== "Unknown" ? pick.market : inferMarket(pick.label),
               odds:pick.odds || null, conf:Math.round(pick.prob),
-              strategyLabel: familyLabel,
+              strategyLabel: saMarket === "PE:Mix" ? "SA Mix" : familyLabel,
             }));
             const prod = legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0);
             if (onAddToTicket) onAddToTicket({ id:Date.now(), legs, totalOdds:prod.toFixed(2), stake:0, exhausted:false, source:"custom_selection", family });
@@ -7225,7 +7337,7 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   );
 }
 
-function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false }) {
+function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false, parleyEntryPulse = 0, claimAutoOpen }) {
   const [stakeInput, setStakeInput] = useState(ticket.stake > 0 ? String(ticket.stake) : "");
   const stake      = parseFloat(stakeInput) || 0;
   const potential  = parseFloat((stake * parseFloat(ticket.totalOdds)).toFixed(2));
@@ -7257,6 +7369,21 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
     const id = setInterval(shakeOnce, 8000);
     return () => clearInterval(id);
   }, [hasCorr]);
+
+  // Auto-open the explainer once, every time the user navigates into Parley
+  // System from another nav tab — not just on every render, and not for
+  // every flagged ticket at once (claimAutoOpen lets only the first one in).
+  // Settles back into the periodic-shake-only behavior above afterward.
+  useEffect(() => {
+    if (!hasCorr) return;
+    if (!parleyEntryPulse) return;
+    if (!claimAutoOpen?.()) return;
+    setCorrOpen(true);
+    setCorrShake(true);
+    const closeTimer = setTimeout(() => { setCorrOpen(false); setCorrShake(false); }, 3500);
+    return () => clearTimeout(closeTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parleyEntryPulse]);
 
 
 
@@ -10025,8 +10152,139 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, parleyEntryPulse = 0 }) {
+  // Only the first ticket card (in render order) that actually has a leg-risk
+  // flag should auto-open its explainer on entry — otherwise every flagged
+  // ticket would pop its panel open simultaneously, which is just noise.
+  // Reset the claim each time the user re-enters Parley System.
+  const autoOpenClaimedRef = useRef(false);
+  useEffect(() => { autoOpenClaimedRef.current = false; }, [parleyEntryPulse]);
+  const claimAutoOpen = useCallback(() => {
+    if (autoOpenClaimedRef.current) return false;
+    autoOpenClaimedRef.current = true;
+    return true;
+  }, []);
   const [view, setView] = useState("parlay");
+
+  // ── TRIM / SPLIT ──────────────────────────────────────────────────────────
+  // Ported from trimmer.mjs (your terminal tool) — same mode set, same
+  // algorithms, run on whatever ticket is already loaded client-side instead
+  // of fetching by code from the server. Two modes from the CLI are NOT here:
+  //   #5 "Split by SA lift threshold" — needs the SA pattern + snapshot match
+  //      trimmer.mjs does server-side (fs reads); no snapshot data is attached
+  //      to a leg once it's on a ticket client-side, so there's nothing to
+  //      threshold on. Don't fake it with a number that means nothing.
+  //   #8 "Just view ranked legs" — redundant here; the source picker already
+  //      shows the ticket, and any mode's preview shows it ranked.
+  // SA5-FIX: Score now uses injected SA data from fixtures (_saScores) when
+  // available — matching each leg's market to get the correct SA lift for that
+  // specific bet type. Falls back to leg.conf if no SA data is present.
+  // Formula mirrors trimmer.mjs compositeScore: conf*0.5 + saLift*3 (capped ±30).
+  const [trimSourceKey, setTrimSourceKey] = useState(null); // "draft" | `ticket:${id}` | `saved:${code}`
+  const [trimModeId, setTrimModeId] = useState("topn");
+  const [trimInputs, setTrimInputs] = useState({});         // per-mode field values, keyed by field key
+  const [trimResult, setTrimResult] = useState(null);        // [{ label, legs, totalOdds }] | null
+  const [trimError, setTrimError] = useState(null);
+
+  const trimOddsOf = (legs) => parseFloat(
+    legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0).toFixed(2)
+  );
+
+  // SA5-FIX: upgraded trimScore — uses SA lift from fixture._saScores when available.
+  // fixtureId on a leg is set at add-time; we look it up from the fixtures prop.
+  // If no SA data exists (patterns not loaded yet, or no pattern match), falls
+  // back gracefully to leg.conf so existing behaviour is preserved.
+  const trimScore = (leg) => {
+    const conf = leg.conf != null ? parseFloat(leg.conf) : 50;
+    if (leg.fixtureId && fixtures?.length) {
+      const fix = fixtures.find(f => String(f.id) === String(leg.fixtureId));
+      if (fix?._saScores && leg.market && fix._saScores[leg.market]) {
+        const sa = fix._saScores[leg.market];
+        const saLift = Math.max(-30, Math.min(30, (sa.lift || 0) * 3));
+        return parseFloat((conf * 0.5 + saLift).toFixed(2));
+      }
+    }
+    return conf;
+  };
+  const trimRanked = (legs) => [...legs].sort((a, b) => trimScore(b) - trimScore(a));
+
+  const TRIM_MODES = [
+    { id:"topn",     label:"Keep top N legs",            multi:false, fields:[{ key:"n",    label:"N",                placeholder:"e.g. 8" }] },
+    { id:"oddscap",  label:"Shave to target odds",        multi:false, fields:[{ key:"odds", label:"Target max odds",  placeholder:"e.g. 5.00" }] },
+    { id:"minprob",  label:"Drop legs below min prob %",  multi:false, fields:[{ key:"prob", label:"Min prob %",       placeholder:"e.g. 75" }] },
+    { id:"chunk",    label:"Split into N-leg tickets",    multi:true,  fields:[{ key:"n",    label:"Legs per ticket",  placeholder:"e.g. 5" }] },
+    { id:"probsplit",label:"Split by prob threshold",     multi:true,  fields:[{ key:"prob", label:"Threshold %",      placeholder:"e.g. 75" }] },
+    { id:"smart",    label:"Smart Split (auto tier A/B/C)",multi:true, fields:[{ key:"n",    label:"Max legs per sub-ticket", placeholder:"5 (default)" }] },
+  ];
+
+  const runTrimMode = () => {
+    setTrimError(null); setTrimResult(null);
+    const src = trimSources.find(s => s.key === trimSourceKey);
+    if (!src) { setTrimError("Pick a ticket first."); return; }
+    const ranked = trimRanked(src.legs);
+    const num = (key) => parseFloat(trimInputs[key]);
+    const asResult = (legs, label) => ({ legs, label, totalOdds: trimOddsOf(legs) });
+
+    if (trimModeId === "topn") {
+      const n = parseInt(num("n"), 10);
+      if (!n || n < 1) { setTrimError("Enter a valid N."); return; }
+      setTrimResult([asResult(ranked.slice(0, n), `Top ${n} legs`)]);
+
+    } else if (trimModeId === "oddscap") {
+      const target = num("odds");
+      if (!target || target < 1) { setTrimError("Enter a valid target odds."); return; }
+      const s = [...ranked];
+      while (s.length > 1 && trimOddsOf(s) > target) s.pop(); // drop lowest-score leg first
+      if (trimOddsOf(s) > target) {
+        setTrimError(`Even your single best leg (×${s[0].odds}) is over ×${target} — can't reach that target without dropping below 1 leg.`);
+        return;
+      }
+      setTrimResult([asResult(s, `Trimmed to ×${target} max`)]);
+
+    } else if (trimModeId === "minprob") {
+      const minP = parseInt(num("prob"), 10);
+      if (!minP || minP < 1) { setTrimError("Enter a valid min prob %."); return; }
+      const kept = ranked.filter(l => l.conf == null || parseFloat(l.conf) >= minP);
+      if (!kept.length) { setTrimError(`No legs meet ≥${minP}%. Try lower.`); return; }
+      setTrimResult([asResult(kept, `Prob ≥${minP}%`)]);
+
+    } else if (trimModeId === "chunk") {
+      const n = parseInt(num("n"), 10);
+      if (!n || n < 1) { setTrimError("Enter a valid legs-per-ticket."); return; }
+      const chunks = [];
+      for (let i = 0; i < ranked.length; i += n) chunks.push(ranked.slice(i, i + n));
+      if (chunks.length > 1 && chunks[chunks.length - 1].length < 2) {
+        const last = chunks.pop();
+        chunks[chunks.length - 1] = [...chunks[chunks.length - 1], ...last];
+      }
+      setTrimResult(chunks.map((legs, i) => asResult(legs, `Ticket ${i + 1}/${chunks.length}`)));
+
+    } else if (trimModeId === "probsplit") {
+      const p = parseInt(num("prob"), 10);
+      if (!p || p < 1) { setTrimError("Enter a valid threshold %."); return; }
+      const hi = ranked.filter(l => l.conf == null || parseFloat(l.conf) >= p);
+      const lo = ranked.filter(l => l.conf != null && parseFloat(l.conf) < p);
+      const out = [];
+      if (hi.length) out.push(asResult(hi, `Prob ≥${p}%`));
+      if (lo.length) out.push(asResult(lo, `Prob <${p}%`));
+      if (!out.length) { setTrimError("Nothing to split."); return; }
+      setTrimResult(out);
+
+    } else if (trimModeId === "smart") {
+      const max = parseInt(num("n"), 10) || 5;
+      const A = ranked.filter(l => trimScore(l) >= 75);
+      const B = ranked.filter(l => trimScore(l) >= 50 && trimScore(l) < 75);
+      const Cc = ranked.filter(l => trimScore(l) < 50);
+      const out = [];
+      const chunk = (arr, lbl) => { for (let i = 0; i < arr.length; i += max) out.push(asResult(arr.slice(i, i + max), lbl)); };
+      chunk(A, "🔥 Tier A — Elite (≥75)");
+      chunk(B, "✅ Tier B — Solid (50-74)");
+      chunk(Cc, "⚠️ Tier C — Speculative (<50)");
+      if (!out.length) { setTrimError("Nothing to split."); return; }
+      setTrimResult(out);
+    }
+  };
+
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
   const [customPool, setCustomPool]   = useState("all"); // "all" | "engine"
@@ -10052,6 +10310,19 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // excludes the ticket being checked from this list by id, so a ticket never
   // flags itself.
   const corrOtherTickets = useMemo(() => [...tickets, ...savedTickets], [tickets, savedTickets]);
+
+  // Trim/Split source list — anything with at least 3 legs is worth trimming.
+  const trimSources = useMemo(() => {
+    const out = [];
+    if (draftLegs.length >= 3) out.push({ key: "draft", label: `Draft (${draftLegs.length} legs)`, legs: draftLegs });
+    tickets.forEach(t => {
+      if ((t.legs||[]).length >= 3) out.push({ key: `ticket:${t.id}`, label: `${t.slotLabel || `Ticket #${t.id}`} (${t.legs.length} legs · ×${t.totalOdds})`, legs: t.legs });
+    });
+    savedTickets.forEach(t => {
+      if ((t.legs||[]).length >= 3) out.push({ key: `saved:${t.code}`, label: `${t.code} (${t.legs.length} legs · ×${t.totalOdds})`, legs: t.legs });
+    });
+    return out;
+  }, [draftLegs, tickets, savedTickets]);
   const [savedCodes, setSavedCodes] = useState(() => {
     try { return JSON.parse(localStorage.getItem("grm_saved_codes_v15") || "{}"); } catch { return {}; }
   });
@@ -10379,7 +10650,15 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     // B2-FIX: save immediately with a local code so the UI is instant,
     // then patch to GRM code from /api/ticket/share when server responds.
     const localCode = generateTicketCode();
-    const payload   = { ...ticket, stake, code: localCode, date:date||todayStr(), savedAt:new Date().toISOString() };
+    // P-FIX: id must be unique per saved ticket, NOT inherited from the source
+    // ticket. draftTicket always uses the fixed literal id "draft" — spreading
+    // that through meant every ticket ever saved from a draft carried id:"draft",
+    // and so did every *future* draft. computeCorrelationRisks excludes matches
+    // where t.id === ticket.id (to skip self), so a saved ticket and any later
+    // draft silently looked like "the same ticket" and never cross-checked
+    // against each other even with the toggle on. localCode is already
+    // guaranteed unique — use it as the id.
+    const payload   = { ...ticket, id: localCode, stake, code: localCode, date:date||todayStr(), savedAt:new Date().toISOString() };
     const updated   = [...savedTickets, payload];
     setSavedTickets(updated); persistTickets(updated);
     const contentKey = ticketContentKey(ticket);
@@ -10564,15 +10843,22 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       savePoolToServer(rawPool, date);
     } else {
       // custom mode
-      // custom mode: respect customPool — engine-only filters to engineFixtureIds
+      // customPool === "all": every fixture with a Read/Edge/Radar signal, no
+      // quality gate — buildSignalPool. customPool === "engine": the strict,
+      // empirical-rate-gated pool — buildUniversalPool, restricted to fixtures
+      // already in engineFixtureIds.
+      const isPastBuild = date && date !== todayStr();
       const allCustomFixtures = customPool === "engine" && engineFixtureIds?.size
         ? parlayFixtures.filter(f => engineFixtureIds.has(f.id))
         : parlayFixtures;
-      const rawPool = buildUniversalPool(allCustomFixtures, rates).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
+      const rawPool = (customPool === "engine"
+        ? buildUniversalPool(allCustomFixtures, rates, isPastBuild)
+        : buildSignalPool(allCustomFixtures, rates, isPastBuild)
+      ).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
       if (rawPool.length === 0) {
         setAutoMessage(customPool==="engine"
           ? "No qualifying games in engine pool — switch to All Fixtures or build the engine pool first."
-          : "No qualifying games — try adding more leagues or clearing the filter.");
+          : "No fixtures with a Read, Edge, or Radar signal today — try a different date.");
         setBuilding(false); return;
       }
       if (rawPool.length < numParlays * 3) {
@@ -10660,16 +10946,18 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         <div style={{ display:"flex", flex:1, background:C.faint,
                       borderRadius:10, padding:3, gap:3 }}>
           {[
-            { id:"parlay", label:`Builder${draftLegs.length+tickets.length>0?` (${draftLegs.length+tickets.length})`:""}`,
+            { id:"parlay", label:"Builder", count: draftLegs.length + tickets.length,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
-            { id:"saved",  label:`Saved${savedTickets.length>0?` (${savedTickets.length})`:""}`,
+            { id:"saved",  label:"Saved", count: savedTickets.length,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
+            { id:"trim",   label:"Trim", count: 0,
+              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg> },
           ].map(t => {
             const on = view === t.id;
             return (
               <button key={t.id} onClick={() => setView(t.id)} style={{
-                flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6,
-                padding:"8px 0", fontSize:11, fontWeight:800, fontFamily:C.font,
+                flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+                padding:"7px 0", fontSize:10, fontWeight:800, fontFamily:C.font,
                 background: on ? C.surface      : "transparent",
                 color:      on ? C.accent        : C.muted,
                 border:     on ? `1px solid ${C.accent}40` : `1px solid transparent`,
@@ -10678,7 +10966,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 cursor:"pointer", transition:"all .15s",
                 WebkitTapHighlightColor:"transparent",
               }}>
-                <span style={{ opacity: on ? 1 : 0.55, display:"flex", flexShrink:0 }}>{t.icon}</span>
+                <span style={{ position:"relative", opacity: on ? 1 : 0.55, display:"flex", flexShrink:0 }}>
+                  {t.icon}
+                  {t.count > 0 && (
+                    <span style={{ position:"absolute", top:-7, right:-8, minWidth:11, height:11, borderRadius:6,
+                                   background: on ? C.accent : C.muted, color:C.bg, fontSize:6.5, fontWeight:900,
+                                   display:"flex", alignItems:"center", justifyContent:"center", padding:"0 2px",
+                                   lineHeight:1 }}>
+                      {t.count > 99 ? "99+" : t.count}
+                    </span>
+                  )}
+                </span>
                 {t.label}
               </button>
             );
@@ -10764,6 +11062,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   savedCode={savedCodes[ticketContentKey(draftTicket)]}
                   otherTickets={corrOtherTickets}
                   crossCheckEnabled={crossCheckEnabled}
+                  parleyEntryPulse={parleyEntryPulse}
+                  claimAutoOpen={claimAutoOpen}
                 />
               </div>
             )}
@@ -11053,6 +11353,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       savedCode={savedCodes[ticketContentKey(t)]}
                       otherTickets={corrOtherTickets}
                       crossCheckEnabled={crossCheckEnabled}
+                      parleyEntryPulse={parleyEntryPulse}
+                      claimAutoOpen={claimAutoOpen}
                       onEditDraft={legs => {
                         setDraftLegs(legs);
                         setView("parlay");
@@ -11205,6 +11507,183 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 </div>
               ))}
             </div>
+          </>
+        )}
+
+        {/* TRIM / SPLIT */}
+        {view === "trim" && (
+          <>
+            {!trimSources.length ? (
+              <div style={{ textAlign:"center",padding:"40px 20px",color:C.text,fontSize:11 }}>
+                <div style={{ opacity:.35,textTransform:"uppercase",letterSpacing:".15em",marginBottom:16 }}>
+                  Nothing to trim yet
+                </div>
+                <div style={{ background:`${C.gold}10`,border:`1px solid ${C.gold}30`,borderRadius:10,padding:"12px 16px",textAlign:"left",fontSize:9,color:C.text,lineHeight:1.7,opacity:1 }}>
+                  <div style={{ fontWeight:800,color:C.gold,marginBottom:6,fontSize:10 }}>How to use Trim</div>
+                  Trim works with tickets that have <strong>3 or more legs</strong>. To get started:<br/>
+                  <span style={{ color:C.gold }}>①</span> Build a ticket in the Builder tab<br/>
+                  <span style={{ color:C.gold }}>②</span> <strong>Save it first</strong> (tap Save on the ticket card)<br/>
+                  <span style={{ color:C.gold }}>③</span> Come back to Trim — it will appear in the source list<br/><br/>
+                  <span style={{ opacity:.6 }}>Drafts and unsaved builder tickets also appear here if they have 3+ legs.</span>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize:9,color:C.muted,lineHeight:1.6,marginBottom:10 }}>
+                  Pick a ticket, pick a mode. Legs are ranked by confidence{fixtures?.some(f => f._saScores) ? " + SA lift" : ""} — best legs always survive a trim, weakest go first in a split.
+                </div>
+                {fixtures?.some(f => f._saScores) && (
+                  <div style={{ fontSize:8,background:`${C.accent}08`,border:`1px solid ${C.accent}25`,borderRadius:8,padding:"6px 10px",marginBottom:10,color:C.text,lineHeight:1.6 }}>
+                    <span style={{ color:C.accent,fontWeight:800 }}>SA Active</span> — legs are scored using SA pattern lift + confidence. Legs with strong positive patterns rank higher; avoid-flagged legs rank lower.
+                  </div>
+                )}
+                <div style={{ fontSize:8,color:C.text,background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:8,padding:"7px 10px",marginBottom:14,lineHeight:1.6 }}>
+                  <span style={{ color:C.gold,fontWeight:800 }}>Tip:</span> Saved tickets appear here with their code. To trim a ticket you haven't saved yet, save it first from the Builder tab.
+                </div>
+
+                {/* Source picker */}
+                <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>1. Pick a ticket</div>
+                <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:16 }}>
+                  {trimSources.map(s => {
+                    const on = trimSourceKey === s.key;
+                    return (
+                      <button key={s.key} onClick={() => {
+                        setTrimSourceKey(s.key); setTrimResult(null); setTrimError(null);
+                      }} className="gb-ghost" style={{
+                        textAlign:"left", padding:"9px 12px", fontSize:10, fontWeight:700,
+                        color: on ? C.accent : C.text,
+                        background: on ? `${C.accent}10` : C.faint,
+                        borderColor: on ? `${C.accent}50` : C.border,
+                      }}>
+                        {s.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {trimSourceKey && (
+                  <>
+                    {/* Mode picker */}
+                    <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>2. Pick a mode</div>
+                    <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:14 }}>
+                      {TRIM_MODES.map(m => {
+                        const active = trimModeId === m.id;
+                        return (
+                          <button key={m.id} onClick={() => { setTrimModeId(m.id); setTrimInputs({}); setTrimResult(null); setTrimError(null); }}
+                            className="gb-ghost" style={{
+                              textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between",
+                              padding:"9px 12px", fontSize:10, fontWeight:700,
+                              color: active ? C.accent : C.text,
+                              background: active ? `${C.accent}10` : C.faint,
+                              borderColor: active ? `${C.accent}50` : C.border,
+                            }}>
+                            {m.label}
+                            <span style={{ fontSize:7,fontWeight:800,letterSpacing:".08em",textTransform:"uppercase",
+                                           color: active ? C.accent : C.muted, opacity:.8 }}>
+                              {m.multi ? "split" : "trim"}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Inputs for the active mode */}
+                    {(() => {
+                      const m = TRIM_MODES.find(x => x.id === trimModeId);
+                      if (!m) return null;
+                      return (
+                        <div style={{ display:"flex",gap:8,marginBottom:10 }}>
+                          {m.fields.map(f => (
+                            <div key={f.key} style={{ flex:1 }}>
+                              <div style={{ fontSize:8,color:C.muted,marginBottom:4 }}>{f.label}</div>
+                              <input type="number" value={trimInputs[f.key] || ""}
+                                onChange={e => setTrimInputs(prev => ({ ...prev, [f.key]: e.target.value }))}
+                                placeholder={f.placeholder} className="gb-ghost"
+                                style={{ width:"100%",padding:"8px 10px",fontSize:11,color:C.text,background:C.faint,borderColor:C.border }} />
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    <button onClick={runTrimMode} className="gb"
+                      style={{ width:"100%",padding:"10px 0",fontSize:11,fontWeight:800,color:C.bg,background:C.accent,marginBottom:10 }}>
+                      Run
+                    </button>
+
+                    {trimError && (
+                      <div style={{ fontSize:9,color:C.red,background:`${C.red}10`,border:`1px solid ${C.red}30`,
+                                    borderRadius:8,padding:"8px 10px",marginBottom:10 }}>{trimError}</div>
+                    )}
+
+                    {trimResult && (
+                      <>
+                        <div style={{ display:"flex",flexDirection:"column",gap:10,marginBottom:14 }}>
+                          {trimResult.map((r, ri) => (
+                            <div key={ri} style={{ background:C.surface,border:`1px solid ${C.accent}40`,borderRadius:12,padding:"10px 12px" }}>
+                              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
+                                <span style={{ fontSize:10,fontWeight:800,color:C.accent }}>{r.label} · {r.legs.length} legs</span>
+                                <span style={{ fontSize:13,fontWeight:800,color:C.text }}>×{r.totalOdds}</span>
+                              </div>
+                              <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
+                                {r.legs.map((leg, i) => {
+                                  // SA5: show SA lift badge if fixture data is available
+                                  const fix = leg.fixtureId && fixtures?.find(f => String(f.id) === String(leg.fixtureId));
+                                  const saEntry = fix?._saScores?.[leg.market];
+                                  const saLift = saEntry?.lift;
+                                  const saColor = saLift > 0 ? C.green : saLift < 0 ? C.red : C.muted;
+                                  return (
+                                  <div key={i} style={{ display:"flex",justifyContent:"space-between",fontSize:9,color:C.text,alignItems:"center" }}>
+                                    <span style={{ color:C.text,fontWeight:600,flex:1 }}>{leg.game}</span>
+                                    <span style={{ color:mktStyle(leg.market||"").color,fontWeight:700,marginLeft:8 }}>{leg.pick}</span>
+                                    <span style={{ marginLeft:6 }}>{leg.odds ? `${leg.odds}x` : "—"}</span>
+                                    {saLift != null && (
+                                      <span style={{ marginLeft:5,fontSize:8,color:saColor,fontWeight:800 }}>
+                                        {saLift > 0 ? `+${saLift.toFixed(1)}` : saLift.toFixed(1)}pp
+                                      </span>
+                                    )}
+                                  </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {trimResult.length === 1 ? (
+                          <div style={{ display:"flex",gap:6 }}>
+                            <button onClick={() => {
+                              setTickets(prev => [...prev, { id: Date.now(), source:"card_add", legs: trimResult[0].legs,
+                                totalOdds: trimResult[0].totalOdds, stake: 0, exhausted: false, slotLabel: trimResult[0].label }]);
+                              setTrimResult(null); setView("parlay"); scrollPanelToTop();
+                            }} className="gb-ghost" style={{ flex:1, padding:"7px 0", fontSize:10, color:C.gold, borderColor:`${C.gold}40` }}>
+                              Add to Builder
+                            </button>
+                            <button onClick={() => { setDraftLegs(trimResult[0].legs); setTrimResult(null); setView("parlay"); scrollPanelToTop(); }}
+                              className="gb-ghost" style={{ flex:1, padding:"7px 0", fontSize:10, color:C.accent, borderColor:`${C.accent}40` }}>
+                              Replace Draft
+                            </button>
+                          </div>
+                        ) : (
+                          <button onClick={() => {
+                            setTickets(prev => [
+                              ...prev,
+                              ...trimResult.map((r, ri) => ({
+                                id: Date.now() + ri, source:"card_add", legs: r.legs,
+                                totalOdds: r.totalOdds, stake: 0, exhausted: false, slotLabel: r.label,
+                              })),
+                            ]);
+                            setTrimResult(null); setView("parlay"); scrollPanelToTop();
+                          }} className="gb" style={{ width:"100%",padding:"10px 0",fontSize:11,fontWeight:800,color:C.bg,background:C.gold }}>
+                            Add all {trimResult.length} to Builder
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </>
+                )}
+              </>
+            )}
           </>
         )}
       </div>
@@ -12243,6 +12722,36 @@ function GRMProInner() {
   // Sync before first paint (no flash)
   syncC(theme);
 
+  // appScrollRef: points to the root app div — the definitive scroll container.
+  // On Vercel production builds the root <div> (not <body> or <html>) is the
+  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
+  // Using a ref on the actual element is the only reliable cross-env fix.
+  // S2-FIX: declared here, at the very top of the component, on purpose — every
+  // scroll-position read/write in this component (body-scroll-lock effects,
+  // the "scroll to top" FAB, and the Full Model return-scroll bookmarks) goes
+  // through getScrollY/setScrollY below. An earlier refactor declared
+  // equivalent helpers further down the component, and several effects above
+  // that point referenced them in their dependency arrays — `const` bindings
+  // are not hoisted the way functions are, so that produced a
+  // "Cannot access before initialization" crash on every render. Keeping the
+  // ref + helpers at the top guarantees every consumer in the component body
+  // sees them already initialized, regardless of where it's defined.
+  const appScrollRef = useRef(null);
+
+  const getScrollY = useCallback(() => {
+    const el = appScrollRef.current;
+    if (el) return el.scrollTop || 0;
+    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }, []);
+
+  const setScrollY = useCallback((px) => {
+    const el = appScrollRef.current;
+    if (el) { el.scrollTop = px; return; }
+    try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+    document.documentElement.scrollTop = px;
+    document.body.scrollTop = px;
+  }, []);
+
   // UX-FIX: blank/white first-paint on fresh installs (new phone, incognito) until the
   // user taps the address bar. Tapping the address bar forces the mobile browser to
   // recalculate the viewport (its toolbar collapses) which triggers a repaint — the page
@@ -12315,6 +12824,24 @@ function GRMProInner() {
   const [cachedAt, setCachedAt]   = useState(null);  // N16-FIX: timestamp of when cache was written
   const [legacySnapshot, setLegacySnapshot] = useState(false);
 
+  // SA5-FIX: top-level SA patterns — fetched once per session, shared across
+  // all features (Trim, SA Admin Row). CustomListView has its own internal
+  // saPatterns copy but it only loads when the SA panel is expanded; this
+  // top-level copy loads eagerly so Trim and other non-SA features can use
+  // SA lift for scoring without waiting for the user to open the SA panel.
+  const [appSaPatterns, setAppSaPatterns] = useState(null);
+  const appSaPatternsLoadingRef = useRef(false);
+  // Fetch SA patterns once on mount (no adminToken needed for basic patterns)
+  useEffect(() => {
+    if (appSaPatterns || appSaPatternsLoadingRef.current) return;
+    appSaPatternsLoadingRef.current = true;
+    fetch(`${SERVER}/api/sa-patterns`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.patterns?.length) setAppSaPatterns(d.patterns); })
+      .catch(() => {}) // non-fatal — SA scoring degrades gracefully to leg.conf
+      .finally(() => { appSaPatternsLoadingRef.current = false; });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [tab, setTab]             = useState("all");
   const [search, setSearch]       = useState("");
   const [leagueFilter, setLeagueFilter] = useState(null);
@@ -12334,13 +12861,16 @@ function GRMProInner() {
   const setTickets = useCallback((updater) => {
     setTicketsRaw(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      try { sessionStorage.setItem(BUILT_TICKETS_KEY(todayStr()), JSON.stringify(next)); } catch {}
+      // B2-FIX: use localStorage (not sessionStorage) so tickets persist across
+      // tab closes and browser restarts, not just refreshes.
+      try { localStorage.setItem(BUILT_TICKETS_KEY(todayStr()), JSON.stringify(next)); } catch {}
       return next;
     });
   }, []);
   useEffect(() => {
     try {
-      const stored = sessionStorage.getItem(BUILT_TICKETS_KEY(todayStr()));
+      // B2-FIX: read from localStorage (was sessionStorage).
+      const stored = localStorage.getItem(BUILT_TICKETS_KEY(todayStr()));
       if (stored) { const parsed = JSON.parse(stored); if (Array.isArray(parsed) && parsed.length) setTicketsRaw(parsed); }
     } catch {}
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -12355,7 +12885,30 @@ function GRMProInner() {
   const fetchStartTimeRef         = useRef(null);   // tracks when current fetch began
   const lastProgressRef           = useRef({ pct: 0, ts: Date.now() }); // stuck detection
 
+  // sport: "football" | "basketball" — which data source the Live Model uses.
+  // Everything else (date, loading, FETCH, progress, tabs, search) is shared.
+  const [sport, setSport] = useState("football");
+  // Basketball data — populated by fetchBasketball(), cleared on date change
+  const [bbGames,         setBbGames]         = useState([]);
+  const [bbRolloverPool,  setBbRolloverPool]  = useState([]);
+  const [bbRolloverPick,  setBbRolloverPick]  = useState(null);
+
   const [parlayJarvisOpen, setParlayJarvisOpen] = useState(false);
+
+  // parleyEntryPulse: increments every time the user navigates INTO Parley
+  // System (parlayJarvisOpen flips false -> true), from any other nav tab.
+  // ParlayJarvisTab uses this to auto-open the Leg Risk explainer once per
+  // visit (with the shake animation) on whichever ticket card has risk flags,
+  // then lets it settle back into the existing periodic-shake-only behavior
+  // for the rest of the time the user stays on this tab.
+  const [parleyEntryPulse, setParleyEntryPulse] = useState(0);
+  const prevParlayOpenRef = useRef(false);
+  useEffect(() => {
+    if (parlayJarvisOpen && !prevParlayOpenRef.current) {
+      setParleyEntryPulse(p => p + 1);
+    }
+    prevParlayOpenRef.current = parlayJarvisOpen;
+  }, [parlayJarvisOpen]);
 
   // N19-FIX: On mount, check for ?grm=CODE in URL — open parley panel and queue ticket load
   const [grmInboundCode, setGrmInboundCode] = useState(null);
@@ -12380,9 +12933,10 @@ function GRMProInner() {
   // the user returns to where they were, not to the top of the page.
   useEffect(() => {
     if (parlayJarvisOpen) {
-      // S2-FIX: use cross-browser scroll position — window.scrollY is 0 on some
-      // Vercel builds where the root element (not body) is the scroll container.
-      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      // S2-FIX: use the shared cross-browser scroll helpers (appScrollRef-aware)
+      // instead of a raw window.scrollY read, which is 0 on Vercel builds where
+      // the root element (not body) is the scroller.
+      const scrollY = getScrollY();
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12392,11 +12946,10 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        window.scrollTo(0, scrollY);
-        document.documentElement.scrollTop = scrollY;
+        setScrollY(scrollY);
       };
     }
-  }, [parlayJarvisOpen]);
+  }, [parlayJarvisOpen, getScrollY, setScrollY]);
 
   // ── JARVIS OVERLAY ────────────────────────────────────────────────────────
   // jarvisOpen controls the ChatLayout overlay panel — independent of all other views.
@@ -12406,8 +12959,8 @@ function GRMProInner() {
   // P16-FIX (also for Jarvis chat overlay): same body scroll lock as parlayJarvisOpen
   useEffect(() => {
     if (jarvisOpen) {
-      // S2-FIX: cross-browser scroll capture (see parlayJarvisOpen effect above)
-      const scrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      // S2-FIX: shared cross-browser scroll capture (see parlayJarvisOpen effect above)
+      const scrollY = getScrollY();
       document.body.style.overflow  = "hidden";
       document.body.style.position  = "fixed";
       document.body.style.top       = `-${scrollY}px`;
@@ -12417,11 +12970,10 @@ function GRMProInner() {
         document.body.style.position  = "";
         document.body.style.top       = "";
         document.body.style.width     = "";
-        window.scrollTo(0, scrollY);
-        document.documentElement.scrollTop = scrollY;
+        setScrollY(scrollY);
       };
     }
-  }, [jarvisOpen]);
+  }, [jarvisOpen, getScrollY, setScrollY]);
 
   // CL1: code payload from Jarvis chat → CodeAnalyzer auto-trigger
   const [jarvisCodePayload, setJarvisCodePayload] = useState(null);
@@ -12486,19 +13038,13 @@ function GRMProInner() {
     }
     if (fixture) {
       // Open Full Model for a specific fixture — keep Jarvis open so user can keep chatting
-      try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {}
+      try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {}
       setFullModelReturnTab("live");
       setMainFocusFixture(fixture);
       setJarvisOpen(false);
       return;
     }
-  }, []);
-
-  // appScrollRef: points to the root app div — the definitive scroll container.
-  // On Vercel production builds the root <div> (not <body> or <html>) is the
-  // scroller, so window.scrollY / document.documentElement.scrollTop are both 0.
-  // Using a ref on the actual element is the only reliable cross-env fix.
-  const appScrollRef = useRef(null);
+  }, [getScrollY]);
 
   // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
   // then fades away again after a brief pause so it does not sit there constantly.
@@ -12508,11 +13054,6 @@ function GRMProInner() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const scrollTopHideTimer = useRef(null);
   useEffect(() => {
-    const getScrollY = () => {
-      const el = appScrollRef.current;
-      if (el) return el.scrollTop || 0;
-      return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-    };
     const onScroll = () => {
       if (getScrollY() <= 320) {
         setShowScrollTop(false);
@@ -12535,7 +13076,8 @@ function GRMProInner() {
       if (el) el.removeEventListener("scroll", onScroll);
       if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
     };
-  }, []);
+  }, [getScrollY]);
+
 
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
   const [mainView, setMainView] = useState("main");
@@ -12624,8 +13166,8 @@ function GRMProInner() {
   // C1-FIX: save scroll position before navigating to Full Model so Back returns
   // the user to where they were. Previously only the grid/CustomListView paths
   // saved grm_scroll — these two callbacks were missing it entirely.
-  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, []);
-  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, []);
+  const onFullModelFromParlay   = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setFullModelReturnTab("parlay");   setMainFocusFixture(f); }, [getScrollY]);
+  const onFullModelFromRollover = useCallback(f => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainView("main"); setFullModelReturnTab("rollover"); setMainFocusFixture(f); }, [getScrollY]);
 
   // Add a pick from fixture card to draft legs
   const addLegToDraft = useCallback((fixture, pick) => {
@@ -12763,6 +13305,36 @@ function GRMProInner() {
     });
   }, []);
 
+  // SA5-FIX: inject SA pattern scores into every fixture at load time.
+  // This makes SA lift data available to any feature that holds a fixtureId —
+  // including the Trim tab (which can now score legs beyond just leg.conf)
+  // and the SA Admin Row (which reads from the same enriched dataset).
+  //
+  // Approach: for each fixture, run matchSAPatterns across all TB markets and
+  // pick the highest positive lift as the fixture's _saBestLift. Also store
+  // a per-market score map (_saScores) so Trim can look up the exact market
+  // a leg was added under and get the right SA lift for that market.
+  //
+  // This function is pure (no side effects) — it returns a new array.
+  // It's called once per data load, not on every render.
+  const injectSAScores = useCallback((fixturesArr, patterns) => {
+    if (!patterns || !patterns.length) return fixturesArr;
+    return fixturesArr.map(f => {
+      const scoresMap = {};
+      let bestLift = 0;
+      let bestMarket = null;
+      for (const mkt of Object.keys(SA_MARKETS)) {
+        const { positive, avoid } = matchSAPatterns(f, mkt, patterns);
+        const posLift = positive.length ? positive[0].lift : 0;
+        const negLift = avoid.length && !positive.length ? Math.abs(avoid[0].lift) : 0;
+        const lift = posLift - negLift;
+        scoresMap[mkt] = { lift, positive, avoid, flagged: !positive.length && avoid.length > 0 };
+        if (lift > bestLift) { bestLift = lift; bestMarket = mkt; }
+      }
+      return { ...f, _saScores: scoresMap, _saBestLift: bestLift, _saBestMarket: bestMarket };
+    });
+  }, []);
+
   const startPolling = (session, pollDate) => {
     if (pollRef.current) clearInterval(pollRef.current);
     fetchStartTimeRef.current = Date.now();
@@ -12799,7 +13371,11 @@ function GRMProInner() {
 
     stopPolling();
     stopAutoRefresh();
-    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false); setTickets([]);
+    // B2-FIX: do NOT clear tickets here — built tickets must persist until the
+    // user explicitly removes them. Previously fetchData (called by the FETCH
+    // button AND by autoRefresh every 90s when results update) wiped all
+    // builder tickets on every reload, causing them to silently disappear.
+    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false);
     setProgress(0); setProgressStage("starting"); setProgressMsg("Initialising…");
     fetchStartTimeRef.current   = Date.now();
     lastProgressRef.current     = { pct: 0, ts: Date.now() };
@@ -12828,7 +13404,9 @@ function GRMProInner() {
               const json = await snap.json();
               const data = Array.isArray(json.data) ? json.data : [];
               const capturedDate = date; // hoist so startAutoRefresh and pool save share same value
-              const _fd1 = applyFinishedStates(preserveLiveStates(data, fixturesRef.current)); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
+              // SA5-FIX: inject SA pattern scores at load time so all features
+              // (Trim, SA Admin Row) work from the same enriched dataset.
+              const _fd1 = injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
               // existed in the sync 200 path. This caused results to never auto-inject
               // after the first fetch (pipeline always returns 202 on a fresh date).
@@ -12865,7 +13443,8 @@ function GRMProInner() {
       }
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      const _fd2 = applyFinishedStates(preserveLiveStates(data, fixturesRef.current)); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
+      // SA5-FIX: inject SA scores (sync 200 path)
+      const _fd2 = injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
       startAutoRefresh(date);
 
       if (json.legacySchema) setLegacySnapshot(true);
@@ -12890,15 +13469,49 @@ function GRMProInner() {
     }
   }, [date, preserveLiveStates]);
 
+  // ── BASKETBALL FETCH ──────────────────────────────────────────────────────
+  // Uses the same loading/progress/error state as football so the shared
+  // header (progress bar, FETCH button) works identically for both sports.
+  const fetchBasketball = useCallback(async () => {
+    stopPolling();
+    setLoading(true); setError(null);
+    setProgress(0); setProgressStage("starting"); setProgressMsg("Fetching basketball games…");
+    setBbGames([]); setBbRolloverPool([]); setBbRolloverPick(null);
+    try {
+      const enriched = await enrichGamesForDate(date, pct => {
+        setProgress(Math.round(pct));
+        setProgressMsg(`Processing games… ${Math.round(pct)}%`);
+      });
+      setBbGames(enriched);
+      // Build rollover pool + pick from the enriched games
+      const pool = buildBasketballRolloverPool(enriched);
+      const pick = buildBasketballRolloverPick(pool);
+      setBbRolloverPool(pool);
+      setBbRolloverPick(pick);
+      setProgress(100);
+      setProgressStage("done");
+      setProgressMsg(`${enriched.length} basketball games ready`);
+    } catch(e) {
+      const friendly = friendlyError(e, "Basketball");
+      setError(friendly); setProgressStage("error"); setProgressMsg(friendly);
+    } finally {
+      setLoading(false);
+    }
+  }, [date]);
+
   const loadSnapshot = useCallback(async snapDate => {
     stopPolling();
-    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false); setTickets([]);
+    // B2-FIX: same as fetchData — don't clear builder tickets when loading a
+    // snapshot. Tickets persist until user explicitly removes them.
+    setLoading(true); setError(null); setCached(false); setCachedAt(null); setLegacySnapshot(false);
     setProgress(20); setProgressStage("loading"); setProgressMsg("Loading snapshot…");
     try {
       const res = await fetch(`${SERVER}/api/load-snapshot?date=${snapDate}`);
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      setFixtures(data); setDate(snapDate); setCached(true); setFrozenFixtures(data);
+      // SA5-FIX: inject SA scores on snapshot load too
+      const _fdSnap = injectSAScores(data, appSaPatterns);
+      setFixtures(_fdSnap); setDate(snapDate); setCached(true); setFrozenFixtures(_fdSnap);
       startAutoRefresh(snapDate);
       if (json.legacySchema) setLegacySnapshot(true);
       setProgress(100); setProgressStage("done"); setProgressMsg(`${data.length} fixtures loaded`);
@@ -13463,26 +14076,48 @@ function GRMProInner() {
               </span>
             )}
           </div>
-
-          {activeTab === "live" && (
-            <div style={{ display:"flex",gap:8,alignItems:"center" }}>
-              <input type="date" value={date} onChange={e => { if (!loading) setDate(e.target.value); }} className="gi"
-                style={{ color:C.accent,width:136,fontSize:11,padding:"7px 11px",flexShrink:0,
-                         opacity: loading ? 0.5 : 1, pointerEvents: loading ? "none" : "auto" }}/>
-              {/* Show progress% inline on the button so user knows it's running.
-                  disabled + pointerEvents:none blocks rapid re-taps that were
-                  causing session drift (each tap polled a new unknown session id). */}
-              <button onClick={() => fetchData(false)} disabled={loading} className="gb-primary"
-                style={{ padding:"8px 20px",fontSize:12,flexShrink:0,minWidth:80,
-                         pointerEvents: loading ? "none" : "auto",
-                         opacity: loading ? 0.75 : 1 }}>
-                {loading
-                  ? <span style={{ fontVariantNumeric:"tabular-nums" }}>{progress > 0 ? `${progress}%` : "…"}</span>
-                  : "FETCH"}
-              </button>
-            </div>
-          )}
         </div>
+
+        {/* Row 1b — Live controls: sport + date + FETCH. Own row so it has full
+            width to work with instead of competing with the brand text for
+            space — that competition is exactly what was pushing FETCH off
+            narrow screens once the sport selector was added. Wraps to a
+            second line on very narrow phones rather than clipping. */}
+        {activeTab === "live" && (
+          <div className="grm-header-controls">
+            {/* Sport selector — dropdown so it takes minimal space */}
+            <select
+              value={sport}
+              onChange={e => {
+                setSport(e.target.value);
+                setBbGames([]); setBbRolloverPool([]); setBbRolloverPick(null);
+                setError(null);
+              }}
+              className="gi"
+              style={{ fontSize:10,padding:"7px 10px",color:C.accent,fontWeight:800,
+                       width:"auto",flexShrink:0,cursor:"pointer",
+                       background:C.inputBg,border:`1px solid ${C.border}`,borderRadius:C.btnRadius||6 }}>
+              <option value="football">Football</option>
+              <option value="basketball">Basketball</option>
+            </select>
+            <input type="date" value={date} onChange={e => { if (!loading) setDate(e.target.value); }} className="gi"
+              style={{ color:C.accent,width:136,fontSize:11,padding:"7px 11px",flexShrink:0,
+                       opacity: loading ? 0.5 : 1, pointerEvents: loading ? "none" : "auto" }}/>
+            {/* Show progress% inline on the button so user knows it's running.
+                disabled + pointerEvents:none blocks rapid re-taps that were
+                causing session drift (each tap polled a new unknown session id). */}
+            <button
+              onClick={() => sport === "basketball" ? fetchBasketball() : fetchData(false)}
+              disabled={loading} className="gb-primary"
+              style={{ padding:"8px 20px",fontSize:12,flexShrink:0,minWidth:80,
+                       pointerEvents: loading ? "none" : "auto",
+                       opacity: loading ? 0.75 : 1 }}>
+              {loading
+                ? <span style={{ fontVariantNumeric:"tabular-nums" }}>{progress > 0 ? `${progress}%` : "…"}</span>
+                : "FETCH"}
+            </button>
+          </div>
+        )}
 
         {/* Legacy snapshot warning */}
         {legacySnapshot && (
@@ -13537,7 +14172,7 @@ function GRMProInner() {
         )}
 
         {/* Row 2 — Fixture filter tabs (no search here) */}
-        {activeTab === "live" && mainView === "main" && fixtures.length > 0 && (
+        {activeTab === "live" && mainView === "main" && fixtures.length > 0 && sport === "football" && (
           <>
             <div className="grm-header-subnav">
               {TABS.map(t => (
@@ -13869,6 +14504,15 @@ function GRMProInner() {
           #3-FIX: themeId key forces React to re-render children when theme
           changes so the dashboard hero doesn't show a stale white box. */}
       <div key={`rollover-${theme?.id}`} style={{ display: mainView === "rollover" ? undefined : "none" }}>
+        {sport === "basketball" ? (
+          <div style={{ maxWidth:1480,margin:"0 auto",padding:"28px 16px 0" }}>
+            <BasketballRolloverView
+              rolloverPick={bbRolloverPick}
+              pool={bbRolloverPool}
+              C={C}
+            />
+          </div>
+        ) : (
         <RolloverSystem
           C={C}
           SERVER={SERVER}
@@ -13880,12 +14524,16 @@ function GRMProInner() {
           onFullModel={onFullModelFromRollover}
           onChainChange={handleChainChange}
         />
+        )}
       </div>
 
       {activeTab === "live" && mainView === "main" && (
         <div style={{ maxWidth:1480,margin:"0 auto",padding:activeTab==="live"?"28px 16px 0":"28px 24px 0" }}>
           {error && <div style={{ background:C.redDim,border:"1px solid rgba(248,113,113,0.2)",borderRadius:10,padding:"12px 18px",marginBottom:24,fontSize:12,color:C.red }}>✕ {error}</div>}
-          {!loading && !error && !fixtures.length && (
+          {!loading && !error && sport === "football" && !fixtures.length && (
+            <div style={{ textAlign:"center",padding:"80px 0",color:C.text,fontSize:11,letterSpacing:".18em",textTransform:"uppercase" }}>Select a date and press FETCH</div>
+          )}
+          {!loading && !error && sport === "basketball" && !bbGames.length && (
             <div style={{ textAlign:"center",padding:"80px 0",color:C.text,fontSize:11,letterSpacing:".18em",textTransform:"uppercase" }}>Select a date and press FETCH</div>
           )}
 
@@ -13975,8 +14623,8 @@ function GRMProInner() {
             </div>
           )}
 
-          {/* JarvisMindBox + fixture list */}
-          {fixtures.length > 0 && (
+          {/* ── FOOTBALL fixtures ─────────────────────────────────────────── */}
+          {sport === "football" && fixtures.length > 0 && (
             <>
               <JarvisMindBox fixtures={fixtures} date={date} backtestSummary={historicalRates} />
 
@@ -14020,10 +14668,11 @@ function GRMProInner() {
                     fixtures={filtered} search={search}
                     draftLegs={draftLegs} onAddToParlay={addLegToDraft}
                     onOpenFixture={id => { const f = fixtures.find(x => x.id === id); if (f) setMainFocusFixture(f); }}
-                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
+                    onFullModel={fx => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
                     backtestSummary={historicalRates}
                     adminMode={adminMode} adminToken={adminToken}
                     isPastDate={date && date !== todayStr()}
+                    date={date || todayStr()}
                     onAddToTicket={ticket => {
                       setDraftLegs(prev => {
                         const existingMap = new Map(prev.map(l => [l.fixtureId, l]));
@@ -14071,7 +14720,7 @@ function GRMProInner() {
                     {filtered.map(f => (
                       <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
                         <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
-                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(window.scrollY)); } catch {} setMainFocusFixture(fx); }}
+                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
                           backtestSummary={historicalRates}
                           adminToken={adminToken}
                         />
@@ -14084,6 +14733,16 @@ function GRMProInner() {
                 </>
               )}
             </>
+          )}
+
+          {/* ── BASKETBALL fixtures — same shell, same date, same FETCH ── */}
+          {sport === "basketball" && !loading && bbGames.length > 0 && (
+            <BasketballGameList
+              games={bbGames}
+              C={C}
+              draftLegs={draftLegs}
+              onAddToDraft={addLegToDraft}
+            />
           )}
         </div>
       )}
@@ -14227,7 +14886,7 @@ function GRMProInner() {
               setActiveTab("code");
             }
             setFullModelReturnTab(null);
-            try { window.scrollTo(0, parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
+            try { setScrollY(parseInt(sessionStorage.getItem("grm_scroll") || "0")); } catch {}
           }}
           draftLegs={draftLegs}
           onAddToParlay={addLegToDraft}
@@ -14263,6 +14922,7 @@ function GRMProInner() {
             setActiveTab("live");
           }}
           crossCheckEnabled={corrCrossCheckEnabled}
+          parleyEntryPulse={parleyEntryPulse}
         />
       )}
 
