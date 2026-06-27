@@ -3903,7 +3903,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
 // ── CUSTOM LIST VIEW ──────────────────────────────────────────────────────
 // getCustomPick, xgHomeDominant, xgAwayDominant → engine.js
 
-function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "", isPastDate = false, date = null }) {
+function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftLegs, onOpenFixture, onFullModel, backtestSummary, adminMode = false, adminToken = "", isPastDate = false, date = null, sortActive = new Set(), setSortActive = () => {} }) {
   const isMobile = useIsMobile();
   const SS_KEY = "grm_clv_state_v1";
   const loadSS = (k, fallback) => { try { const s = sessionStorage.getItem(SS_KEY); if (!s) return fallback; const d = JSON.parse(s); return d[k] !== undefined ? d[k] : fallback; } catch { return fallback; } };
@@ -3932,16 +3932,32 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [saMixError,    setSaMixError]    = useState(null);
 
   useEffect(() => {
-    // SA4-FIX: fetch patterns when the panel is expanded (was: adminMode only).
-    // adminToken still passed so admins get full data; non-admins pass "".
+    // SA4-FIX: fetch patterns when panel expands. Non-admins hit the public
+    // endpoint (no adminToken) so they never get a 403 Forbidden.
     if (!saExpanded || saPatterns || saLoading) return;
     setSaLoading(true);
-    fetch(`${SERVER}/api/sa-patterns?adminToken=${encodeURIComponent(adminToken)}`)
-      .then(r => r.json())
-      .then(d => { if (d?.patterns) setSaPatterns(d); else setSaError(d?.error || "No patterns found"); })
-      .catch(e => setSaError(e.message))
+    setSaError(null);
+    const token = adminMode ? `?adminToken=${encodeURIComponent(adminToken)}` : "";
+    fetch(`${SERVER}/api/sa-patterns${token}`)
+      .then(r => {
+        if (r.status === 403) throw new Error("patterns_restricted");
+        return r.json();
+      })
+      .then(d => {
+        if (d?.patterns) setSaPatterns(d);
+        else setSaError(d?.error || "No patterns found");
+      })
+      .catch(e => {
+        if (e.message === "patterns_restricted") {
+          // Server requires auth — set a sentinel so the panel still renders
+          // but shows a "no pattern filtering" notice instead of an error banner.
+          setSaPatterns({ patterns: [], restricted: true });
+        } else {
+          setSaError(e.message);
+        }
+      })
       .finally(() => setSaLoading(false));
-  }, [saExpanded, adminToken, saPatterns, saLoading]);
+  }, [saExpanded, adminMode, adminToken, saPatterns, saLoading]);
 
   // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
   useEffect(() => {
@@ -4342,8 +4358,23 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           if (aLive !== bLive) return aLive - bLive;
         }
         return b.pick.prob - a.pick.prob;
+      })
+      // SIG-FIX: apply sortActive quality filters from Signal section
+      .filter(row => {
+        if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
+        if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
+        if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortActive.has("strong_first")) {
+          const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+          const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+          if (aS !== bS) return aS - bS;
+        }
+        return 0; // maintain existing prob sort above
       });
-  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate]);
+  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive]);
 
   // SA Pattern mode — separate list, only built when an admin has a market selected.
   // Reuses the same { f, pick } shape as `rows` so the existing row JSX renders it
@@ -4439,8 +4470,22 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         ? (a._saAvoid[0]?.lift||0) - (b._saAvoid[0]?.lift||0)
         : (b._saPositive[0]?.lift||0) - (a._saPositive[0]?.lift||0);
     });
-    return out;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate]);
+    // SIG-FIX: apply sortActive quality filters to saRows too
+    const filtered = out.filter(row => {
+      if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
+      if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
+      if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
+      return true;
+    });
+    if (sortActive.has("strong_first")) {
+      filtered.sort((a, b) => {
+        const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+        const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+        return aS - bS;
+      });
+    }
+    return filtered;
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate, sortActive]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -4734,7 +4779,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {(saLoading || (saMarket === "PE:Mix" && saMixLoading)) && (
               <span style={{ fontSize:8,color:C.muted }}>loading…</span>
             )}
-            {saError && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
+            {saError && !saPatterns?.restricted && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
             {saMixError && saMarket === "PE:Mix" && <span style={{ fontSize:8,color:C.red }}>{saMixError}</span>}
           </div>
           <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{saExpanded ? "▲" : "▼"}</span>
@@ -4751,10 +4796,18 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         {saExpanded && (
           <div style={{ border:`1px solid ${C.accent}30`,borderTop:"none",borderRadius:"0 0 8px 8px",
                         padding:"10px 12px 12px",background:`${C.accent}04` }}>
+            {saPatterns?.restricted ? (
+              <div style={{ fontSize:8,color:C.muted,lineHeight:1.7,padding:"4px 0" }}>
+                Strategy Analyst pattern filtering is available to registered users.
+                SA lift scores and ranking are still applied to Trim and scores in the background.
+              </div>
+            ) : (
             <div style={{ fontSize:8,color:C.text,opacity:.65,marginBottom:10,lineHeight:1.6 }}>
               Filters fixtures by validated SA patterns — games that have historically performed well (or poorly) for each market.
               Avoid-flagged games (⚑) appear at the bottom.
             </div>
+            )}
+            {!saPatterns?.restricted && (
             <div className="cscroll" style={{ marginBottom:6 }}>
               {saMarket && (
                 <button onClick={() => setSaMarket(null)} className="gb"
@@ -4766,7 +4819,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               {SA_MARKET_LABELS.map(mk => {
                 const isMix    = mk.id === "PE:Mix";
                 const isOn     = saMarket === mk.id;
-                // PE:Mix is still admin-only — hide from regular users
                 if (isMix && !adminMode) return null;
                 return (
                   <button key={mk.id} onClick={() => {
@@ -4787,6 +4839,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 );
               })}
             </div>
+            )}
             {saMarket === "PE:Mix" && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
@@ -4817,6 +4870,37 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                          ...(isOn?chipOn(col):chipOff) }}>
                 {sf.icon && <span style={{ color: isOn ? col : C.muted, lineHeight:0 }}>{sf.icon}</span>}
                 {sf.label}
+              </button>
+            );
+          })}
+        </div>
+        {/* Sort quality filters — Strong First, Strong Only, High Quality, Limited Data */}
+        <div style={{ display:"flex",flexWrap:"wrap",gap:6,marginTop:7 }}>
+          {["strong_first","strong_only","hq_data","ltd_data"].map(id => {
+            const opt = SORT_OPTIONS.find(o => o.id === id);
+            if (!opt) return null;
+            const isOn = sortActive.has(id);
+            const col  = id==="strong_first"||id==="strong_only" ? C.accent
+                       : id==="hq_data"                          ? C.green
+                       :                                           C.gold;
+            const toggle = () => setSortActive(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) {
+                next.delete(id);
+              } else {
+                // strong_first and strong_only are mutually exclusive primaries
+                if (opt.type === "sort_primary") {
+                  SORT_OPTIONS.filter(o => o.type === "sort_primary").forEach(o => next.delete(o.id));
+                }
+                next.add(id);
+              }
+              return next;
+            });
+            return (
+              <button key={id} onClick={toggle} className="gb" title={opt.desc}
+                style={{ padding:"4px 11px",fontSize:9,textTransform:"none",
+                         ...(isOn ? chipOn(col) : chipOff) }}>
+                {opt.label}
               </button>
             );
           })}
@@ -14673,6 +14757,7 @@ function GRMProInner() {
                     adminMode={adminMode} adminToken={adminToken}
                     isPastDate={date && date !== todayStr()}
                     date={date || todayStr()}
+                    sortActive={sortActive} setSortActive={setSortActive}
                     onAddToTicket={ticket => {
                       setDraftLegs(prev => {
                         const existingMap = new Map(prev.map(l => [l.fixtureId, l]));
