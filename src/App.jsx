@@ -3926,38 +3926,53 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [saPatterns,  setSaPatterns]  = useState(null); // raw sa-patterns.json payload
   const [saLoading,   setSaLoading]   = useState(false);
   const [saError,     setSaError]     = useState(null);
+  // SA-RESET: when adminMode flips (unlock or lock), clear any cached patterns
+  // so the fetch useEffect reruns with the correct token on next expansion.
+  const prevAdminModeRef = useRef(adminMode);
+  useEffect(() => {
+    if (prevAdminModeRef.current !== adminMode) {
+      prevAdminModeRef.current = adminMode;
+      setSaPatterns(null);
+      setSaError(null);
+    }
+  }, [adminMode]);
   // PE Mix home-market assignments — fetched from /api/sa-mix when saMarket === "PE:Mix"
   const [saMixLegs,     setSaMixLegs]     = useState(null); // array of home-assigned legs or null
   const [saMixLoading,  setSaMixLoading]  = useState(false);
   const [saMixError,    setSaMixError]    = useState(null);
 
   useEffect(() => {
-    // SA4-FIX: fetch patterns when panel expands. Non-admins hit the public
-    // endpoint (no adminToken) so they never get a 403 Forbidden.
-    if (!saExpanded || saPatterns || saLoading) return;
+    if (!saExpanded) return;
+    if (saLoading) return;
+    const isRestricted = saPatterns?.restricted === true;
+    // Already have real patterns — nothing to do
+    if (saPatterns && !isRestricted) return;
+    // Restricted sentinel cached but still not admin — leave the notice showing
+    if (isRestricted && !adminMode) return;
+    // All other cases: no patterns yet, OR restricted+admin (will fetch with token)
     setSaLoading(true);
     setSaError(null);
+    if (isRestricted) setSaPatterns(null); // clear sentinel before refetch
     const token = adminMode ? `?adminToken=${encodeURIComponent(adminToken)}` : "";
     fetch(`${SERVER}/api/sa-patterns${token}`)
       .then(r => {
         if (r.status === 403) throw new Error("patterns_restricted");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then(d => {
-        if (d?.patterns) setSaPatterns(d);
-        else setSaError(d?.error || "No patterns found");
+        if (d?.patterns?.length) setSaPatterns(d);
+        else if (d?.error) { setSaError(d.error); setSaPatterns({ patterns: [], restricted: true }); }
+        else setSaPatterns({ patterns: [], restricted: true });
       })
       .catch(e => {
-        if (e.message === "patterns_restricted") {
-          // Server requires auth — set a sentinel so the panel still renders
-          // but shows a "no pattern filtering" notice instead of an error banner.
-          setSaPatterns({ patterns: [], restricted: true });
-        } else {
-          setSaError(e.message);
-        }
+        setSaPatterns({ patterns: [], restricted: e.message === "patterns_restricted" });
+        if (e.message !== "patterns_restricted") setSaError(e.message);
       })
       .finally(() => setSaLoading(false));
-  }, [saExpanded, adminMode, adminToken, saPatterns, saLoading]);
+  // adminMode and adminToken are the key triggers — when admin unlocks, rerun
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saExpanded, adminMode, adminToken]);
 
   // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
   useEffect(() => {
