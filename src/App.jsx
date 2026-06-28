@@ -3914,6 +3914,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [selected,       setSelected]       = useState(null);
   const [activeStrategy, setActiveStrategyState] = useState(() => loadSS("activeStrategy", null));
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
+  // Kickoff time filter — "before" (≤ HH:MM) or "after" (≥ HH:MM)
+  const [kickoffFilter, setKickoffFilter] = useState(null); // null | { mode:"before"|"after", hour:number }
 
   // ── SA Pattern mode (user-facing, collapsible) ────────────────────────
   // Separate from `family`: family picks WHICH market off a fixture's model
@@ -4379,6 +4381,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
         if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
         if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
+        // KICK-FIX: kickoff time filter — f.time is "HH:MM"
+        if (kickoffFilter && row.f.time) {
+          const [hh, mm] = row.f.time.split(":").map(Number);
+          const mins = hh * 60 + (mm || 0);
+          const filterMins = kickoffFilter.hour * 60;
+          if (kickoffFilter.mode === "before" && mins > filterMins) return false;
+          if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -4389,7 +4399,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         return 0; // maintain existing prob sort above
       });
-  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive]);
+  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter]);
 
   // SA Pattern mode — separate list, only built when an admin has a market selected.
   // Reuses the same { f, pick } shape as `rows` so the existing row JSX renders it
@@ -4490,6 +4500,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
       if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
       if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
+      // KICK-FIX: kickoff time filter
+      if (kickoffFilter && row.f.time) {
+        const [hh, mm] = row.f.time.split(":").map(Number);
+        const mins = hh * 60 + (mm || 0);
+        const filterMins = kickoffFilter.hour * 60;
+        if (kickoffFilter.mode === "before" && mins > filterMins) return false;
+        if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+      }
       return true;
     });
     if (sortActive.has("strong_first")) {
@@ -4500,7 +4518,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate, sortActive]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate, sortActive, kickoffFilter]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -4919,6 +4937,56 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </button>
             );
           })}
+        </div>
+        {/* Kickoff time filter */}
+        <div style={{ marginTop:9 }}>
+          <div style={{ fontSize:8,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
+            Kickoff time
+            {kickoffFilter && (
+              <button onClick={() => setKickoffFilter(null)}
+                style={{ marginLeft:8,fontSize:8,background:"none",border:"none",color:C.red,cursor:"pointer",padding:0,fontWeight:700 }}>
+                ✕ clear
+              </button>
+            )}
+          </div>
+          <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
+            {/* Mode toggle: Before / After */}
+            {["before","after"].map(mode => {
+              const isActive = kickoffFilter?.mode === mode;
+              return (
+                <button key={mode} onClick={() => setKickoffFilter(prev =>
+                  prev?.mode === mode ? null : { mode, hour: prev?.hour ?? 18 }
+                )} className="gb"
+                  style={{ padding:"4px 10px",fontSize:9,textTransform:"none",flexShrink:0,
+                           ...(isActive ? chipOn(C.accent) : chipOff) }}>
+                  {mode === "before" ? "≤ Before" : "≥ After"}
+                </button>
+              );
+            })}
+            {/* Hour selector — only shown when a mode is active */}
+            {kickoffFilter && (
+              <div style={{ display:"flex",gap:4,flexWrap:"wrap" }}>
+                {[9,12,14,15,16,17,18,19,20,21,22].map(h => {
+                  const isOn = kickoffFilter.hour === h;
+                  return (
+                    <button key={h} onClick={() => setKickoffFilter(prev => ({ ...prev, hour: h }))}
+                      className="gb"
+                      style={{ padding:"4px 8px",fontSize:9,textTransform:"none",flexShrink:0,
+                               ...(isOn ? chipOn(C.gold) : chipOff) }}>
+                      {String(h).padStart(2,"0")}:00
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {kickoffFilter && (
+            <div style={{ fontSize:8,color:C.muted,marginTop:4,lineHeight:1.5 }}>
+              {kickoffFilter.mode === "before"
+                ? `Showing games kicking off at or before ${String(kickoffFilter.hour).padStart(2,"0")}:00`
+                : `Showing games kicking off at or after ${String(kickoffFilter.hour).padStart(2,"0")}:00`}
+            </div>
+          )}
         </div>
       </div>
 
@@ -7436,7 +7504,7 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   );
 }
 
-function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false, parleyEntryPulse = 0, claimAutoOpen }) {
+function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false, parleyEntryPulse = 0, claimAutoOpen, onRemoveLegFromOther }) {
   const [stakeInput, setStakeInput] = useState(ticket.stake > 0 ? String(ticket.stake) : "");
   const stake      = parseFloat(stakeInput) || 0;
   const potential  = parseFloat((stake * parseFloat(ticket.totalOdds)).toFixed(2));
@@ -7549,8 +7617,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               {corrOpen && (
                 <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
                               background:C.surface, border:`1px solid ${C.amber}40`,
-                              borderRadius:10, padding:"10px 14px", minWidth:230,
-                              boxShadow:"0 8px 24px rgba(0,0,0,.18)" }}>
+                              borderRadius:10, padding:"10px 14px", minWidth:260, maxWidth:320,
+                              boxShadow:"0 8px 24px rgba(0,0,0,.28)" }}>
                   <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
                                 textTransform:"uppercase", marginBottom:6 }}>
                     Leg Risk — what this means
@@ -7558,17 +7626,69 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                   <div style={{ fontSize:9, color:C.muted, lineHeight:1.6, marginBottom:8 }}>
                     One or more legs here are tied to a game you've already got money on. If that game's result swings one way, it affects both tickets — not the same as independent legs.
                   </div>
-                  {corrRisks.map((r, i) => (
-                    <div key={i} style={{ fontSize:9, color:C.text, marginBottom:5, lineHeight:1.5,
-                      padding:"5px 8px", background:`${r.type === "booked" ? C.red : C.amber}08`, borderRadius:6,
+                  {corrRisks.map((r, i) => {
+                    // Find the leg index in this ticket matching the risky game
+                    const legIdx = ticket.legs.findIndex(l =>
+                      l.game === r.game || l.fixtureId === (ticket.legs.find(x => x.game === r.game)?.fixtureId)
+                    );
+                    // For session risks, find the other ticket object
+                    const otherTicket = r.type === "session"
+                      ? otherTickets.find(t => (t.legs||[]).some(ol => ol.game === r.game))
+                      : null;
+                    return (
+                    <div key={i} style={{ fontSize:9, color:C.text, marginBottom:8, lineHeight:1.5,
+                      padding:"7px 9px", background:`${r.type === "booked" ? C.red : C.amber}08`, borderRadius:8,
                       border:`1px solid ${r.type === "booked" ? C.red : C.amber}20` }}>
-                      {r.type === "booked"
-                        ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked ({r.bookedPick}). This leg: {r.pick}.</>
-                        : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
-                      }
+                      {/* Description */}
+                      <div style={{ marginBottom:7 }}>
+                        {r.type === "booked"
+                          ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked ({r.bookedPick}). This leg: {r.pick}.</>
+                          : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
+                        }
+                      </div>
+                      {/* Action buttons */}
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                        {/* Remove this leg from the current ticket */}
+                        {onRemoveLeg && legIdx >= 0 && (
+                          <button onClick={() => { onRemoveLeg(legIdx); setCorrOpen(false); }}
+                            style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
+                                     background:"transparent", border:`1px solid ${C.red}50`, color:C.red }}>
+                            Remove this leg
+                          </button>
+                        )}
+                        {/* Clear the booked record so it's no longer flagged */}
+                        {r.type === "booked" && (
+                          <button onClick={() => {
+                            const updated = loadBookedLegs().filter(b =>
+                              !(b.game === r.game || (b.fixtureId && ticket.legs.find(l => l.game === r.game && l.fixtureId === b.fixtureId)))
+                            );
+                            persistBookedLegs(updated);
+                            setCorrOpen(false);
+                            // Force a re-render by toggling open
+                            setTimeout(() => setCorrOpen(true), 50);
+                          }}
+                            style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
+                                     background:"transparent", border:`1px solid ${C.muted}40`, color:C.muted }}>
+                            Clear booked flag
+                          </button>
+                        )}
+                        {/* For session risks — remove this leg from the OTHER ticket */}
+                        {r.type === "session" && otherTicket && onRemoveLegFromOther && (
+                          <button onClick={() => {
+                            const otherLegIdx = (otherTicket.legs||[]).findIndex(l => l.game === r.game);
+                            if (otherLegIdx >= 0) onRemoveLegFromOther(otherTicket.id, otherLegIdx);
+                            setCorrOpen(false);
+                          }}
+                            style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
+                                     background:"transparent", border:`1px solid ${C.amber}50`, color:C.amber }}>
+                            Remove from {r.otherLabel}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  ))}
-                  <div style={{ fontSize:8, color:C.muted, marginTop:6, lineHeight:1.5,
+                    );
+                  })}
+                  <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.5,
                     borderTop:`1px solid ${C.border}`, paddingTop:6 }}>
                     Not a block — just a flag. You can still build and book the ticket.
                   </div>
@@ -11163,6 +11283,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   crossCheckEnabled={crossCheckEnabled}
                   parleyEntryPulse={parleyEntryPulse}
                   claimAutoOpen={claimAutoOpen}
+                  onRemoveLegFromOther={(ticketId, legIdx) =>
+                    setTickets(prev => prev.map(tx => tx.id !== ticketId ? tx : {
+                      ...tx, legs: tx.legs.filter((_, idx) => idx !== legIdx),
+                      totalOdds: tx.legs.filter((_, idx) => idx !== legIdx)
+                        .reduce((s, l) => parseFloat((s * (parseFloat(l.odds)||1)).toFixed(4)), 1.0).toFixed(2)
+                    }))
+                  }
                 />
               </div>
             )}
@@ -11538,6 +11665,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                         : () => remixTicket(t.id)
                       }
                       onSwapLeg={legIdx => swapLeg(t.id, legIdx)}
+                      onRemoveLegFromOther={(ticketId, legIdx) =>
+                        setTickets(prev => prev.map(tx => tx.id !== ticketId ? tx : {
+                          ...tx, legs: tx.legs.filter((_, idx) => idx !== legIdx),
+                          totalOdds: tx.legs.filter((_, idx) => idx !== legIdx)
+                            .reduce((s, l) => parseFloat((s * (parseFloat(l.odds)||1)).toFixed(4)), 1.0).toFixed(2)
+                        }))
+                      }
                     />
                     </div>
                   ))}
