@@ -4834,18 +4834,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         {saExpanded && (
           <div style={{ border:`1px solid ${C.accent}30`,borderTop:"none",borderRadius:"0 0 8px 8px",
                         padding:"10px 12px 12px",background:`${C.accent}04` }}>
-            {saPatterns?.restricted ? (
-              <div style={{ fontSize:8,color:C.muted,lineHeight:1.7,padding:"4px 0" }}>
-                Strategy Analyst pattern filtering is available to registered users.
-                SA lift scores and ranking are still applied to Trim and scores in the background.
-              </div>
-            ) : (
             <div style={{ fontSize:8,color:C.text,opacity:.65,marginBottom:10,lineHeight:1.6 }}>
               Filters fixtures by validated SA patterns — games that have historically performed well (or poorly) for each market.
-              Avoid-flagged games (⚑) appear at the bottom.
+              Avoid-flagged games (⛑) appear at the bottom.
             </div>
-            )}
-            {!saPatterns?.restricted && (
+            {/* SA-USER-FIX: always show market buttons to all users */}
+            {true && (
             <div className="cscroll" style={{ marginBottom:6 }}>
               {saMarket && (
                 <button onClick={() => setSaMarket(null)} className="gb"
