@@ -4445,7 +4445,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           return sf ? !sf.fn(f) : false;
         })) continue;
         const mktLabel = (leg.market || "").replace(/^TB:/, "");
-        const _mixPickId = getExcludeSelectionId({ label: mktLabel, market: leg.market }, f);
+        const _mixPickId = getExcludeSelectionId({ label: mktLabel, market: mktLabel }, f); // TB: prefix stripped so id matches EXCLUDE_SELECTION_GROUPS
         if (excludedMarkets.size > 0 && excludedMarkets.has(_mixPickId)) continue;
         out.push({
           f,
@@ -4520,7 +4520,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           const sf = STAT_FILTERS.find(x => x.id === id);
           return sf ? !sf.fn(f) : false;
         })) continue;
-        const _fbPick = { label: saMarket.replace(/^TB:/,""), market: saMarket };
+        const _fbPickLabel = saMarket.replace(/^TB:/,""); const _fbPick = { label: _fbPickLabel, market: _fbPickLabel };
         if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_fbPick, f))) continue;
         const odds = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
         out.push({
@@ -4555,7 +4555,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const sf = STAT_FILTERS.find(x => x.id === id);
         return sf ? !sf.fn(f) : false;
       })) continue;
-      const _saPick = { label: saMarket.replace(/^TB:/,""), market: saMarket };
+      const _saPickLabel = saMarket.replace(/^TB:/,""); const _saPick = { label: _saPickLabel, market: _saPickLabel };
       if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_saPick, f))) continue;
       const { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
       if (!positive.length && !avoid.length) continue;
