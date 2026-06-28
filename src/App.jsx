@@ -3963,9 +3963,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return r.json();
       })
       .then(d => {
+        // Only mark restricted if the server explicitly says so (d.restricted === true)
+        // or there's an auth-type error. An empty patterns array is NOT a restriction —
+        // it just means no patterns are configured yet; still show the panel to users.
+        const isServerRestricted = d?.restricted === true;
         if (d?.patterns?.length) setSaPatterns(d);
-        else if (d?.error) { setSaError(d.error); setSaPatterns({ patterns: [], restricted: true }); }
-        else setSaPatterns({ patterns: [], restricted: true });
+        else if (d?.error && isServerRestricted) { setSaError(d.error); setSaPatterns({ patterns: [], restricted: true }); }
+        else if (d?.error) { setSaError(d.error); setSaPatterns({ patterns: [] }); }
+        else setSaPatterns({ patterns: [], restricted: isServerRestricted });
       })
       .catch(e => {
         setSaPatterns({ patterns: [], restricted: e.message === "patterns_restricted" });
