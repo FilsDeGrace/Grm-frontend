@@ -11238,8 +11238,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         </button>
 
         {/* Builder / Saved — full-width segmented control */}
-        <div style={{ display:"flex", flex:1, background:C.faint,
-                      borderRadius:10, padding:3, gap:3 }}>
+        <div style={{ display:"flex", flex:1, background:C.inputBg,
+                      borderRadius:10, padding:3, gap:3,
+                      border:`1px solid ${C.border}` }}>
           {[
             { id:"parlay", label:"Builder", count: draftLegs.length + tickets.length,
               icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
@@ -11253,15 +11254,16 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
               <button key={t.id} onClick={() => setView(t.id)} style={{
                 flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:5,
                 padding:"7px 0", fontSize:10, fontWeight:800, fontFamily:C.font,
-                background: on ? C.surface      : "transparent",
-                color:      on ? C.accent        : C.muted,
-                border:     on ? `1px solid ${C.accent}40` : `1px solid transparent`,
+                background: on ? C.surfaceHi    : "transparent",
+                color:      on ? C.accent        : C.text,
+                border:     on ? `1px solid ${C.accentBorder}` : `1px solid transparent`,
                 borderRadius:8,
-                boxShadow:  on ? "0 1px 6px rgba(0,0,0,0.22)" : "none",
+                boxShadow:  on ? `0 1px 8px rgba(0,0,0,0.30), inset 0 1px 0 ${C.borderHi}` : "none",
+                opacity:    on ? 1 : 0.65,
                 cursor:"pointer", transition:"all .15s",
                 WebkitTapHighlightColor:"transparent",
               }}>
-                <span style={{ position:"relative", opacity: on ? 1 : 0.55, display:"flex", flexShrink:0 }}>
+                <span style={{ position:"relative", display:"flex", flexShrink:0 }}>
                   {t.icon}
                   {t.count > 0 && (
                     <span style={{ position:"absolute", top:-7, right:-8, minWidth:11, height:11, borderRadius:6,

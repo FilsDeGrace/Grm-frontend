@@ -199,235 +199,167 @@ export const THEME_GRM = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  THEME_NOIR — Cold crimson editorial
-//  Base: near-black charcoal with a faint purple undertone (#141018)
-//  Accent: arterial crimson (#c0292b) — one color, used surgically
-//  Vibe: Bloomberg terminal crossed with a fashion magazine. Dangerous calm.
-//  Font: Tight grotesque — compressed, editorial, no warmth
+//  THEME_MONO — Monochrome Luxury
+//  Base: warm off-white (#F5F4EF) — not clinical white, a breath of linen
+//  Text: near-black (#0D0D0D) — ink, not grey
+//  Accent: pure black gradient pill — surgical, no colour needed
+//  Vibe: Apple Design Language meets a private bank. Silence as a luxury good.
+//  Font: "DM Sans" — optical precision, slightly humanist. Clean but not cold.
+//  Gradient: used ONLY in accent button — linear #0D0D0D → #2D2D2D
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEME_NOIR = {
-  id: "noir", name: "Noir Rouge", emoji: "🔴",
-  desc: "Charcoal base, cold crimson accent — editorial danger",
+export const THEME_MONO = {
+  id: "mono", name: "Monochrome", emoji: "◼",
+  desc: "Warm linen, ink black, gradient accents — luxury through restraint",
 
-  bg:         "#141018",          // near-black, purple undertone
-  surface:    "#1c1820",          // lifted dark with same undertone
-  surfaceHi:  "#231f2a",
-  cardBg:     "#1c1820",
-  modalBg:    "#141018",
-  inputBg:    "#1c1820",
+  bg:         "#F5F4EF",          // warm off-white — linen, not clinical
+  surface:    "#EEEEE8",          // slightly cooler lift
+  surfaceHi:  "#E6E6E0",          // pressed / hovered surface
+  cardBg:     "#EEEEE8",
+  modalBg:    "#F5F4EF",
+  inputBg:    "#EBEBЕ4",          // very slightly off-surface
 
-  headerBg:   "rgba(20,16,24,0.97)",
-  headerBorder:"rgba(192,41,43,0.20)",   // crimson hairline in header
+  headerBg:   "rgba(245,244,239,0.97)",
+  headerBorder:"rgba(0,0,0,0.08)",
 
-  border:     "rgba(255,255,255,0.07)",
-  borderHi:   "rgba(192,41,43,0.35)",    // crimson on hover
+  border:     "rgba(0,0,0,0.09)",
+  borderHi:   "rgba(0,0,0,0.20)",
 
-  text:       "#ece8f0",                  // cool white with purple tinge
-  muted:      "#8a8492",
-  faint:      "rgba(236,232,240,0.05)",
-  subtleBg:   "#1c1820",
+  text:       "#0D0D0D",          // ink black
+  muted:      "#6B6B6B",          // mid-grey — readable, not faint
+  faint:      "rgba(0,0,0,0.05)",
+  subtleBg:   "#EEEEE8",
 
-  accent:      "#c0292b",         // arterial crimson
-  accentDim:   "rgba(192,41,43,0.12)",
-  accentBorder:"rgba(192,41,43,0.40)",
-  accentText:  "#ece8f0",
-  gold:        "#c0292b",
-  goldDim:     "rgba(192,41,43,0.12)",
-  goldBorder:  "rgba(192,41,43,0.40)",
+  // The ONE luxury touch: gradient accent
+  accent:      "#0D0D0D",
+  accentGrad:  "linear-gradient(135deg,#0D0D0D 0%,#3A3A3A 100%)",
+  accentDim:   "rgba(13,13,13,0.08)",
+  accentBorder:"rgba(13,13,13,0.20)",
+  accentText:  "#FFFFFF",
+  gold:        "#0D0D0D",
+  goldDim:     "rgba(13,13,13,0.07)",
+  goldBorder:  "rgba(13,13,13,0.18)",
 
-  // Market colours — vivid enough to read on dark purple-charcoal
-  green:       "#2ecc71",
-  greenDim:    "rgba(46,204,113,0.10)",
-  blue:        "#5b9cf6",
-  blueDim:     "rgba(91,156,246,0.10)",
-  purple:      "#b57bee",
-  purpleDim:   "rgba(181,123,238,0.10)",
-  orange:      "#e8852a",
-  orangeDim:   "rgba(232,133,42,0.10)",
-  radar:       "#1abccd",
-  radarDim:    "rgba(26,188,205,0.10)",
-  radarBorder: "rgba(26,188,205,0.28)",
-  edge:        "#f0c040",
-  edgeDim:     "rgba(240,192,64,0.10)",
-  edgeBorder:  "rgba(240,192,64,0.28)",
-  red:         "#c0292b",         // red IS the accent here — consistent
-  redDim:      "rgba(192,41,43,0.12)",
-  amber:       "#e8852a",
-  amberDim:    "rgba(232,133,42,0.10)",
-  dc:          "#e05a8a",
-  dcDim:       "rgba(224,90,138,0.09)",
-  silver:      "#8a8492",
-  silverDim:   "rgba(138,132,146,0.08)",
+  // Market colours — desaturated, premium, still distinct
+  green:       "#1A7A4A",
+  greenDim:    "rgba(26,122,74,0.10)",
+  blue:        "#1A4FA8",
+  blueDim:     "rgba(26,79,168,0.10)",
+  purple:      "#5B3FB5",
+  purpleDim:   "rgba(91,63,181,0.10)",
+  orange:      "#B85C1A",
+  orangeDim:   "rgba(184,92,26,0.10)",
+  radar:       "#0D7A72",
+  radarDim:    "rgba(13,122,114,0.10)",
+  radarBorder: "rgba(13,122,114,0.28)",
+  edge:        "#8A6B00",
+  edgeDim:     "rgba(138,107,0,0.10)",
+  edgeBorder:  "rgba(138,107,0,0.28)",
+  red:         "#B51C1C",
+  redDim:      "rgba(181,28,28,0.10)",
+  amber:       "#8A6B00",
+  amberDim:    "rgba(138,107,0,0.10)",
+  dc:          "#8C1A5C",
+  dcDim:       "rgba(140,26,92,0.09)",
+  silver:      "#8A8A84",
+  silverDim:   "rgba(138,138,132,0.09)",
 
-  track:       "#1c1820",
-  skeleton:    "rgba(236,232,240,0.05)",
-  skeletonHi:  "rgba(236,232,240,0.10)",
+  track:       "#EEEEE8",
+  skeleton:    "rgba(0,0,0,0.07)",
+  skeletonHi:  "rgba(0,0,0,0.13)",
 
-  font:        '"Barlow Semi Condensed","Barlow","Trebuchet MS",sans-serif',
-  btnRadius:   4,
-  cardRadius:  6,
-  scrollThumb: "#2e2830",
+  font:        '"DM Sans","SF Pro Display",-apple-system,BlinkMacSystemFont,sans-serif',
+  btnRadius:   10,
+  cardRadius:  12,
+  scrollThumb: "#C8C8C2",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  THEME_DUSK — Blue-slate stadium hour
-//  Base: deep blue-slate (#141c2e) — the colour of a stadium at 7:30pm,
-//  floodlights just fired, sky not fully dark. Full of electricity.
-//  Accent: neon coral (#ff5e3a) — live match energy, urgent, kinetic
-//  Vibe: Sky Sports dashboard if it had taste. Athletic. Present tense.
+//  THEME_ASH — Slate Editorial
+//  Base: cold blue-slate (#141922) — not black, deep ocean at midnight
+//  Accent: glacial silver (#C8D6E8) — premium fintech. Light from ice.
+//  The only warmth is the accent; everything else is precision-cold.
+//  Vibe: Revolut Private × Bloomberg terminal × Dior backstage.
+//  Font: "Syne" — geometric, editorial, slight tension in every letterform.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEME_DUSK = {
-  id: "dusk", name: "Dusk", emoji: "🌆",
-  desc: "Blue-slate stadium hour, neon coral — live match energy",
+export const THEME_ASH = {
+  id: "ash", name: "Ash", emoji: "❄",
+  desc: "Cold slate, glacial silver — fintech editorial precision",
 
-  bg:         "#111827",          // deep blue-charcoal — Tailwind gray-900 territory
-  surface:    "#1a2235",          // true blue-slate lift
-  surfaceHi:  "#202c42",
-  cardBg:     "#1a2235",
-  modalBg:    "#111827",
-  inputBg:    "#1a2235",
+  bg:         "#0F1419",          // deep cold slate — ocean floor
+  surface:    "#18202C",          // lifted slate
+  surfaceHi:  "#1F2A3A",          // highlight — still cold, more present
+  cardBg:     "#18202C",
+  modalBg:    "#0F1419",
+  inputBg:    "#18202C",
 
-  headerBg:   "rgba(17,24,39,0.97)",
-  headerBorder:"rgba(255,94,58,0.18)",   // coral hairline
+  headerBg:   "rgba(15,20,25,0.97)",
+  headerBorder:"rgba(200,214,232,0.10)",  // silver hairline
 
-  border:     "rgba(255,255,255,0.08)",
-  borderHi:   "rgba(255,94,58,0.40)",    // coral on active
+  border:     "rgba(200,214,232,0.08)",
+  borderHi:   "rgba(200,214,232,0.22)",
 
-  text:       "#e8edf5",
-  muted:      "#7e8da8",
-  faint:      "rgba(232,237,245,0.05)",
-  subtleBg:   "#1a2235",
+  text:       "#E8EEF5",          // cold white — precision
+  muted:      "#6B7A8F",          // slate-grey — not warm
+  faint:      "rgba(232,238,245,0.05)",
+  subtleBg:   "#18202C",
 
-  accent:      "#ff5e3a",         // neon coral — live, urgent
-  accentDim:   "rgba(255,94,58,0.12)",
-  accentBorder:"rgba(255,94,58,0.38)",
-  accentText:  "#ffffff",
-  gold:        "#ff5e3a",
-  goldDim:     "rgba(255,94,58,0.12)",
-  goldBorder:  "rgba(255,94,58,0.38)",
+  accent:      "#C8D6E8",         // glacial silver
+  accentGrad:  "linear-gradient(135deg,#C8D6E8 0%,#8FA8C4 100%)",
+  accentDim:   "rgba(200,214,232,0.10)",
+  accentBorder:"rgba(200,214,232,0.28)",
+  accentText:  "#0F1419",         // dark on silver — sharp
+  gold:        "#C8D6E8",
+  goldDim:     "rgba(200,214,232,0.10)",
+  goldBorder:  "rgba(200,214,232,0.28)",
 
-  // Market colours — punchy against blue-slate
-  green:       "#00e676",         // electric green — full signal
-  greenDim:    "rgba(0,230,118,0.10)",
-  blue:        "#40a9ff",         // sky blue — complementary
-  blueDim:     "rgba(64,169,255,0.10)",
-  purple:      "#c084fc",
-  purpleDim:   "rgba(192,132,252,0.10)",
-  orange:      "#ff5e3a",         // accent reuse — orange IS coral here
-  orangeDim:   "rgba(255,94,58,0.10)",
-  radar:       "#00d4e0",
-  radarDim:    "rgba(0,212,224,0.10)",
-  radarBorder: "rgba(0,212,224,0.28)",
-  edge:        "#ffd60a",         // signal yellow on slate is sharp
-  edgeDim:     "rgba(255,214,10,0.10)",
-  edgeBorder:  "rgba(255,214,10,0.28)",
-  red:         "#ff4757",
-  redDim:      "rgba(255,71,87,0.10)",
-  amber:       "#ffab00",
-  amberDim:    "rgba(255,171,0,0.10)",
-  dc:          "#f472b6",
-  dcDim:       "rgba(244,114,182,0.09)",
-  silver:      "#7e8da8",
-  silverDim:   "rgba(126,141,168,0.08)",
+  // Market colours — vivid against cold slate
+  green:       "#22D47A",
+  greenDim:    "rgba(34,212,122,0.10)",
+  blue:        "#4DB0FF",
+  blueDim:     "rgba(77,176,255,0.10)",
+  purple:      "#A580F5",
+  purpleDim:   "rgba(165,128,245,0.10)",
+  orange:      "#FF7A40",
+  orangeDim:   "rgba(255,122,64,0.10)",
+  radar:       "#00D4C8",
+  radarDim:    "rgba(0,212,200,0.10)",
+  radarBorder: "rgba(0,212,200,0.28)",
+  edge:        "#F5D45A",
+  edgeDim:     "rgba(245,212,90,0.10)",
+  edgeBorder:  "rgba(245,212,90,0.28)",
+  red:         "#FF5060",
+  redDim:      "rgba(255,80,96,0.10)",
+  amber:       "#F5A623",
+  amberDim:    "rgba(245,166,35,0.10)",
+  dc:          "#F06EAE",
+  dcDim:       "rgba(240,110,174,0.09)",
+  silver:      "#6B7A8F",
+  silverDim:   "rgba(107,122,143,0.08)",
 
-  track:       "#1a2235",
-  skeleton:    "rgba(232,237,245,0.05)",
-  skeletonHi:  "rgba(232,237,245,0.10)",
+  track:       "#18202C",
+  skeleton:    "rgba(232,238,245,0.05)",
+  skeletonHi:  "rgba(232,238,245,0.10)",
 
-  font:        '"Inter","DM Sans","Helvetica Neue",sans-serif',
-  btnRadius:   8,
-  cardRadius:  10,
-  scrollThumb: "#2a3650",
+  font:        '"Syne","DM Sans","Helvetica Neue",sans-serif',
+  btnRadius:   6,
+  cardRadius:  8,
+  scrollThumb: "#2A3545",
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  THEME_OBSIDIAN — Private members club analytics
-//  Base: warm obsidian (#13100e) — volcanic, rich, not cold-grey-boring
-//  Accent: molten gold (#d4a843) — not yellow, not bronze — molten
-//  Card borders get a gold hairline treatment. Feels like wealth and privacy.
-//  Vibe: If a hedge fund's internal analytics tool had a night mode
-//  Font: Didot-adjacent serif — old money editorial
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const THEME_OBSIDIAN = {
-  id: "obsidian", name: "Obsidian", emoji: "✦",
-  desc: "Warm volcanic black, molten gold — private club precision",
-
-  bg:         "#0e0c0a",          // warm obsidian — almost black, brown undertone
-  surface:    "#171410",          // lifted volcanic
-  surfaceHi:  "#1f1b16",
-  cardBg:     "#171410",
-  modalBg:    "#0e0c0a",
-  inputBg:    "#171410",
-
-  headerBg:   "rgba(14,12,10,0.98)",
-  headerBorder:"rgba(212,168,67,0.25)",  // gold hairline — restrained luxury
-
-  border:     "rgba(255,255,255,0.06)",
-  borderHi:   "rgba(212,168,67,0.35)",   // gold activates on interaction
-
-  text:       "#f0ebe3",                  // warm white — ivory, not cold
-  muted:      "#9a8f80",
-  faint:      "rgba(240,235,227,0.05)",
-  subtleBg:   "#171410",
-
-  accent:      "#d4a843",         // molten gold
-  accentDim:   "rgba(212,168,67,0.12)",
-  accentBorder:"rgba(212,168,67,0.38)",
-  accentText:  "#0e0c0a",         // obsidian text on gold button
-  gold:        "#d4a843",
-  goldDim:     "rgba(212,168,67,0.12)",
-  goldBorder:  "rgba(212,168,67,0.38)",
-
-  // Market colours — warm-shifted palette to match obsidian base
-  green:       "#4ade80",
-  greenDim:    "rgba(74,222,128,0.10)",
-  blue:        "#7db8f7",
-  blueDim:     "rgba(125,184,247,0.10)",
-  purple:      "#c4a8fa",
-  purpleDim:   "rgba(196,168,250,0.10)",
-  orange:      "#fb9b3a",
-  orangeDim:   "rgba(251,155,58,0.10)",
-  radar:       "#34d4c0",
-  radarDim:    "rgba(52,212,192,0.10)",
-  radarBorder: "rgba(52,212,192,0.28)",
-  edge:        "#d4a843",         // gold IS the edge signal — unified
-  edgeDim:     "rgba(212,168,67,0.12)",
-  edgeBorder:  "rgba(212,168,67,0.35)",
-  red:         "#f87171",
-  redDim:      "rgba(248,113,113,0.10)",
-  amber:       "#d4a843",
-  amberDim:    "rgba(212,168,67,0.12)",
-  dc:          "#f4a0c8",
-  dcDim:       "rgba(244,160,200,0.09)",
-  silver:      "#9a8f80",
-  silverDim:   "rgba(154,143,128,0.08)",
-
-  track:       "#171410",
-  skeleton:    "rgba(240,235,227,0.05)",
-  skeletonHi:  "rgba(240,235,227,0.10)",
-
-  // High-contrast serif with old-money weight
-  font:        '"Playfair Display","Georgia","Times New Roman",serif',
-  btnRadius:   2,               // hard edge — machined, not soft
-  cardRadius:  4,
-  scrollThumb: "#2a2318",
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Registry & helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_GRM, THEME_NOIR, THEME_DUSK, THEME_OBSIDIAN];
+export const THEMES    = [THEME_DARK, THEME_CLAUDE, THEME_GRM, THEME_MONO, THEME_ASH];
 export const THEME_MAP = {
   dark:     THEME_DARK,
   claude:   THEME_CLAUDE,
   grm:      THEME_GRM,
-  noir:     THEME_NOIR,
-  dusk:     THEME_DUSK,
-  obsidian: THEME_OBSIDIAN,
+  mono:     THEME_MONO,
+  ash:      THEME_ASH,
 };
 
 const LS_KEY = "grm_theme_v1";
