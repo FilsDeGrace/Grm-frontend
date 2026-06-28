@@ -4438,7 +4438,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           if (hasLiveFilter && !liveStates.has(st)) continue;
           if (hasScheduledFilter && !isScheduledState(st)) continue;
         }
+        // ALL-FILTERS-FIX: apply statFilters (non-status) and excludedMarkets to PE:Mix rows
+        if (statFilters.some(id => {
+          if (["live","scheduled"].includes(id)) return false; // handled above
+          const sf = STAT_FILTERS.find(x => x.id === id);
+          return sf ? !sf.fn(f) : false;
+        })) continue;
         const mktLabel = (leg.market || "").replace(/^TB:/, "");
+        const _mixPickId = getExcludeSelectionId({ label: mktLabel, market: leg.market }, f);
+        if (excludedMarkets.size > 0 && excludedMarkets.has(_mixPickId)) continue;
         out.push({
           f,
           pick: {
@@ -4484,6 +4492,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const m = f.markets || {};
         const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
         if (!prob || prob <= 0) continue;
+        // ALL-FILTERS-FIX: statFilters and excludedMarkets
+        if (statFilters.some(id => {
+          if (["live","scheduled"].includes(id)) return false;
+          const sf = STAT_FILTERS.find(x => x.id === id);
+          return sf ? !sf.fn(f) : false;
+        })) continue;
+        const _fbPick = { label: saMarket.replace(/^TB:/,""), market: saMarket };
+        if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_fbPick, f))) continue;
         const odds = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
         out.push({
           f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: C.accent },
@@ -4511,6 +4527,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       const m = f.markets || {};
       const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
       if (!prob || prob <= 0) continue;
+      // ALL-FILTERS-FIX: statFilters (non-status) and excludedMarkets
+      if (statFilters.some(id => {
+        if (["live","scheduled"].includes(id)) return false;
+        const sf = STAT_FILTERS.find(x => x.id === id);
+        return sf ? !sf.fn(f) : false;
+      })) continue;
+      const _saPick = { label: saMarket.replace(/^TB:/,""), market: saMarket };
+      if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_saPick, f))) continue;
       const { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
       if (!positive.length && !avoid.length) continue;
       const odds    = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
@@ -4554,7 +4578,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, isPastDate, sortActive, kickoffFilter]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter]);
 
   const displayRows = saMarket ? saRows : rows;
 
