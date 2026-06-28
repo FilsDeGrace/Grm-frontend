@@ -4468,7 +4468,38 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     }
 
     // ── Standard single-market SA pattern mode ────────────────────────────────
-    if (!saPatterns?.patterns?.length) return [];
+    // SA-USER-FALLBACK: if patterns didn't load (server gated / 403), still show
+    // all fixtures for the selected market sorted by prob — no pattern filtering,
+    // but users get a useful market-filtered list instead of an empty screen.
+    const hasPatterns = saPatterns?.patterns?.length > 0;
+    if (!hasPatterns) {
+      const out = [];
+      for (const f of fixtures) {
+        if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+        if (!bothOrNeither) {
+          const st = (f.state||"").toLowerCase();
+          if (hasLiveFilter && !liveStates.has(st)) continue;
+          if (hasScheduledFilter && !isScheduledState(st)) continue;
+        }
+        const m = f.markets || {};
+        const prob = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
+        if (!prob || prob <= 0) continue;
+        const odds = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
+        out.push({
+          f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: C.accent },
+          _saPositive: [], _saAvoid: [], _saFlagged: false,
+        });
+      }
+      out.sort((a, b) => {
+        if (bothOrNeither) {
+          const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+          const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+          if (aLive !== bLive) return aLive - bLive;
+        }
+        return (b.pick.prob ?? 0) - (a.pick.prob ?? 0); // highest prob first
+      });
+      return out;
+    }
     const out = [];
     for (const f of fixtures) {
       if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
@@ -4877,7 +4908,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
               </div>
             )}
-            {saMarket && saMarket !== "PE:Mix" && (
+            {saMarket && saMarket !== "PE:Mix" && saPatterns?.patterns?.length > 0 && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing only fixtures matching a validated SA pattern for <strong>{saMarket.replace(/^TB:/,"")}</strong>.
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
@@ -5163,7 +5194,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           and a separate Clear action, instead of vanishing once any item is selected. */}
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap" }}>
         <div style={{ display:"flex",alignItems:"center",gap:12,flexWrap:"wrap" }}>
-          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket?" (SA Pattern)":""}</span>
+          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket ? (saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`) : ""}</span>
           {(() => {
             const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
             const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
@@ -5396,7 +5427,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         })}
         {displayRows.length === 0 && (
           <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
-            {saMarket ? "No fixtures match SA patterns for this market" : "No matches"}
+            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : "No matches"}
           </div>
         )}
       </div>
