@@ -4472,7 +4472,29 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         return (b._saZ ?? 0) - (a._saZ ?? 0); // highest combinedZ first
       });
-      return out;
+      // MIX-FILTER-FIX: apply Signal quality filters + kickoff to Mix list
+      const mixFiltered = out.filter(row => {
+        if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
+        if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
+        if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
+        if (kickoffFilter && row.f.time) {
+          const [hh, mm] = row.f.time.split(":").map(Number);
+          const mins = hh * 60 + (mm || 0);
+          const filterMins = kickoffFilter.hour * 60;
+          if (kickoffFilter.mode === "before" && mins > filterMins) return false;
+          if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+        }
+        return true;
+      });
+      if (sortActive.has("strong_first")) {
+        mixFiltered.sort((a, b) => {
+          const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+          const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+          if (aS !== bS) return aS - bS;
+          return (b._saZ ?? 0) - (a._saZ ?? 0); // preserve combinedZ within same tier
+        });
+      }
+      return mixFiltered;
     }
 
     // ── Standard single-market SA pattern mode ────────────────────────────────
