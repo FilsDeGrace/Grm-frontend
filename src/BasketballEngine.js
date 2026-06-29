@@ -16,9 +16,16 @@ async function sfGet(ssPath) {
   try {
     const url = `${SERVER}/api/basketball/ss?path=${encodeURIComponent(ssPath)}`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[BB] sfGet ${ssPath} → HTTP ${res.status}`);
+      return null;
+    }
     return await res.json();
-  } catch {
+  } catch (e) {
+    // Network-level failure (DNS, connection refused, tunnel down, CORS) —
+    // this is the one that looks identical to "no data" from the caller's
+    // side unless logged. SERVER is set in config.js.
+    console.error(`[BB] sfGet ${ssPath} failed — is SERVER (${SERVER}) reachable? ${e.message}`);
     return null;
   }
 }
@@ -31,10 +38,18 @@ export async function fetchGamesForDate(dateStr) {
   try {
     const url = `${SERVER}/api/basketball/scheduled-events/${dateStr}`;
     const res = await fetch(url);
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.warn(`[BB] fetchGamesForDate ${dateStr} → HTTP ${res.status} from ${url}`);
+      return [];
+    }
     const data = await res.json();
     return data?.events ?? [];
-  } catch {
+  } catch (e) {
+    // Same class of failure as above — most likely culprit is SERVER in
+    // config.js pointing at a dead/rotated tunnel. Returning [] here keeps
+    // the rest of the engine from crashing, but it also means this failure
+    // is otherwise invisible to the UI — check this console log first.
+    console.error(`[BB] fetchGamesForDate ${dateStr} failed — is SERVER (${SERVER}) reachable? ${e.message}`);
     return [];
   }
 }

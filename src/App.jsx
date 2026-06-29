@@ -11237,44 +11237,51 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
           </svg>
         </button>
 
-        {/* Builder / Saved — full-width segmented control */}
+        {/* Builder / Saved / Trim — redesigned vertical-pill segmented control */}
         <div style={{ display:"flex", flex:1, background:C.inputBg,
-                      borderRadius:10, padding:3, gap:3,
+                      borderRadius:11, padding:3, gap:2,
                       border:`1px solid ${C.border}` }}>
           {[
             { id:"parlay", label:"Builder", count: draftLegs.length + tickets.length,
-              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
-            { id:"saved",  label:"Saved", count: savedTickets.length,
-              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
-            { id:"trim",   label:"Trim", count: 0,
-              icon:<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg> },
+              icon:<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/><path d="M13 5v14"/></svg> },
+            { id:"saved",  label:"Saved",   count: savedTickets.length,
+              icon:<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> },
+            { id:"trim",   label:"Trim",    count: 0,
+              icon:<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg> },
           ].map(t => {
             const on = view === t.id;
             return (
               <button key={t.id} onClick={() => setView(t.id)} style={{
-                flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:5,
-                padding:"7px 0", fontSize:10, fontWeight:800, fontFamily:C.font,
-                background: on ? C.surfaceHi    : "transparent",
-                color:      on ? C.accent        : C.text,
-                border:     on ? `1px solid ${C.accentBorder}` : `1px solid transparent`,
+                flex:1, display:"flex", flexDirection:"column",
+                alignItems:"center", justifyContent:"center", gap:3,
+                padding:"8px 4px 7px", fontFamily:C.font,
+                background: on ? C.surfaceHi : "transparent",
+                color:      on ? C.accent    : C.text,
+                border:     on ? `1px solid ${C.accentBorder}` : "1px solid transparent",
                 borderRadius:8,
-                boxShadow:  on ? `0 1px 8px rgba(0,0,0,0.30), inset 0 1px 0 ${C.borderHi}` : "none",
-                opacity:    on ? 1 : 0.65,
+                boxShadow:  on ? `0 1px 6px rgba(0,0,0,0.22), inset 0 1px 0 ${C.borderHi}` : "none",
+                opacity:    on ? 1 : 0.55,
                 cursor:"pointer", transition:"all .15s",
-                WebkitTapHighlightColor:"transparent",
+                WebkitTapHighlightColor:"transparent", position:"relative",
               }}>
-                <span style={{ position:"relative", display:"flex", flexShrink:0 }}>
-                  {t.icon}
-                  {t.count > 0 && (
-                    <span style={{ position:"absolute", top:-7, right:-8, minWidth:11, height:11, borderRadius:6,
-                                   background: on ? C.accent : C.muted, color:C.bg, fontSize:6.5, fontWeight:900,
-                                   display:"flex", alignItems:"center", justifyContent:"center", padding:"0 2px",
-                                   lineHeight:1 }}>
-                      {t.count > 99 ? "99+" : t.count}
-                    </span>
-                  )}
+                {/* icon */}
+                <span style={{ display:"flex", lineHeight:0 }}>{t.icon}</span>
+                {/* label */}
+                <span style={{ fontSize:9, fontWeight:700, letterSpacing:".04em",
+                               textTransform:"uppercase", lineHeight:1 }}>
+                  {t.label}
                 </span>
-                {t.label}
+                {/* count badge — top-right corner of the button */}
+                {t.count > 0 && (
+                  <span style={{ position:"absolute", top:4, right:6,
+                                 minWidth:13, height:13, borderRadius:7,
+                                 background: on ? C.accent : C.muted,
+                                 color: C.bg, fontSize:7, fontWeight:900,
+                                 display:"flex", alignItems:"center",
+                                 justifyContent:"center", padding:"0 3px", lineHeight:1 }}>
+                    {t.count > 99 ? "99+" : t.count}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -11378,8 +11385,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
               <ParlayExplainer />
 
               {/* ── Tab strip: Jarvis | Custom — lightweight segmented control ── */}
-              <div style={{ display:"flex", marginBottom:16, background:C.faint,
-                            borderRadius:10, padding:3, gap:2 }}>
+              <div style={{ display:"flex", marginBottom:16, background:C.inputBg,
+                            borderRadius:10, padding:3, gap:2,
+                            border:`1px solid ${C.border}` }}>
                 {[
                   { id:"jarvis", label:"Jarvis",     desc:"AI-built ticket" },
                   { id:"custom", label:"Custom",     desc:"Your rules" },
@@ -11391,15 +11399,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                         flex:1, padding:"7px 8px",
                         display:"flex", alignItems:"center", justifyContent:"center", gap:6,
                         fontSize:10, fontWeight:800,
-                        background: active ? C.surface : "transparent",
-                        color:      active ? C.accent  : C.muted,
-                        border:     active ? `1px solid ${C.border}` : "1px solid transparent",
+                        background: active ? C.surfaceHi : "transparent",
+                        color:      active ? C.accent    : C.text,
+                        border:     active ? `1px solid ${C.accentBorder}` : "1px solid transparent",
                         borderRadius:8,
-                        boxShadow:  active ? "0 1px 4px rgba(0,0,0,0.18)" : "none",
+                        boxShadow:  active ? `0 1px 8px rgba(0,0,0,0.28), inset 0 1px 0 ${C.borderHi}` : "none",
+                        opacity:    active ? 1 : 0.65,
                         transition: "all .15s ease", cursor:"pointer",
                         fontFamily: C.font,
+                        WebkitTapHighlightColor:"transparent",
                       }}>
-                      <span style={{ fontSize:8, opacity: active ? 0.9 : 0.5, fontWeight:500 }}>{m.desc}</span>
+                      <span style={{ fontSize:8, fontWeight:500 }}>{m.desc}</span>
                       <span style={{ fontSize:10, fontWeight:800 }}>{m.label}</span>
                     </button>
                   );
@@ -14447,7 +14457,8 @@ function GRMProInner() {
         {/* Row 2 — Tools sub-tabs */}
         {(activeTab === "backtest" || activeTab === "code") && mainView === "main" && (
           <div style={{ padding:"6px 12px 2px", borderTop:`1px solid var(--glass-border)` }}>
-            <div style={{ display:"flex", background:C.faint, borderRadius:10, padding:3, gap:3 }}>
+            <div style={{ display:"flex", background:C.inputBg, borderRadius:10, padding:3, gap:3,
+                           border:`1px solid ${C.border}` }}>
             {[
               { id:"code",     label:"Code Analyzer", icon:
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -14465,15 +14476,16 @@ function GRMProInner() {
                 <button key={id} onClick={() => setActiveTab(id)} style={{
                   flex:1, display:"flex", alignItems:"center", justifyContent:"center", gap:6,
                   padding:"9px 0", fontSize:11, fontWeight:800, fontFamily:C.font,
-                  background: on ? C.surface      : "transparent",
-                  color:      on ? C.accent        : C.muted,
-                  border:     on ? `1px solid ${C.accent}40` : `1px solid ${C.border}`,
+                  background: on ? C.surfaceHi    : "transparent",
+                  color:      on ? C.accent        : C.text,
+                  border:     on ? `1px solid ${C.accentBorder}` : "1px solid transparent",
                   borderRadius:8,
-                  boxShadow:  on ? "0 1px 6px rgba(0,0,0,0.22)" : "none",
+                  boxShadow:  on ? `0 1px 8px rgba(0,0,0,0.28), inset 0 1px 0 ${C.borderHi}` : "none",
+                  opacity:    on ? 1 : 0.65,
                   cursor:"pointer", transition:"all .15s",
                   WebkitTapHighlightColor:"transparent",
                 }}>
-                  <span style={{ color: on ? C.accent : C.muted, display:"flex", opacity: on ? 1 : 0.6 }}>{icon}</span>
+                  <span style={{ color: on ? C.accent : "currentColor", display:"flex" }}>{icon}</span>
                   {label}
                 </button>
               );
