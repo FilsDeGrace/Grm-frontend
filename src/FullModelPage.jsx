@@ -21,6 +21,7 @@ import {
   getBTTSExplainer,
   getTeamTotalExplainer,
 } from "./explainers.js";
+import * as bbExplainers from "./bb-explainers.js";
 
 import {
   C,
@@ -31,25 +32,29 @@ import {
   FixtureBookNow,
   AskJarvis,
 } from "./App.jsx";
+import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
 // mktStyle not exported from App.jsx — inlined
-const mktStyle = m => {
-  const map = {
-    "Over 2.5":  { color: C.green,  bg: C.greenDim  },
-    "Over 1.5":  { color: C.green,  bg: C.greenDim  },
-    "Over 3.5":  { color: C.green,  bg: C.greenDim  },
-    "Over 4.5":  { color: C.green,  bg: C.greenDim  },
-    "Under 1.5": { color: C.blue,   bg: C.blueDim   },
-    "Under 2.5": { color: C.blue,   bg: C.blueDim   },
-    "Under 3.5": { color: C.blue,   bg: C.blueDim   },
-    "Under 4.5": { color: C.blue,   bg: C.blueDim   },
-    "BTTS":      { color: C.purple, bg: C.purpleDim },
-    "1X2":       { color: C.gold,   bg: C.goldDim   },
-    "TeamTotal": { color: C.radar,  bg: C.radarDim  },
-    "DC":        { color: C.dc,     bg: C.dcDim     },
-    "CS":        { color: C.blue,   bg: C.blueDim   },
-  };
-  return map[m] || { color: C.accent, bg: C.accentDim };
+const mktStyle = (m, sport = "football") => {
+  if (sport === "football") {
+    const map = {
+      "Over 2.5":  { color: C.green,  bg: C.greenDim  },
+      "Over 1.5":  { color: C.green,  bg: C.greenDim  },
+      "Over 3.5":  { color: C.green,  bg: C.greenDim  },
+      "Over 4.5":  { color: C.green,  bg: C.greenDim  },
+      "Under 1.5": { color: C.blue,   bg: C.blueDim   },
+      "Under 2.5": { color: C.blue,   bg: C.blueDim   },
+      "Under 3.5": { color: C.blue,   bg: C.blueDim   },
+      "Under 4.5": { color: C.blue,   bg: C.blueDim   },
+      "BTTS":      { color: C.purple, bg: C.purpleDim },
+      "1X2":       { color: C.gold,   bg: C.goldDim   },
+      "TeamTotal": { color: C.radar,  bg: C.radarDim  },
+      "DC":        { color: C.dc,     bg: C.dcDim     },
+      "CS":        { color: C.blue,   bg: C.blueDim   },
+    };
+    return map[m] || { color: C.accent, bg: C.accentDim };
+  }
+  return getMarketStyle(m, sport, C); // sportConfig.js handles basketball/tennis
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +441,7 @@ function FullModelJarvis({ f, backtestSummary }) {
         force ? "refresh" : "",
       ].filter(Boolean).join(" ");
       const controller = new AbortController();
-      const clientTimeout = setTimeout(() => controller.abort(), 35000);
+      const clientTimeout = setTimeout(() => controller.abort(), 47000);
       let res;
       try {
         res = await fetch(`${SERVER}/api/jarvis-match`, {
@@ -755,7 +760,7 @@ function HeroRead({ theRead, fixture, onAddToParlay, alreadyAdded, otherInDraft,
   const { anchor, reinforcer, isFallback, scenario } = theRead;
   if (!anchor) return noSignalBlock;
 
-  const mst         = mktStyle(anchor.market);
+  const mst         = mktStyle(anchor.market, fixture?._sport);
   const accentColor = isFallback ? C.muted : (mst.color || C.accent);
   const prob        = Math.round(anchor.prob || 0);
   // Delta — from backend-final's HeroRead
@@ -1647,14 +1652,15 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
   const radarInDraft = inDraft && (draftLeg?.market === "TeamTotal" || draftLeg?.market?.includes("TeamTotal"));
 
   // All explainers computed once
-  const readEx   = getReadExplainer(f);
-  const edgeEx   = getEdgeExplainer(f);
-  const xgEx     = getXGExplainer(f);
-  const resultEx = getMatchResultExplainer(f);
-  const goalEx   = getGoalRangeExplainer(f);
-  const bttsEx   = getBTTSExplainer(f);
-  const homeEx   = getTeamTotalExplainer(f.teams?.home, f.teamStats?.home, "home", f);
-  const awayEx   = getTeamTotalExplainer(f.teams?.away, f.teamStats?.away, "away", f);
+  const isBBSport = f._sport === "basketball";
+  const readEx   = isBBSport ? bbExplainers.getReadExplainer(f)        : getReadExplainer(f);
+  const edgeEx   = isBBSport ? bbExplainers.getEdgeExplainer(f)        : getEdgeExplainer(f);
+  const resultEx = isBBSport ? bbExplainers.getMatchResultExplainer(f) : getMatchResultExplainer(f);
+  const xgEx     = getXGExplainer(f);        // football-only section; no-op for BB
+  const goalEx   = getGoalRangeExplainer(f); // football-only section; no-op for BB
+  const bttsEx   = getBTTSExplainer(f);      // football-only section; no-op for BB
+  const homeEx   = getTeamTotalExplainer(f.teams?.home, f.teamStats?.home, "home", f); // football-only; no-op for BB
+  const awayEx   = getTeamTotalExplainer(f.teams?.away, f.teamStats?.away, "away", f); // football-only; no-op for BB
 
   const handleAdd = useCallback((pick) => {
     if (!onAddToParlay) return;
@@ -1833,7 +1839,7 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             </div>
           );
 
-          const col        = mktStyle(anchor.market).color || C.accent;
+          const col        = mktStyle(anchor.market, f._sport).color || C.accent;
           const prob       = Math.round(anchor.prob||0);
           const readInDraft = !!dl && dl.pick === anchor.pick;
           const otherInDraft = !!dl && !readInDraft;
@@ -2035,12 +2041,17 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
         padding: "16px 12px", display: "flex", flexDirection: "column",
         gap: 14, maxWidth: 700, width: "100%", margin: "0 auto",
       }}>
+      {(() => {
+        const sections = new Set(getDataSections(f._sport));
+        return (
+        <>
 
         <div id="grm-custom-pick-anchor">
           <FixtureBookNow fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
         </div>
 
-        {/* Expected Goals */}
+        {/* Expected Goals — football only */}
+        {sections.has("xg") && (
         <SectionPanel
           label="Expected Goals"
           labelRight={xgTotal > 0 ? `Combined ${xgTotal.toFixed(2)} xG` : null}
@@ -2099,17 +2110,19 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
           </div>
           <Explainer text={xgEx} style={{ marginTop: 4 }} />
         </SectionPanel>
+        )}
 
-        {/* Match Result */}
+        {/* Match Result — renders for both sports; Draw row filtered above for BB */}
+        {sections.has("matchResult") && (
         <SectionPanel
-          label="Match Result"
+          label={isBBSport ? "Win Probability" : "Match Result"}
           labelRight={null}
         >
           {[
             { l: "H", prob: m.homeWin, odds: f.odds?.o1,  color: C.accent, ex: resultEx?.H, histKey: "homeWinHist" },
             { l: "X", prob: m.draw,    odds: f.odds?.oX,  color: C.muted,  ex: resultEx?.X, histKey: "drawHist"    },
             { l: "A", prob: m.awayWin, odds: f.odds?.o2,  color: C.blue,   ex: resultEx?.A, histKey: "awayWinHist" },
-          ].map((r, ri, arr) => {
+          ].filter(r => !(isBBSport && r.l === "X")).map((r, ri, arr) => {
             const prob   = Math.round(r.prob || 0);
             const hist   = Math.round(f.markets?.[r.histKey] || 0);
             const d      = hist ? prob - hist : null;
@@ -2124,7 +2137,11 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
                   display: "grid", gridTemplateColumns: "16px 1fr 44px 34px",
                   gap: 10, alignItems: "center", marginBottom: d !== null ? 5 : 2,
                 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: C.muted }}>{r.l}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: C.muted }}>
+                    {isBBSport
+                      ? (r.l === "H" ? f.teams.home.slice(0,3).toUpperCase() : f.teams.away.slice(0,3).toUpperCase())
+                      : r.l}
+                  </span>
                   <div style={{ height: 4, background: C.faint, borderRadius: 2, overflow: "hidden" }}>
                     <div style={{
                       height: "100%", width: `${prob}%`, background: r.color,
@@ -2158,8 +2175,10 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             );
           })}
         </SectionPanel>
+        )}
 
-        {/* Goal Range */}
+        {/* Goal Range — football only */}
+        {sections.has("goalRange") && (
         <SectionPanel
           label="Goal Range"
           labelRight={null}
@@ -2239,8 +2258,10 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             </div>
           )}
         </SectionPanel>
+        )}
 
-        {/* BTTS */}
+        {/* BTTS — football only */}
+        {sections.has("btts") && (
         <SectionPanel label="Both Teams to Score">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", gap: 0 }}>
             {/* Yes side */}
@@ -2310,8 +2331,10 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             </div>
           </div>
         </SectionPanel>
+        )}
 
-        {/* Team Totals */}
+        {/* Team Totals — football only (BB has its own "Team Total" market-pill section below) */}
+        {sections.has("teamTotals") && (
         <SectionPanel label="Team Totals">
           {[
             { name: f.teams.home, o05: m.homeOver05, o15: m.homeOver15, cs: m.homeCS, stats: f.teamStats?.home, ex: homeEx, accent: C.accent },
@@ -2364,11 +2387,354 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
             </div>
           ))}
         </SectionPanel>
+        )}
 
-        <ExternalPredictions fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+        {/* ── TOTAL SIGNAL — basketball only ────────────────────────────
+            f._totalSignal: { line, estimated, direction, margin, confidence }
+        ──────────────────────────────────────────────────────────────── */}
+        {sections.has("totalSignal") && f._totalSignal && (
+          <SectionPanel label="Total Points" labelRight={`Line: ${f._totalSignal.line}`}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ textAlign: "left", minWidth: 64 }}>
+                <div style={{
+                  fontSize: 38, fontWeight: 900, color: C.accent, lineHeight: 1,
+                  fontFamily: "var(--display,'Azeret Mono',monospace)", letterSpacing: "-.04em",
+                }}>
+                  {f._estimatedTotal ?? "—"}
+                </div>
+                <div style={{ fontSize: 9, color: C.muted, marginTop: 2, fontWeight: 600 }}>est. total</div>
+              </div>
+              <div style={{ flex: 1, position: "relative", height: 22 }}>
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center" }}>
+                  <div style={{
+                    height: 4,
+                    background: f._totalSignal.direction === "OVER" ? C.green : C.muted,
+                    opacity: .55, borderRadius: "3px 0 0 3px", width: "50%",
+                    transition: "width .8s cubic-bezier(.16,1,.3,1)",
+                  }} />
+                  <div style={{
+                    height: 4,
+                    background: f._totalSignal.direction === "UNDER" ? C.blue : C.muted,
+                    opacity: .55, borderRadius: "0 3px 3px 0", flex: 1,
+                  }} />
+                </div>
+              </div>
+              <div style={{ textAlign: "right", minWidth: 64 }}>
+                <div style={{
+                  fontSize: 22, fontWeight: 900, lineHeight: 1,
+                  color: f._totalSignal.direction === "OVER" ? C.green : C.blue,
+                  fontFamily: "var(--display,'Azeret Mono',monospace)",
+                }}>
+                  {f._totalSignal.direction}
+                </div>
+                <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>
+                  {f._totalSignal.confidence}% conf · {f._totalSignal.margin}pt edge
+                </div>
+              </div>
+            </div>
+            {edgeEx?.headline && <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.6, fontStyle: "italic", marginTop: 10 }}>{edgeEx.headline}</div>}
+          </SectionPanel>
+        )}
 
-        {/* Combos */}
-        {f.combos?.length > 0 && (
+        {/* ── TEAM TOTAL — basketball's radar equivalent ────────────────
+            MODEL MODE (f._teamTotalProjection populated once BasketballEngine's
+            estimateTotal() returns the home/away split — not yet, see ENGINE GAP
+            note in sportConfig.js) vs MARKET MODE (raw per-team O/U lines, current
+            default). Honest about there being no engine confidence behind it yet.
+        ──────────────────────────────────────────────────────────────── */}
+        {sections.has("teamTotal") && (() => {
+          const hasProjection = !!f._teamTotalProjection;
+          const teamMarkets = !hasProjection && f.odds?._raw
+            ? Object.entries(f.odds._raw).filter(([k]) =>
+                k.toLowerCase().includes(f.teams.home.toLowerCase()) ||
+                k.toLowerCase().includes(f.teams.away.toLowerCase())
+              )
+            : [];
+          if (!hasProjection && teamMarkets.length === 0) return null;
+
+          const fracToDecimal = (frac) => {
+            if (typeof frac === "number") return frac.toFixed(2);
+            if (typeof frac === "string" && frac.includes("/")) {
+              const [n, d] = frac.split("/").map(Number);
+              if (!isNaN(n) && !isNaN(d) && d > 0) return (n / d + 1).toFixed(2);
+            }
+            return null;
+          };
+
+          return (
+            <SectionPanel label="Team Total" labelRight={hasProjection ? "Model" : "Market"}>
+              {hasProjection ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <div style={{ textAlign: "left", minWidth: 64 }}>
+                    <div style={{
+                      fontSize: 30, fontWeight: 900, color: C.accent, lineHeight: 1,
+                      fontFamily: "var(--display,'Azeret Mono',monospace)", letterSpacing: "-.03em",
+                    }}>
+                      {f._teamTotalProjection.home ?? "—"}
+                    </div>
+                    <div style={{ fontSize: 9, color: C.muted, marginTop: 2, fontWeight: 600 }}>
+                      {f.teams.home.slice(0, 12)}
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, height: 4, background: C.faint, borderRadius: 2 }} />
+                  <div style={{ textAlign: "right", minWidth: 64 }}>
+                    <div style={{
+                      fontSize: 30, fontWeight: 900, color: C.blue, lineHeight: 1,
+                      fontFamily: "var(--display,'Azeret Mono',monospace)", letterSpacing: "-.03em",
+                    }}>
+                      {f._teamTotalProjection.away ?? "—"}
+                    </div>
+                    <div style={{ fontSize: 9, color: C.muted, marginTop: 2, fontWeight: 600 }}>
+                      {f.teams.away.slice(0, 12)}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {teamMarkets.map(([market, choices]) => (
+                    <div key={market}>
+                      <div style={{
+                        fontSize: 8, fontWeight: 800, color: C.radar, letterSpacing: ".1em",
+                        textTransform: "uppercase", marginBottom: 7,
+                      }}>
+                        {market}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {Object.entries(choices || {}).map(([line, sides]) =>
+                          Object.entries(sides || {}).map(([side, frac]) => {
+                            const dec = fracToDecimal(frac);
+                            return (
+                              <div key={`${line}-${side}`} style={{
+                                background: C.surface, border: `1px solid ${C.border}`,
+                                borderRadius: 8, padding: "6px 10px", minWidth: 72,
+                              }}>
+                                <div style={{ fontSize: 8, color: C.muted, fontWeight: 700, marginBottom: 3 }}>
+                                  {line} · {side}
+                                </div>
+                                <div style={{
+                                  fontSize: 13, fontWeight: 900, color: C.text,
+                                  fontFamily: "var(--display,'Azeret Mono',monospace)",
+                                }}>
+                                  {dec ? `${dec}×` : (frac ?? "—")}
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </SectionPanel>
+          );
+        })()}
+
+        {/* ── QUARTER PREDICTIONS — basketball only ─────────────────────
+            f._quarterPredictions: 4 objects, pre-game { quarter, homeEst,
+            awayEst, winner, actual:false } or post-game { quarter, homeScore,
+            awayScore, winner, actual:true }.
+        ──────────────────────────────────────────────────────────────── */}
+        {sections.has("quarterPredictions") && f._quarterPredictions?.length > 0 && (() => {
+          const Q_LABEL = { "1ST": "Q1", "2ND": "Q2", "3RD": "Q3", "4TH": "Q4" };
+          return (
+            <SectionPanel label="Quarter Breakdown">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
+                {f._quarterPredictions.map((q, i) => {
+                  const isHome = q.winner === "home";
+                  const isAway = q.winner === "away";
+                  const label = Q_LABEL[q.quarter] ?? q.quarter;
+                  return (
+                    <div key={i} style={{
+                      background: C.surface, border: `1px solid ${C.border}`,
+                      borderRadius: 8, padding: "10px 8px", textAlign: "center",
+                    }}>
+                      <div style={{
+                        fontSize: 7, color: C.muted, fontWeight: 800,
+                        letterSpacing: ".1em", marginBottom: 8, textTransform: "uppercase",
+                      }}>
+                        {label}
+                      </div>
+                      {q.actual ? (
+                        <>
+                          <div style={{
+                            fontSize: 15, fontWeight: 900, lineHeight: 1.1,
+                            color: isHome ? C.text : C.muted,
+                            fontFamily: "var(--display,'Azeret Mono',monospace)",
+                          }}>
+                            {q.homeScore}
+                          </div>
+                          <div style={{ fontSize: 8, color: C.muted, margin: "4px 0" }}>—</div>
+                          <div style={{
+                            fontSize: 15, fontWeight: 900, lineHeight: 1.1,
+                            color: isAway ? C.text : C.muted,
+                            fontFamily: "var(--display,'Azeret Mono',monospace)",
+                          }}>
+                            {q.awayScore}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{
+                            fontSize: 12, fontWeight: 700, lineHeight: 1.2,
+                            color: isHome ? C.accent : C.muted,
+                            fontFamily: "var(--display,'Azeret Mono',monospace)",
+                          }}>
+                            {q.homeEst}
+                          </div>
+                          <div style={{ fontSize: 8, color: C.muted, margin: "4px 0" }}>—</div>
+                          <div style={{
+                            fontSize: 12, fontWeight: 700, lineHeight: 1.2,
+                            color: isAway ? C.blue : C.muted,
+                            fontFamily: "var(--display,'Azeret Mono',monospace)",
+                          }}>
+                            {q.awayEst}
+                          </div>
+                        </>
+                      )}
+                      <div style={{
+                        marginTop: 6, height: 3, borderRadius: 2,
+                        background: isHome ? C.accent : isAway ? C.blue : C.faint,
+                        opacity: q.winner === "draw" ? .3 : .7,
+                      }} />
+                    </div>
+                  );
+                })}
+              </div>
+            </SectionPanel>
+          );
+        })()}
+
+        {/* ── TEAM RECORDS — basketball only (replaces Team Totals) ─────
+            BottomFormStrip unchanged — recentResults comes pre-shaped from
+            bbLastEventsToRecentResults() in sportConfig.js.
+        ──────────────────────────────────────────────────────────────── */}
+        {sections.has("teamRecords") && (
+          <SectionPanel label="Team Records">
+            {[
+              { name: f.teams.home, stats: f.teamStats?.home, accent: C.accent },
+              { name: f.teams.away, stats: f.teamStats?.away, accent: C.blue },
+            ].map((t, ti, arr) => (
+              <div key={t.name} style={{
+                paddingLeft: 12, borderLeft: `2px solid ${t.accent}`,
+                marginBottom: ti < arr.length - 1 ? 20 : 0,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: C.text, marginBottom: 10 }}>
+                  {t.name}
+                </div>
+                {t.stats && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, marginBottom: 12 }}>
+                    {[
+                      { label: "W",   value: t.stats._wins,                    color: C.green },
+                      { label: "L",   value: t.stats._losses,                  color: C.red   },
+                      { label: "PPG", value: t.stats._avgPtsFor?.toFixed(1),   color: null    },
+                      { label: "OPP", value: t.stats._avgPtsAgainst?.toFixed(1), color: null  },
+                    ].map(s => (
+                      <div key={s.label} style={{ textAlign: "center" }}>
+                        <div style={{
+                          fontSize: 16, fontWeight: 900, color: s.color ?? C.text,
+                          fontFamily: "var(--display,'Azeret Mono',monospace)",
+                          letterSpacing: "-.02em", lineHeight: 1,
+                        }}>
+                          {s.value ?? "—"}
+                        </div>
+                        <div style={{
+                          fontSize: 7, color: C.muted, fontWeight: 700,
+                          letterSpacing: ".08em", textTransform: "uppercase", marginTop: 3,
+                        }}>
+                          {s.label}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {t.stats?._streak != null && t.stats._streak !== 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    <span style={{
+                      fontSize: 9, fontWeight: 800,
+                      color: t.stats._streak > 0 ? C.green : C.red,
+                      background: t.stats._streak > 0 ? C.greenDim : (C.redDim || "rgba(239,68,68,.1)"),
+                      padding: "2px 7px", borderRadius: 4,
+                    }}>
+                      {t.stats._streak > 0 ? `W${t.stats._streak}` : `L${Math.abs(t.stats._streak)}`} streak
+                    </span>
+                  </div>
+                )}
+                <BottomFormStrip recentResults={t.stats?.recentResults} />
+              </div>
+            ))}
+          </SectionPanel>
+        )}
+
+        {/* ── MARKETS ODDS TABLE — basketball only ──────────────────────
+            f.odds._raw: nested per-market object from BasketballEngine.
+        ──────────────────────────────────────────────────────────────── */}
+        {sections.has("odds_bb") && f.odds?._raw && Object.keys(f.odds._raw).length > 0 && (
+          <SectionPanel label="Markets">
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {Object.entries(f.odds._raw).map(([market, choices]) => {
+                const mStyle = getMarketStyle(market, "basketball", C);
+                const flatChoices = [];
+                for (const [key, val] of Object.entries(choices || {})) {
+                  if (typeof val === "object" && val !== null) {
+                    for (const [subKey, subVal] of Object.entries(val)) {
+                      flatChoices.push({ name: `${key} · ${subKey}`, frac: subVal });
+                    }
+                  } else {
+                    flatChoices.push({ name: key, frac: val });
+                  }
+                }
+                const fracToDecimal = (frac) => {
+                  if (typeof frac === "number") return frac.toFixed(2);
+                  if (typeof frac === "string" && frac.includes("/")) {
+                    const [n, d] = frac.split("/").map(Number);
+                    if (!isNaN(n) && !isNaN(d) && d > 0) return (n / d + 1).toFixed(2);
+                  }
+                  return null;
+                };
+                return (
+                  <div key={market}>
+                    <div style={{
+                      fontSize: 8, fontWeight: 800, letterSpacing: ".12em",
+                      textTransform: "uppercase", color: mStyle.color, marginBottom: 7,
+                    }}>
+                      {market}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {flatChoices.map(({ name, frac }, ci) => {
+                        const dec = fracToDecimal(frac);
+                        return (
+                          <div key={ci} style={{
+                            background: C.surface, border: `1px solid ${C.border}`,
+                            borderRadius: 8, padding: "6px 10px", minWidth: 72,
+                          }}>
+                            <div style={{ fontSize: 8, color: C.muted, fontWeight: 700, marginBottom: 3, lineHeight: 1.2 }}>
+                              {name}
+                            </div>
+                            <div style={{
+                              fontSize: 13, fontWeight: 900, color: C.text,
+                              fontFamily: "var(--display,'Azeret Mono',monospace)",
+                            }}>
+                              {dec ? `${dec}×` : (frac ?? "—")}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </SectionPanel>
+        )}
+
+        {/* External Predictions — football only */}
+        {sections.has("external") && (
+          <ExternalPredictions fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
+        )}
+
+        {/* Combos — football only */}
+        {sections.has("combos") && f.combos?.length > 0 && (
           <SectionPanel label="Combo Suggestions">
             {f.combos.map((combo, i) => (
               <ComboRow key={i} combo={combo} onAddToParlay={onAddToParlay ? handleAdd : null} />
@@ -2378,6 +2744,9 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
 
         {/* Bottom spacer — no redundant back button here (header handles it) */}
         <div style={{ height: 48 }} />
+        </>
+        );
+      })()}
       </div>
       </div>{/* end P20 desktop column */}
     </div>
