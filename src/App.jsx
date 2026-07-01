@@ -8,8 +8,8 @@ export { SERVER };
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
-import { BasketballGameList, BasketballRolloverView } from "./BasketballPage";
 import { enrichGamesForDate, buildBasketballRolloverPool, buildBasketballRolloverPick } from "./BasketballEngine";
+import { toFixtureShape, getPickFamilies, getMarketStyle, getProgressLabel, getSportConfig } from "./sportConfig";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
@@ -304,7 +304,7 @@ function getCustomPick(f, family, C) {
   const m = f.markets, io = safeImpliedOdds;
   if (family === "theRead") {
     if (!f.theRead?.anchor) return null;
-    const a = f.theRead.anchor, mst = mktStyle(a.market);
+    const a = f.theRead.anchor, mst = mktStyle(a.market, f._sport);
     return { label:a.pick, prob:a.prob, odds:a.odds||io(a.prob), color:mst.color, market:a.market };
   }
   if (family === "theEdge") {
@@ -312,10 +312,130 @@ function getCustomPick(f, family, C) {
     return { label:f.theEdge.pick, prob:f.theEdge.prob, odds:f.theEdge.odds||io(f.theEdge.prob), color:C?.edge, market:f.theEdge.market };
   }
   if (family === "goalRadar") {
+    // football only — f.goalRadar is always null for basketball (set in
+    // toFixtureShape), so this naturally returns null for BB without a guard
     const best = f.goalRadar?.home?.prob >= f.goalRadar?.away?.prob ? f.goalRadar?.home : f.goalRadar?.away;
     if (!best) return null;
     return { label:best.pick, prob:best.prob, odds:best.odds||io(best.prob), color:C?.radar, market:"TeamTotal" };
   }
+
+  // ── BASKETBALL / TENNIS — market-odds-only families ───────────────────
+  // These resolve directly from f.odds._raw since neither engine currently
+  // produces confidence-scored predictions for these markets (see ENGINE GAP
+  // notes in sportConfig.js). Each helper below pulls the first matching
+  // market+choice pair and converts fractional odds to decimal + implied prob.
+  if (f._sport === "basketball" || f._sport === "tennis") {
+    const fracToDecimal = (frac) => {
+      if (typeof frac === "number") return frac;
+      if (typeof frac === "string" && frac.includes("/")) {
+        const [n, d] = frac.split("/").map(Number);
+        if (!isNaN(n) && !isNaN(d) && d > 0) return parseFloat((n/d + 1).toFixed(2));
+      }
+      return null;
+    };
+    const impliedFromDecimal = (dec) => dec > 1 ? Math.round((1/dec) * 100) : null;
+    const raw = f.odds?._raw || {};
+
+    // Home/Away handicap — find the "Handicap" market, pick the favourite/dog line
+    if (family === "homehandicap" || family === "awayhandicap") {
+      const hcMarket = raw["Handicap"] || raw["Handicap (incl. overtime)"] || null;
+      if (!hcMarket) return null;
+      const isHome = family === "homehandicap";
+      // Lines are keyed like "-7.5" / "+7.5" — pick first negative for home, positive for away
+      const lineKey = Object.keys(hcMarket).find(k =>
+        isHome ? k.trim().startsWith("-") : k.trim().startsWith("+")
+      );
+      if (!lineKey) return null;
+      const dec = fracToDecimal(hcMarket[lineKey]);
+      if (dec == null) return null;
+      const teamName = isHome ? f.teams.home : f.teams.away;
+      return { label:`${teamName} ${lineKey}`, prob:impliedFromDecimal(dec), odds:dec, color:C?.blue, market:"Handicap" };
+    }
+
+    // Team Total (radar equivalent) — find "<TeamName> Over/Under" market
+    if (family === "teamtotal_home" || family === "teamtotal_away") {
+      const isHome   = family === "teamtotal_home";
+      const teamName = isHome ? f.teams.home : f.teams.away;
+      const marketKey = Object.keys(raw).find(k => k.toLowerCase().includes(teamName.toLowerCase()));
+      if (!marketKey) return null;
+      const lines = raw[marketKey];
+      const firstLine = Object.keys(lines || {})[0];
+      if (!firstLine) return null;
+      const overFrac = lines[firstLine]?.["Over"] ?? lines[firstLine]?.Over;
+      const dec = fracToDecimal(overFrac);
+      if (dec == null) return null;
+      return { label:`${teamName} O${firstLine}`, prob:impliedFromDecimal(dec), odds:dec, color:C?.radar, market:"Team Total" };
+    }
+
+    // Quarter winner — find "<N>(st|nd|rd|th) quarter - 1x2" market
+    const Q_ORD = { q1_winner:"1st", q2_winner:"2nd", q3_winner:"3rd", q4_winner:"4th" };
+    if (Q_ORD[family]) {
+      const ord = Q_ORD[family];
+      const marketKey = Object.keys(raw).find(k => k.toLowerCase().includes(`${ord.toLowerCase()} quarter`) && k.toLowerCase().includes("1x2"));
+      if (!marketKey) return null;
+      const choices = raw[marketKey];
+      const dec = fracToDecimal(choices?.["Home"] ?? choices?.["1"]);
+      if (dec == null) return null;
+      return { label:`${f.teams.home} ${ord} Qtr`, prob:impliedFromDecimal(dec), odds:dec, color:C?.gold, market:"Quarter Winner" };
+    }
+
+    // Q1 margin — "1st quarter - winning margin"
+    if (family === "q1_margin") {
+      const marketKey = Object.keys(raw).find(k => k.toLowerCase().includes("1st quarter") && k.toLowerCase().includes("margin"));
+      if (!marketKey) return null;
+      const choices = raw[marketKey];
+      const dec = fracToDecimal(choices?.["Home by 3+"]);
+      if (dec == null) return null;
+      return { label:`${f.teams.home} by 3+ (Q1)`, prob:impliedFromDecimal(dec), odds:dec, color:C?.dc, market:"Quarter Margin" };
+    }
+
+    // 1st Half Handicap
+    if (family === "fh_handicap") {
+      const marketKey = Object.keys(raw).find(k => k.toLowerCase().includes("1st half") && k.toLowerCase().includes("handicap"));
+      if (!marketKey) return null;
+      const choices = raw[marketKey];
+      const lineKey = Object.keys(choices || {}).find(k => k.trim().startsWith("-"));
+      if (!lineKey) return null;
+      const dec = fracToDecimal(choices[lineKey]);
+      if (dec == null) return null;
+      return { label:`${f.teams.home} ${lineKey} (1H)`, prob:impliedFromDecimal(dec), odds:dec, color:C?.blue, market:"1st Half Handicap" };
+    }
+
+    // Tennis set handicap
+    if (family === "sethandicap_h" || family === "sethandicap_a") {
+      const marketKey = Object.keys(raw).find(k => k.toLowerCase().includes("set handicap"));
+      if (!marketKey) return null;
+      const choices = raw[marketKey];
+      const isHome = family === "sethandicap_h";
+      const lineKey = Object.keys(choices || {}).find(k => isHome ? k.trim().startsWith("-") : k.trim().startsWith("+"));
+      if (!lineKey) return null;
+      const dec = fracToDecimal(choices[lineKey]);
+      if (dec == null) return null;
+      const teamName = isHome ? f.teams.home : f.teams.away;
+      return { label:`${teamName} ${lineKey} sets`, prob:impliedFromDecimal(dec), odds:dec, color:C?.blue, market:"Set Handicap" };
+    }
+
+    // homewin / awaywin / over_total / under_total for BB/tennis use the
+    // SAME family IDs as football but need different resolution since BB/tennis
+    // markets/probability fields differ:
+    if (family === "homewin") {
+      if (m.homeWin == null) return null;
+      return { label:`${f.teams.home} Win`, prob:m.homeWin, odds:f.odds?.o1||io(m.homeWin), color:C?.gold, market:"Moneyline" };
+    }
+    if (family === "awaywin") {
+      if (m.awayWin == null) return null;
+      return { label:`${f.teams.away} Win`, prob:m.awayWin, odds:f.odds?.o2||io(m.awayWin), color:C?.gold, market:"Moneyline" };
+    }
+    if (family === "over_total" && f._totalSignal) {
+      return { label:`Over ${f._totalSignal.line}`, prob:f._totalSignal.direction === "OVER" ? f._totalSignal.confidence : 100 - f._totalSignal.confidence, odds:null, color:C?.green, market:"Total" };
+    }
+    if (family === "under_total" && f._totalSignal) {
+      return { label:`Under ${f._totalSignal.line}`, prob:f._totalSignal.direction === "UNDER" ? f._totalSignal.confidence : 100 - f._totalSignal.confidence, odds:null, color:C?.blue, market:"Total" };
+    }
+    return null; // unrecognised family for this sport — fail safe, no crash
+  }
+
+  // ── FOOTBALL — existing logic, completely UNCHANGED below this line ────
   if (family === "dc1x") {
     const prob = m.dc1X ?? (m.homeWin != null && m.draw != null ? Math.min(99, m.homeWin + m.draw) : null);
     if (prob == null) return null;
@@ -1463,23 +1583,26 @@ function syncC(theme) { Object.keys(theme).forEach(k => { C[k] = theme[k]; }); }
 // current live C values after a theme switch. The old pattern (const MKT = {...})
 // captured color values at module load time and never updated, causing faded
 // panels when C changed.
-const mktStyle = m => {
-  const map = {
-    "Over 2.5":  { color:C.green,  bg:C.greenDim  },
-    "Over 1.5":  { color:C.green,  bg:C.greenDim  },
-    "Over 3.5":  { color:C.green,  bg:C.greenDim  },
-    "Over 4.5":  { color:C.green,  bg:C.greenDim  },
-    "Under 1.5": { color:C.blue,   bg:C.blueDim   },
-    "Under 2.5": { color:C.blue,   bg:C.blueDim   },
-    "Under 3.5": { color:C.blue,   bg:C.blueDim   },
-    "Under 4.5": { color:C.blue,   bg:C.blueDim   },
-    "BTTS":      { color:C.purple, bg:C.purpleDim },
-    "1X2":       { color:C.gold,   bg:C.goldDim   },
-    "TeamTotal": { color:C.radar,  bg:C.radarDim  },
-    "DC":        { color:C.dc,     bg:C.dcDim     },
-    "CS":        { color:C.blue,   bg:C.blueDim   },
-  };
-  return map[m] || { color:C.text, bg:C.surface };
+const mktStyle = (m, sport = "football") => {
+  if (sport === "football") {
+    const map = {
+      "Over 2.5":  { color:C.green,  bg:C.greenDim  },
+      "Over 1.5":  { color:C.green,  bg:C.greenDim  },
+      "Over 3.5":  { color:C.green,  bg:C.greenDim  },
+      "Over 4.5":  { color:C.green,  bg:C.greenDim  },
+      "Under 1.5": { color:C.blue,   bg:C.blueDim   },
+      "Under 2.5": { color:C.blue,   bg:C.blueDim   },
+      "Under 3.5": { color:C.blue,   bg:C.blueDim   },
+      "Under 4.5": { color:C.blue,   bg:C.blueDim   },
+      "BTTS":      { color:C.purple, bg:C.purpleDim },
+      "1X2":       { color:C.gold,   bg:C.goldDim   },
+      "TeamTotal": { color:C.radar,  bg:C.radarDim  },
+      "DC":        { color:C.dc,     bg:C.dcDim     },
+      "CS":        { color:C.blue,   bg:C.blueDim   },
+    };
+    return map[m] || { color:C.text, bg:C.surface };
+  }
+  return getMarketStyle(m, sport, C); // sportConfig.js handles basketball/tennis
 };
 
 // ── STYLES INJECTION ──────────────────────────────────────────────────────
@@ -2878,7 +3001,7 @@ function SignalCard({ label, color, bg, border, pick, prob, odds, badge, badgeCo
 
 function SignalStrip({ theRead, theEdge, goalRadar, fixture, onAddToParlay, alreadyAdded, onExpand, isFinished }) {
   const anchor = theRead?.anchor;
-  const mst    = anchor ? mktStyle(anchor.market) : null;
+  const mst    = anchor ? mktStyle(anchor.market, fixture?._sport) : null;
   const radarEntry = goalRadar?.home || goalRadar?.away || null;
   const home = fixture?.teams?.home;
   const away = fixture?.teams?.away;
@@ -2965,7 +3088,7 @@ export function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded, 
   const { anchor, reinforcer, isFallback, scenario } = theRead;
   if (!anchor) return null;
 
-  const mst = mktStyle(anchor.market);
+  const mst = mktStyle(anchor.market, fixture?._sport);
   const accentColor = isFallback ? C.muted : mst.color;
   const accentBg    = isFallback ? C.surface : mst.bg;
   const accentBorder = isFallback ? C.border : `${accentColor}28`;
@@ -3504,7 +3627,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
   const displayF = localResult ? { ...f, ...localResult } : f;
   // anchor and theEdge are declared above with the per-pick draft checks
   // Primary pick — The Read anchor. This is what the card leads with.
-  const primaryColor = anchor ? mktStyle(anchor.market).color : C.muted;
+  const primaryColor = anchor ? mktStyle(anchor.market, f._sport).color : C.muted;
 
   return (
     // Card is NOT a tap target — use the "Full model →" button in footer
@@ -13803,8 +13926,10 @@ function GRMProInner() {
         setProgress(Math.round(pct));
         setProgressMsg(`Processing games… ${Math.round(pct)}%`);
       });
-      setBbGames(enriched);
-      // Build rollover pool + pick from the enriched games
+      const normalised = enriched.map(g => toFixtureShape(g, "basketball"));
+      setBbGames(normalised);  // now stores fixture-shaped objects, not raw BB objects
+      // Build rollover pool + pick from the enriched (raw) games — pool builder
+      // still needs the raw BB shape for its own pick selection logic.
       const pool = buildBasketballRolloverPool(enriched);
       const pick = buildBasketballRolloverPick(pool);
       setBbRolloverPool(pool);
@@ -14230,6 +14355,15 @@ function GRMProInner() {
   ];
 
   const filtered = useMemo(() => {
+    // Basketball: bbGames is already fixture-shaped (toFixtureShape applied on
+    // fetch, see Change 4). It has no "custom"/"engine" tab concepts yet (those
+    // are football pool/engine features) — basketball always uses the "all"
+    // branch's filter/sort logic below, sourced from bbGames instead of fixtures.
+    // The custom/engine branches below are left reading `fixtures` directly
+    // (untouched) since basketball never reaches them — tab is forced to "all"
+    // on sport switch (see the sport selector's onClick handler).
+    const source = sport === "basketball" ? bbGames : fixtures;
+
     if (tab === "custom") {
       // N9-FIX: search + leagueFilter applied.
       // FIX2: strong_first / strong_only from sortActive now also applied here.
@@ -14286,7 +14420,8 @@ function GRMProInner() {
         return sb - sa;
       });
     }
-    let list = [...fixtures];
+    // "all" branch — basketball's only path, sourced from `source` (bbGames for BB)
+    let list = [...source];
     if (search) { const s = search.toLowerCase(); list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league||"").toLowerCase().includes(s)); }
     if (leagueFilter) { const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]); list = list.filter(f => lf.has(f.leagueId)); }
     if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
@@ -14318,7 +14453,7 @@ function GRMProInner() {
       return (a.startingAt || "").localeCompare(b.startingAt || "");
     });
     return list;
-  }, [fixtures, frozenFixtures, tab, search, leagueFilter, sortActive, enginePool, engineFixtureIds]);
+  }, [fixtures, bbGames, sport, frozenFixtures, tab, search, leagueFilter, sortActive, enginePool, engineFixtureIds]);
 
   const isDesktop = useIsDesktop();
 
@@ -14410,9 +14545,14 @@ function GRMProInner() {
             <select
               value={sport}
               onChange={e => {
-                setSport(e.target.value);
+                const newSport = e.target.value;
+                setSport(newSport);
                 setBbGames([]); setBbRolloverPool([]); setBbRolloverPick(null);
                 setError(null);
+                // Basketball has no pool-engine or custom-pick-list view yet (see
+                // sportConfig.js / filtered memo) — force the main "All" list so
+                // the tab selector never shows an empty Custom/Engine view for BB.
+                if (newSport === "basketball" && tab !== "all") setTab("all");
               }}
               className="gi"
               style={{ fontSize:10,padding:"7px 10px",color:C.accent,fontWeight:800,
@@ -14827,19 +14967,10 @@ function GRMProInner() {
           #3-FIX: themeId key forces React to re-render children when theme
           changes so the dashboard hero doesn't show a stale white box. */}
       <div key={`rollover-${theme?.id}`} style={{ display: mainView === "rollover" ? undefined : "none" }}>
-        {sport === "basketball" ? (
-          <div style={{ maxWidth:1480,margin:"0 auto",padding:"28px 16px 0" }}>
-            <BasketballRolloverView
-              rolloverPick={bbRolloverPick}
-              pool={bbRolloverPool}
-              C={C}
-            />
-          </div>
-        ) : (
         <RolloverSystem
           C={C}
           SERVER={SERVER}
-          fixtures={fixtures}
+          fixtures={sport === "basketball" ? bbGames : fixtures}
           historicalRates={historicalRates}
           date={date}
           buildRolloverPick={buildRolloverPick}
@@ -14847,7 +14978,6 @@ function GRMProInner() {
           onFullModel={onFullModelFromRollover}
           onChainChange={handleChainChange}
         />
-        )}
       </div>
 
       {activeTab === "live" && mainView === "main" && (
@@ -14872,13 +15002,7 @@ function GRMProInner() {
               {/* Stage + percent */}
               <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
                 <span className="pu" style={{ fontSize:10,color:C.accent,fontWeight:800,letterSpacing:".12em",textTransform:"uppercase" }}>
-                  {progressStage==="fixtures"?"Fetching Fixtures"
-                    :progressStage==="standings"?"League Standings"
-                    :progressStage==="stats"?"Team Stats"
-                    :progressStage==="processing"?"Processing"
-                    :progressStage==="saving"?"Saving"
-                    :progressStage==="done"?"✓ Done"
-                    :"Starting…"}
+                  {getProgressLabel(progressStage, sport)}
                 </span>
                 <span style={{ fontSize:14,fontWeight:800,color:progress<30?C.blue:progress<70?C.accent:progress<95?C.orange:C.green }}>{progress}%</span>
               </div>
@@ -15059,14 +15183,50 @@ function GRMProInner() {
             </>
           )}
 
-          {/* ── BASKETBALL fixtures — same shell, same date, same FETCH ── */}
+          {/* ── BASKETBALL fixtures — same shell, same FixtureCard, same grid as
+               football's "all" tab. `filtered` already resolves to bbGames here
+               (see Change 7's `source` switch). No JarvisMindBox / custom-tab
+               branch — basketball is always forced to tab==="all" on sport
+               switch (see sport selector onChange), so this mirrors only the
+               "all" tab render path above, not the full football block. ── */}
           {sport === "basketball" && !loading && bbGames.length > 0 && (
-            <BasketballGameList
-              games={bbGames}
-              C={C}
-              draftLegs={draftLegs}
-              onAddToDraft={addLegToDraft}
-            />
+            <>
+              {(leagueFilter && (leagueFilter instanceof Set ? leagueFilter.size > 0 : true)) && (() => {
+                const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
+                const names = [...lf].map(id => { const f2 = bbGames.find(f => f.leagueId === id); return f2?.league || id; }).filter(Boolean);
+                const label = names.length <= 2 ? names.join(" · ") : `${names.slice(0,2).join(" · ")} +${names.length - 2} more`;
+                return (
+                  <div style={{ margin:"6px 0 2px", padding:"7px 12px",
+                                background:`${C.accent}10`, border:`1px solid ${C.accent}25`,
+                                borderRadius:8, display:"flex", alignItems:"center",
+                                justifyContent:"space-between", gap:8 }}>
+                    <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
+                      Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                    </span>
+                    <button onClick={() => setLeagueFilter(null)}
+                      style={{ fontSize:8, color:C.muted, background:"transparent",
+                               border:`1px solid ${C.border}`, borderRadius:5,
+                               padding:"2px 8px", cursor:"pointer", fontFamily:C.font }}>
+                      Clear
+                    </button>
+                  </div>
+                );
+              })()}
+              <div className="grm-grid" style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:14,paddingBottom:80 }}>
+                {filtered.map(f => (
+                  <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
+                    <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={false}
+                      onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                      backtestSummary={historicalRates}
+                      adminToken={adminToken}
+                    />
+                  </FixtureErrorBoundary>
+                ))}
+              </div>
+              {!filtered.length && (
+                <div style={{ textAlign:"center",padding:"60px 0",color:C.text,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches found</div>
+              )}
+            </>
           )}
         </div>
       )}
