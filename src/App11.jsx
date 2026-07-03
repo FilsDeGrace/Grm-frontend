@@ -134,19 +134,8 @@ function oddsOrImplied(realOdds, prob) {
 // WebViews. Modern desktop browsers also support it as a fallback. The only
 // environment that truly needs the Async API is Safari 13.3+ on iOS — but iOS
 // does not trigger a visible permission dialog for clipboard, so skipping it is safe.
-// B-FIX (foundation): stamp `.date` onto every fixture at load time. Fixture
-// objects didn't carry their own date before — needed both for the Fixture
-// Share deep link (A) to know what date a shared fixture came from, and as
-// the foundation for Multi-Date Live Model (B), where a single `fixtures`
-// array will eventually hold fixtures from more than one date at once.
-// Additive only: never overwrites a date a fixture already carries.
-function stampFixtureDates(fixturesArr, d) {
-  if (!Array.isArray(fixturesArr) || !d) return fixturesArr;
-  return fixturesArr.map(f => (f && !f.date) ? { ...f, date: d } : f);
-}
-
 // Usage: copyToClipboard(text, onSuccess?, onError?)
-export function copyToClipboard(text, onSuccess, onError) {
+function copyToClipboard(text, onSuccess, onError) {
   _execCommandCopy(text, onSuccess, onError);
 }
 
@@ -7988,26 +7977,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       {/* ── Legs ── */}
       {!exhausted && (
         <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:12 }}>
-          {/* B-FIX: date-separator between legs from different dates. Deliberately
-              does NOT reorder ticket.legs — `i` is used below (onRemoveLeg(i),
-              onSwapLeg, etc.) and must keep matching ticket.legs[i] exactly.
-              Legs are usually already added in date order anyway, since they
-              come from the date-sorted Live Model grid. */}
-          {(ticket.legs||[]).map((leg, i) => {
-            const _multiDateLegs = new Set((ticket.legs||[]).map(l=>l.date).filter(Boolean)).size > 1;
-            const _prevLeg = i > 0 ? ticket.legs[i-1] : null;
-            const _showLegDateSep = _multiDateLegs && leg.date && leg.date !== _prevLeg?.date;
-            return (
-            <React.Fragment key={i}>
-              {_showLegDateSep && (
-                <div style={{ display:"flex", alignItems:"center", gap:8, padding: i===0?"0 2px 2px":"8px 2px 2px" }}>
-                  <span style={{ fontSize:9, fontWeight:800, color:C.muted, textTransform:"uppercase", letterSpacing:".08em" }}>
-                    {leg.date === todayStr() ? "Today" : fmtDateLabel(leg.date)}
-                  </span>
-                  <span style={{ flex:1, height:1, background:C.faint }} />
-                </div>
-              )}
-            <div style={{
+          {(ticket.legs||[]).map((leg, i) => (
+            <div key={i} style={{
               background:`${accentColor}07`,
               borderRadius:12,padding:"9px 12px",
               border:`1px solid ${accentColor}18`,position:"relative"
@@ -8097,9 +8068,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                 </div>
               )}
             </div>
-            </React.Fragment>
-            );
-          })}
+          ))}
         </div>
       )}
 
@@ -8444,72 +8413,8 @@ function ThresholdChip({ label, value, defaultValue, min, max, step, onChange, c
   );
 }
 
-// ── FILTER UI TOUCH-TARGET CONSTANTS ────────────────────────────────────────
-// V-FIX (2026-07-02): trigger buttons were 3px/9px padding (~20px effective
-// tap height) and league/sort rows were 14-18px tall — well under the ~44px
-// minimum recommended mobile tap target. Sizes below apply across
-// LeagueFilter, LeagueFilterList and SortFilter so the two surfaces that use
-// them (main Filters drawer, custom parley builder) stay visually consistent.
-// All colors still resolve through C.* (theme tokens), so this remains
-// theme-agnostic — verified against every palette in themes.js.
-const FILTER_TRIGGER_H  = 44; // compact trigger buttons (League/Sort pills)
-const FILTER_ROW_H      = 52; // country rows / primary sort-option rows
-const FILTER_SUBROW_H   = 46; // league sub-rows
-
-function CheckIcon({ color, size = 12 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12"/>
-    </svg>
-  );
-}
-function ChevronIcon({ open, color }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"
-      style={{ transition:"transform .15s ease", transform: open ? "rotate(180deg)" : "rotate(0deg)" }}>
-      <polyline points="6 9 12 15 18 9"/>
-    </svg>
-  );
-}
-
-// ── FILTER SECTION — collapsible accordion row for the Filters drawer ──────
-// V2-FIX (2026-07-03): the drawer used to render League/Sort/Appearance/Tickets/
-// Admin all fully expanded at once. League alone can be 50+ rows (one per
-// country), which pushed every other section below the fold and forced
-// scrolling just to reach Sort & Filter, Appearance, etc. — the exact
-// "dumped everything" regression reported. Each section is now collapsed by
-// default behind a header the same touch-target height as the rest of the
-// drawer (FILTER_TRIGGER_H), with an optional summary/badge so the state is
-// visible without opening it. Sections keep their own open/closed state
-// locally — independent, no accordion-single-open constraint, since a user
-// may reasonably want League + Sort both open at once.
-function FilterSection({ title, summary, badge, defaultOpen = false, children }) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div>
-      <button onClick={() => setOpen(o => !o)} className="gb"
-        style={{ width:"100%", minHeight:FILTER_TRIGGER_H, padding:"10px 12px", borderRadius:C.btnRadius,
-                 background: open ? C.surface : "transparent", border:`1px solid ${open?C.border:"transparent"}`,
-                 display:"flex", alignItems:"center", gap:10, textAlign:"left" }}>
-        <span style={{ fontSize:11, fontWeight:800, color:C.muted, textTransform:"uppercase",
-          letterSpacing:".12em", flexShrink:0 }}>{title}</span>
-        <span style={{ flex:1, fontSize:11, color:C.text, opacity:.7, overflow:"hidden",
-          textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{!open ? summary : ""}</span>
-        {badge > 0 && (
-          <span style={{ background:C.accent, color:C.accentText, borderRadius:8, fontSize:8,
-            fontWeight:900, padding:"1px 6px", lineHeight:1.4, flexShrink:0 }}>{badge}</span>
-        )}
-        <ChevronIcon open={open} color={C.muted}/>
-      </button>
-      {open && <div style={{ paddingTop:12 }}>{children}</div>}
-    </div>
-  );
-}
-
-// Shared grouping/selection logic — single source of truth so the compact
-// popover (LeagueFilter) and the always-open in-drawer list (LeagueFilterList)
-// never drift out of sync with each other.
-function useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter) {
+function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
+  const [open, setOpen]         = useState(false);
   const [search, setSearch]     = useState("");
   const [expanded, setExpanded] = useState(new Set());
 
@@ -8552,103 +8457,9 @@ function useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter) {
     : selected.size === 1 ? (() => { const lg = availableLeagues.find(l => selected.has(l.leagueId)); return lg ? `${lg.league}${lg.country ? ` · ${lg.country}` : ""}` : "1 league"; })()
     : `${selected.size} leagues`;
 
-  return { search, setSearch, expanded, setExpanded, searchLow, filteredGroups, selected, toggleLeague, toggleCountry, activeLabel };
-}
-
-// Presentational, always-visible league browser — big touch targets, no
-// nested trigger/popover chrome of its own. Used directly inline wherever
-// a dedicated panel already owns the "open/closed" state (the main Filters
-// drawer, and — inline, one level of nesting — inside LeagueFilter's own
-// popover below), so there's one rendering implementation, not two.
-function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onSelectLeague }) {
-  const { search, setSearch, expanded, setExpanded, searchLow, filteredGroups, selected, toggleLeague, toggleCountry } =
-    useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter);
-
-  return (
-    <div>
-      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…" className="gi"
-        style={{ fontSize:13, padding:"11px 14px", marginBottom:10 }}/>
-
-      <button onClick={() => { setLeagueFilter(null); setSearch(""); onSelectLeague?.(); }} className="gb"
-        style={{ width:"100%", minHeight:FILTER_ROW_H, textAlign:"left", padding:"12px 14px", fontSize:13,
-                 display:"flex", alignItems:"center", justifyContent:"space-between",
-                 background:selected.size===0?C.accent:C.surface, color:selected.size===0?C.accentText:C.text,
-                 border:`1px solid ${selected.size===0?C.accentBorder:C.border}`, borderRadius:C.btnRadius,
-                 fontWeight:selected.size===0?800:600, marginBottom:8 }}>
-        All Leagues
-        {selected.size === 0 && <CheckIcon color={C.accentText} size={14}/>}
-      </button>
-
-      {filteredGroups.length === 0 && (
-        <div style={{ padding:"22px 8px", textAlign:"center", fontSize:12, color:C.muted }}>
-          No leagues match “{search}”.
-        </div>
-      )}
-
-      <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-        {filteredGroups.map(({ country, leagues }) => {
-          // Auto-expand: if searching, if country has selections, or if country has only 1 league
-          const hasSelection = leagues.some(l => selected.has(l.leagueId));
-          const isExp = expanded.has(country) || !!searchLow || hasSelection || leagues.length === 1;
-          const countrySelected = leagues.filter(l => selected.has(l.leagueId)).length;
-          const allCountrySel = countrySelected === leagues.length;
-          return (
-            <div key={country} style={{ borderRadius:C.cardRadius, border:`1px solid ${C.border}`, overflow:"hidden" }}>
-              <div
-                onClick={() => setExpanded(prev => { const n=new Set(prev); (isExp && !searchLow && !hasSelection && leagues.length>1) ? n.delete(country) : n.add(country); return n; })}
-                style={{ display:"flex", alignItems:"center", gap:10, minHeight:FILTER_ROW_H, padding:"10px 14px", cursor:"pointer",
-                         background:countrySelected>0?C.accentDim:"transparent" }}>
-                <button onClick={e=>{ e.stopPropagation(); toggleCountry(country,leagues); }} className="gb"
-                  style={{ width:22, height:22, borderRadius:6, flexShrink:0, padding:0, display:"flex", alignItems:"center", justifyContent:"center",
-                           border:`1.5px solid ${allCountrySel?C.accent:C.border}`,
-                           background:allCountrySel?C.accent:countrySelected>0?C.accentDim:"transparent" }}>
-                  {allCountrySel && <CheckIcon color={C.accentText}/>}
-                </button>
-                <span style={{ fontSize:13, fontWeight:700, color:countrySelected>0?C.accent:C.text, flex:1 }}>{country}</span>
-                <span style={{ fontSize:11, color:C.muted }}>{leagues.length}</span>
-                {leagues.length > 1 && <ChevronIcon open={isExp} color={C.muted}/>}
-              </div>
-              {isExp && (
-                <div style={{ borderTop:`1px solid ${C.faint}` }}>
-                  {leagues.map(lg => {
-                    const active = selected.has(lg.leagueId);
-                    return (
-                      <button key={lg.leagueId} onClick={() => toggleLeague(lg.leagueId)} className="gb"
-                        style={{ display:"flex", alignItems:"center", gap:10, width:"100%", textAlign:"left",
-                                 minHeight:FILTER_SUBROW_H, padding:"10px 14px 10px 40px", fontSize:12.5,
-                                 background:active?C.accentDim:"transparent", color:active?C.accent:C.text,
-                                 border:"none", borderTop:`1px solid ${C.faint}` }}>
-                        <span style={{ width:17, height:17, borderRadius:4, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center",
-                                       border:`1.5px solid ${active?C.accent:C.border}`, background:active?C.accent:"transparent" }}>
-                          {active && <CheckIcon color={C.accentText} size={11}/>}
-                        </span>
-                        {lg.leagueRank < 999 ? `[${lg.leagueRank}] ` : ""}{lg.league}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// Compact trigger + popover — for use inline within a flow (e.g. the custom
-// parley builder) where a dedicated always-open panel isn't appropriate.
-// Renders LeagueFilterList inside the popover so the browsing UI itself has
-// exactly one implementation (see comment above LeagueFilterList).
-function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
-  const [open, setOpen] = useState(false);
-  const selected = leagueFilter instanceof Set ? leagueFilter : new Set(leagueFilter ? [leagueFilter] : []);
-  const activeLabel = selected.size === 0 ? "All Leagues"
-    : selected.size === 1 ? (() => { const lg = availableLeagues.find(l => selected.has(l.leagueId)); return lg ? `${lg.league}${lg.country ? ` · ${lg.country}` : ""}` : "1 league"; })()
-    : `${selected.size} leagues`;
-
   const btnRef = useRef(null);
   const [btnRect, setBtnRect] = useState(null);
+
   const openDropdown = () => {
     if (btnRef.current) setBtnRect(btnRef.current.getBoundingClientRect());
     setOpen(true);
@@ -8657,17 +8468,11 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
   return (
     <div style={{ marginBottom:6, position:"relative" }}>
       <button ref={btnRef} onClick={() => open ? setOpen(false) : openDropdown()} className="gb"
-        style={{ minHeight:FILTER_TRIGGER_H, padding:"10px 16px", fontSize:13, borderRadius:C.btnRadius,
-                 background:selected.size>0?C.accentDim:C.surface, color:selected.size>0?C.accent:C.text,
-                 border:`1px solid ${selected.size>0?C.accentBorder:C.border}`,
-                 display:"flex", alignItems:"center", gap:8, width:"100%" }}>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        <span style={{ flex:1, textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{activeLabel}</span>
-        {selected.size > 0 && (
-          <span onClick={e=>{ e.stopPropagation(); setLeagueFilter(null); }}
-            style={{ color:C.muted, fontSize:13, padding:4, lineHeight:1 }}>✕</span>
-        )}
-        <ChevronIcon open={open} color={C.muted}/>
+        style={{ padding:"3px 12px",fontSize:9,background:selected.size>0?C.accentDim:C.surface,color:selected.size>0?C.accent:C.text,border:`1px solid ${selected.size>0?C.accentBorder:C.border}`,display:"flex",alignItems:"center",gap:5 }}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        <span style={{ maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{activeLabel}</span>
+        {selected.size > 0 && <span onClick={e=>{ e.stopPropagation(); setLeagueFilter(null); }} style={{ color:C.muted,fontSize:10,marginLeft:2 }}>✕</span>}
+        <span style={{ fontSize:8 }}>{open ? "▲" : "▼"}</span>
       </button>
       {open && ReactDOM.createPortal(
         <>
@@ -8680,40 +8485,77 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
               the bottom of the list is reachable without scrolling past the nav. */}
           <div style={window.innerWidth < 600 ? {
             position:"fixed", bottom:0, left:0, right:0, zIndex:8999,
-            maxHeight:"78vh", display:"flex", flexDirection:"column",
-            background:C.modalBg, borderRadius:"20px 20px 0 0",
+            maxHeight:"70vh", display:"flex", flexDirection:"column",
+            background:C.modalBg, borderRadius:"16px 16px 0 0",
             boxShadow:"0 -4px 32px rgba(0,0,0,.5)",
             border:`1px solid ${C.border}`,
             animation:"slideUp .22s ease",
             paddingBottom:"env(safe-area-inset-bottom, 16px)",
           } : {
             position:"fixed",
-            top: btnRect ? btnRect.bottom + 6 : 60,
-            left: btnRect ? Math.min(btnRect.left, window.innerWidth - 340) : 16,
+            top: btnRect ? btnRect.bottom + 3 : 60,
+            left: btnRect ? Math.min(btnRect.left, window.innerWidth - 290) : 16,
             zIndex:8999,
-            width:330, maxHeight:460, overflowY:"auto",
+            width:280, maxHeight:400, overflowY:"auto",
             background:C.modalBg, border:`1px solid ${C.border}`,
-            borderRadius:C.cardRadius, boxShadow:"0 4px 24px rgba(0,0,0,0.5)"
+            borderRadius:8, boxShadow:"0 4px 24px rgba(0,0,0,0.5)"
           }}>
-          {/* Drag handle + header — mobile only */}
+          {/* Bottom sheet drag handle — mobile only */}
           {window.innerWidth < 600 && (
             <div style={{ display:"flex", justifyContent:"center", padding:"10px 0 4px" }}>
               <div style={{ width:36, height:4, borderRadius:2, background:C.border }} />
             </div>
           )}
-          <div style={{ padding:"6px 16px 12px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ fontSize:14, fontWeight:800, color:C.text }}>Select Leagues</span>
-            <button onClick={() => setOpen(false)}
-              style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1 }}>✕</button>
+          {window.innerWidth < 600 && (
+            <div style={{ padding:"4px 14px 10px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:11, fontWeight:800, color:C.text }}>Select Leagues</span>
+              <button onClick={() => setOpen(false)}
+                style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:18, padding:0 }}>✕</button>
+            </div>
+          )}
+          <div style={{ flex:1, overflowY:"auto" }}>
+          <div style={{ padding:"8px 10px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.modalBg,zIndex:1 }}>
+            <input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…"
+              style={{ width:"100%",background:C.faint,border:`1px solid ${C.border}`,borderRadius:5,padding:"4px 8px",fontSize:9,color:C.text,outline:"none",boxSizing:"border-box" }}/>
           </div>
-          <div style={{ flex:1, overflowY:"auto", padding:"0 14px 16px" }}>
-            <LeagueFilterList
-              availableLeagues={availableLeagues}
-              leagueFilter={leagueFilter}
-              setLeagueFilter={setLeagueFilter}
-              onSelectLeague={() => setOpen(false)}
-            />
+          <div style={{ padding:"4px 10px",borderBottom:`1px solid ${C.faint}` }}>
+            <button onClick={() => { setLeagueFilter(null); setOpen(false); setSearch(""); }} className="gb"
+              style={{ width:"100%",textAlign:"left",padding:"4px 8px",fontSize:9,background:selected.size===0?C.accent:C.surface,color:selected.size===0?C.accentText:C.text,border:`1px solid ${selected.size===0?C.accentBorder:C.border}`,borderRadius:4,fontWeight:selected.size===0?700:400 }}>
+              All Leagues
+            </button>
           </div>
+          {filteredGroups.map(({ country, leagues }) => {
+            // Auto-expand: if searching, if country has selections, or if country has only 1 league
+            const hasSelection = leagues.some(l => selected.has(l.leagueId));
+            const isExp = expanded.has(country) || !!searchLow || hasSelection || leagues.length === 1;
+            const countrySelected = leagues.filter(l => selected.has(l.leagueId)).length;
+            const allCountrySel = countrySelected === leagues.length;
+            return (
+              <div key={country} style={{ borderBottom:`1px solid ${C.faint}` }}>
+                <div style={{ display:"flex",alignItems:"center",padding:"5px 10px",gap:6,cursor:"pointer" }}
+                  onClick={() => setExpanded(prev => { const n=new Set(prev); isExp&&!searchLow&&!hasSelection&&leagues.length>1?n.delete(country):n.add(country); return n; })}>
+                  <button className="gb" onClick={e=>{ e.stopPropagation(); toggleCountry(country,leagues); }}
+                    style={{ width:14,height:14,borderRadius:3,border:`1px solid ${allCountrySel?C.accent:C.border}`,background:allCountrySel?C.accent:countrySelected>0?C.accentDim:"transparent",flexShrink:0,padding:0 }}/>
+                  <span style={{ fontSize:9,fontWeight:700,color:countrySelected>0?C.accent:C.text,flex:1 }}>{country}</span>
+                  <span style={{ fontSize:8,color:C.muted }}>{leagues.length}</span>
+                  {leagues.length > 1 && <span style={{ fontSize:8,color:C.muted }}>{isExp&&!searchLow&&!hasSelection?"▲":"▼"}</span>}
+                </div>
+                {isExp && leagues.map(lg => {
+                  const active = selected.has(lg.leagueId);
+                  return (
+                    <button key={lg.leagueId} onClick={() => toggleLeague(lg.leagueId)} className="gb"
+                      style={{ display:"block",width:"100%",textAlign:"left",padding:"4px 10px 4px 28px",fontSize:8,
+                               background:active?C.accentDim:"transparent",
+                               color:active?C.accent:C.muted,
+                               border:"none",borderBottom:`1px solid ${C.faint}` }}>
+                      {lg.leagueRank < 999 ? `[${lg.leagueRank}] ` : ""}{lg.league}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+          </div>{/* end scroll wrapper */}
           </div>{/* end sheet/dropdown */}
         </>,
         document.body
@@ -8747,32 +8589,8 @@ function getStateGroup(f) {
   return 0; // upcoming / not started
 }
 
-// Single option-row renderer shared by all three SORT_OPTIONS groups —
-// previously each group duplicated the same button markup three times.
-function SortOptionRow({ opt, isActive, onToggle, liveCol }) {
-  return (
-    <button onClick={onToggle} className="gb"
-      style={{ minHeight:FILTER_ROW_H, padding:"10px 14px", fontSize:13, textAlign:"left",
-               display:"flex", flexDirection:"column", justifyContent:"center", gap:2,
-               background:isActive?C.accentDim:"transparent", color:isActive?C.accent:C.text,
-               border:`1px solid ${isActive?C.accentBorder:C.faint}`, borderRadius:C.btnRadius }}>
-      <span style={{ fontWeight:isActive?800:600, display:"flex", alignItems:"center", gap:8 }}>
-        {opt.icon && <span style={{ color: liveCol ? (isActive?liveCol:C.muted) : (isActive?C.accent:C.muted), display:"flex", opacity: liveCol?1:.75 }}>{opt.icon}</span>}
-        {opt.label}
-        {isActive && <span style={{ marginLeft:"auto", display:"flex" }}><CheckIcon color={C.accent} size={13}/></span>}
-      </span>
-      <span style={{ fontSize:11, color:C.muted, opacity:.85, paddingLeft: opt.icon ? 22 : 0 }}>{opt.desc}</span>
-    </button>
-  );
-}
-
-// SortFilter — `alwaysOpen` renders the option groups directly with no
-// trigger button, for use inside a panel that's already the "open" context
-// (the main Filters drawer). Without it, renders the compact trigger +
-// inline collapse, for standalone use elsewhere.
-function SortFilter({ active, setActive, alwaysOpen = false }) {
-  const [openState, setOpen] = useState(false);
-  const open = alwaysOpen || openState;
+function SortFilter({ active, setActive }) {
+  const [open, setOpen] = useState(false);
   const hasActive = active.size > 0;
   const activeLabels = SORT_OPTIONS.filter(o => active.has(o.id)).map(o => o.label).join(" · ");
 
@@ -8793,45 +8611,74 @@ function SortFilter({ active, setActive, alwaysOpen = false }) {
     });
   };
 
-  const groups = [
-    { label: "Time Order", options: SORT_OPTIONS.filter(o => o.type === "sort_time") },
-    { label: "Sort Order",  options: SORT_OPTIONS.filter(o => o.type === "sort_primary") },
-    { label: "Filters",     options: SORT_OPTIONS.filter(o => o.type === "filter") },
-  ];
-
   return (
     <div style={{ marginBottom:6 }}>
-      {!alwaysOpen && (
-        <button onClick={() => setOpen(o => !o)} className="gb"
-          style={{ minHeight:FILTER_TRIGGER_H, padding:"10px 16px", fontSize:13, borderRadius:C.btnRadius, width:"100%",
-                   background:hasActive?C.accentDim:C.surface, color:hasActive?C.accent:C.text,
-                   border:`1px solid ${hasActive?C.accentBorder:C.border}`, display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:15 }}>↕</span>
-          <span style={{ flex:1, textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-            {hasActive ? activeLabels : "Sort / Filter"}
-          </span>
-          <ChevronIcon open={open} color={C.muted}/>
-        </button>
-      )}
+      <button onClick={() => setOpen(o => !o)} className="gb"
+        style={{ padding:"3px 12px",fontSize:9,background:hasActive?C.accentDim:"transparent",color:hasActive?C.accent:C.muted,border:`1px solid ${hasActive?C.accentBorder:C.faint}`,display:"flex",alignItems:"center",gap:5 }}>
+        <span>↕</span>
+        <span style={{ maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+          {hasActive ? activeLabels : "Sort / Filter"}
+        </span>
+        <span style={{ fontSize:8 }}>{open ? "▲" : "▼"}</span>
+      </button>
       {open && (
-        <div style={alwaysOpen ? {} : { marginTop:8, padding:12, background:C.surface, border:`1px solid ${C.border}`, borderRadius:C.cardRadius }}>
-          {groups.map(({ label, options }) => options.length > 0 && (
-            <div key={label} style={{ marginBottom:14 }}>
-              <div style={{ fontSize:10, color:C.muted, fontWeight:800, textTransform:"uppercase", letterSpacing:".12em", marginBottom:8 }}>{label}</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                {options.map(opt => {
-                  const isActive = active.has(opt.id);
-                  const liveCol = opt.id === "live" ? C.green : opt.id === "scheduled" ? C.gold : null;
-                  return <SortOptionRow key={opt.id} opt={opt} isActive={isActive} onToggle={() => toggle(opt.id)} liveCol={liveCol}/>;
-                })}
-              </div>
-            </div>
-          ))}
+        <div style={{ marginTop:5,padding:"10px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,minWidth:230 }}>
+
+          {/* Time ordering — combinable */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Time Order</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:10 }}>
+            {SORT_OPTIONS.filter(o => o.type === "sort_time").map(opt => {
+              const isActive = active.has(opt.id);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.accentDim:"transparent",color:isActive?C.accent:C.muted,border:`1px solid ${isActive?C.accentBorder:C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400,display:"flex",alignItems:"center",gap:5 }}>
+                    {opt.icon && <span style={{ opacity:.7 }}>{opt.icon}</span>}
+                    {opt.label}
+                  </span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Primary sorts — mutually exclusive with each other */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Sort Order</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:10 }}>
+            {SORT_OPTIONS.filter(o => o.type === "sort_primary").map(opt => {
+              const isActive = active.has(opt.id);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.accentDim:"transparent",color:isActive?C.accent:C.muted,border:`1px solid ${isActive?C.accentBorder:C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400 }}>{opt.label}</span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Filters */}
+          <div style={{ fontSize:8,color:C.text,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",marginBottom:7 }}>Filters</div>
+          <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
+            {SORT_OPTIONS.filter(o => o.type === "filter").map(opt => {
+              const isActive = active.has(opt.id);
+              const liveCol = opt.id === "live" ? C.green : opt.id === "scheduled" ? C.gold : (isActive ? C.accent : C.muted);
+              return (
+                <button key={opt.id} onClick={() => toggle(opt.id)} className="gb"
+                  style={{ padding:"5px 10px",fontSize:9,background:isActive?C.accentDim:"transparent",color:isActive?C.accent:C.muted,border:`1px solid ${isActive?C.accentBorder:C.faint}`,textAlign:"left",display:"flex",flexDirection:"column",gap:1 }}>
+                  <span style={{ fontWeight:isActive?700:400,display:"flex",alignItems:"center",gap:5 }}>
+                    {opt.icon && <span style={{ color: isActive ? liveCol : C.muted, lineHeight:0 }}>{opt.icon}</span>}
+                    {opt.label}
+                  </span>
+                  <span style={{ fontSize:8,opacity:.6 }}>{opt.desc}</span>
+                </button>
+              );
+            })}
+          </div>
 
           {hasActive && (
-            <button onClick={() => { setActive(new Set()); if (!alwaysOpen) setOpen(false); }} className="gb"
-              style={{ width:"100%", minHeight:FILTER_TRIGGER_H, padding:"10px", fontSize:12, fontWeight:700,
-                       color:C.text, border:`1px solid ${C.border}`, background:"transparent", borderRadius:C.btnRadius, textAlign:"center" }}>
+            <button onClick={() => { setActive(new Set()); setOpen(false); }} className="gb"
+              style={{ marginTop:8,width:"100%",padding:"4px",fontSize:8,color:C.text,border:`1px solid ${C.faint}`,background:"transparent",textAlign:"center" }}>
               ✕ Clear all
             </button>
           )}
@@ -8840,225 +8687,7 @@ function SortFilter({ active, setActive, alwaysOpen = false }) {
     </div>
   );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// B-FIX: DateStackCalendar — replaces the native <input type="date"> for the
-// Live Model date picker. Two gestures on a day cell:
-//   Tap an unselected day   → instant single-select: replaces the whole stack,
-//                             closes, fetches immediately (today's exact
-//                             single-date behavior, just through a nicer UI).
-//   Tap a selected day      → deselects it from the pending set (does NOT
-//                             auto-apply — same as long-press-to-deselect).
-//   Long-press a day        → toggles it in/out of the pending multi-date
-//                             selection without closing the popover, so
-//                             several days can be added in one session.
-//   Apply                   → commits whatever the pending set no longer
-//                             matches the active stack (merges new dates in,
-//                             removes dropped ones).
-// Purely presentational — all the actual fetching/merging happens in the
-// parent via onReplace/onApply; this component only manages gesture + the
-// in-progress `pending` selection.
-// ─────────────────────────────────────────────────────────────────────────────
-const WEEKDAY_LABELS = ["S","M","T","W","T","F","S"];
-const LONG_PRESS_MS = 480;
-
-function fmtDateStr(d) {
-  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,"0"), day = String(d.getDate()).padStart(2,"0");
-  return `${y}-${m}-${day}`;
-}
-function parseDateStr(s) {
-  const [y,m,d] = (s||"").split("-").map(Number);
-  return (y && m && d) ? new Date(y, m-1, d) : new Date();
-}
-function getMonthGrid(year, month) {
-  const first = new Date(year, month, 1);
-  const daysInMonth = new Date(year, month+1, 0).getDate();
-  const cells = [];
-  for (let i=0;i<first.getDay();i++) cells.push(null);
-  for (let d=1; d<=daysInMonth; d++) cells.push(new Date(year, month, d));
-  while (cells.length % 7 !== 0) cells.push(null);
-  return cells;
-}
-function fmtDateLabel(dstr) {
-  try { return parseDateStr(dstr).toLocaleDateString(undefined, { weekday:"short", month:"short", day:"numeric" }); }
-  catch { return dstr; }
-}
-
-function DateStackCalendar({ dateStack, mergingDates, loading, onReplace, onApply, singleDateOnly = false }) {
-  const [open, setOpen]           = useState(false);
-  const [pending, setPending]     = useState(() => new Set(dateStack));
-  const [viewDate, setViewDate]   = useState(() => parseDateStr(dateStack[0] || todayStr()));
-  const btnRef  = useRef(null);
-  const [btnRect, setBtnRect] = useState(null);
-  const longPressTimer = useRef(null);
-  const longPressFired = useRef(false);
-
-  // Re-sync pending from the actual active stack every time the popover opens —
-  // so reopening always starts from ground truth, not a stale session.
-  const openPopover = () => {
-    if (loading) return;
-    setPending(new Set(dateStack));
-    setViewDate(parseDateStr(dateStack[dateStack.length-1] || todayStr()));
-    if (btnRef.current) setBtnRect(btnRef.current.getBoundingClientRect());
-    setOpen(true);
-  };
-
-  const toggleOff = (dstr) => setPending(prev => {
-    if (prev.size <= 1) return prev; // never allow the stack to go to zero dates
-    const n = new Set(prev); n.delete(dstr); return n;
-  });
-  const toggleOn = (dstr) => setPending(prev => new Set(prev).add(dstr));
-
-  const handleTap = (dstr) => {
-    if (loading) return;
-    if (!singleDateOnly && pending.has(dstr)) { toggleOff(dstr); return; }
-    // Quick single-day replace — bypasses the pending/Apply flow entirely.
-    onReplace(dstr);
-    setOpen(false);
-  };
-  const handleLongPress = (dstr) => {
-    if (loading || singleDateOnly) return;
-    if (pending.has(dstr)) toggleOff(dstr); else toggleOn(dstr);
-  };
-
-  const dayHandlers = (dstr) => ({
-    onContextMenu: e => e.preventDefault(),
-    onPointerDown: e => {
-      if (e.pointerType === "mouse" && e.button !== 0) return;
-      longPressFired.current = false;
-      longPressTimer.current = setTimeout(() => {
-        longPressFired.current = true;
-        handleLongPress(dstr);
-        if (navigator.vibrate) try { navigator.vibrate(12); } catch {}
-      }, LONG_PRESS_MS);
-    },
-    onPointerUp:     () => clearTimeout(longPressTimer.current),
-    onPointerLeave:  () => clearTimeout(longPressTimer.current),
-    onPointerCancel: () => clearTimeout(longPressTimer.current),
-    onClick: () => {
-      if (longPressFired.current) { longPressFired.current = false; return; } // already handled as a long-press
-      handleTap(dstr);
-    },
-  });
-
-  const dirty = pending.size !== dateStack.length || [...pending].some(d => !dateStack.includes(d));
-  const grid  = getMonthGrid(viewDate.getFullYear(), viewDate.getMonth());
-  const today = todayStr();
-
-  const triggerLabel = dateStack.length === 0 ? "Pick a date"
-    : dateStack.length === 1 ? fmtDateLabel(dateStack[0])
-    : `${dateStack.length} dates`;
-
-  return (
-    <div style={{ position:"relative", flexShrink:0 }}>
-      <button ref={btnRef} onClick={openPopover} className="gi" disabled={loading}
-        style={{ color:C.accent, fontSize:11, padding:"7px 12px", minHeight:FILTER_TRIGGER_H,
-                 display:"flex", alignItems:"center", gap:6, opacity:loading?0.5:1,
-                 pointerEvents: loading ? "none" : "auto", whiteSpace:"nowrap" }}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-        </svg>
-        {triggerLabel}
-      </button>
-
-      {open && ReactDOM.createPortal(
-        <>
-          <div onClick={() => setOpen(false)} style={{ position:"fixed", inset:0, zIndex:8998,
-               background: window.innerWidth < 600 ? "rgba(0,0,0,.45)" : "transparent" }}/>
-          <div style={window.innerWidth < 600 ? {
-            position:"fixed", bottom:0, left:0, right:0, zIndex:8999,
-            maxHeight:"82vh", display:"flex", flexDirection:"column",
-            background:C.modalBg, borderRadius:"20px 20px 0 0",
-            boxShadow:"0 -4px 32px rgba(0,0,0,.5)", border:`1px solid ${C.border}`,
-            animation:"slideUp .22s ease", paddingBottom:"env(safe-area-inset-bottom, 16px)",
-          } : {
-            position:"fixed", top: btnRect ? btnRect.bottom + 6 : 60,
-            left: btnRect ? Math.min(btnRect.left, window.innerWidth - 320) : 16,
-            zIndex:8999, width:308, background:C.modalBg, border:`1px solid ${C.border}`,
-            borderRadius:C.cardRadius, boxShadow:"0 4px 24px rgba(0,0,0,0.5)",
-          }}>
-            {window.innerWidth < 600 && (
-              <div style={{ display:"flex", justifyContent:"center", padding:"10px 0 4px" }}>
-                <div style={{ width:36, height:4, borderRadius:2, background:C.border }} />
-              </div>
-            )}
-            <div style={{ padding:"10px 16px 6px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-              <span style={{ fontSize:14, fontWeight:800, color:C.text }}>Select Dates</span>
-              <button onClick={() => setOpen(false)}
-                style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1 }}>✕</button>
-            </div>
-            <div style={{ padding:"2px 16px 10px", fontSize:11, color:C.muted, lineHeight:1.5 }}>
-              {singleDateOnly ? "Tap a day to switch to it." : "Tap a day to switch to it. Hold a day to add it alongside what's already loaded."}
-            </div>
-
-            {/* Month nav */}
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 16px 10px" }}>
-              <button onClick={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth()-1, 1))} className="gb"
-                style={{ width:32, height:32, padding:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                <ChevronIcon open={false} color={C.text}/>
-              </button>
-              <span style={{ fontSize:13, fontWeight:800, color:C.text }}>
-                {viewDate.toLocaleDateString(undefined, { month:"long", year:"numeric" })}
-              </span>
-              <button onClick={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth()+1, 1))} className="gb"
-                style={{ width:32, height:32, padding:0, display:"flex", alignItems:"center", justifyContent:"center", transform:"rotate(180deg)" }}>
-                <ChevronIcon open={false} color={C.text}/>
-              </button>
-            </div>
-
-            {/* Weekday header */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", padding:"0 12px", marginBottom:2 }}>
-              {WEEKDAY_LABELS.map((w,i) => (
-                <div key={i} style={{ textAlign:"center", fontSize:10, color:C.muted, fontWeight:700, padding:"4px 0" }}>{w}</div>
-              ))}
-            </div>
-
-            {/* Day grid — 44px min tap targets */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", padding:"0 12px 6px", gap:2 }}>
-              {grid.map((d, i) => {
-                if (!d) return <div key={i} style={{ minHeight:44 }} />;
-                const dstr    = fmtDateStr(d);
-                const isToday = dstr === today;
-                const isPending = pending.has(dstr);
-                const isActive  = dateStack.includes(dstr);
-                const isMerging = mergingDates?.has(dstr);
-                return (
-                  <button key={i} {...dayHandlers(dstr)}
-                    style={{
-                      minHeight:44, borderRadius:10, border: isToday ? `1.5px solid ${C.accent}` : "1px solid transparent",
-                      background: isPending ? C.accent : isActive ? C.accentDim : "transparent",
-                      color: isPending ? C.accentText : isActive ? C.accent : C.text,
-                      fontSize:13, fontWeight: isPending||isActive ? 800 : 500,
-                      display:"flex", alignItems:"center", justifyContent:"center",
-                      WebkitUserSelect:"none", userSelect:"none", WebkitTouchCallout:"none",
-                      cursor:"pointer", position:"relative",
-                    }}>
-                    {isMerging ? <span style={{ fontSize:10 }}>…</span> : d.getDate()}
-                  </button>
-                );
-              })}
-            </div>
-
-            {!singleDateOnly && (
-              <div style={{ padding:"10px 16px 16px", display:"flex", gap:8 }}>
-                <div style={{ flex:1, fontSize:10, color:C.muted, display:"flex", alignItems:"center" }}>
-                  {pending.size > 1 ? `${pending.size} dates selected` : "1 date selected"}
-                </div>
-                {dirty && (
-                  <button onClick={() => { onApply([...pending].sort()); setOpen(false); }} className="gb-primary"
-                    style={{ padding:"9px 20px", fontSize:12, minHeight:FILTER_TRIGGER_H }}>
-                    Apply
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </>,
-        document.body
-      )}
-    </div>
-  );
-}
+// Replaces the small bar chart — shows each day as an expandable row with
 // date · picks · wins · hit-rate, and (if the server returns d.picks) a
 // drill-down list of every individual pick + result for that day.
 function DailyBreakdownTable({ dailyTrend }) {
@@ -12788,43 +12417,6 @@ const ONBOARD_SLIDES = [
   },
 ];
 
-// A-FIX: dedicated full-screen state for a ?match=&date= deep link that
-// couldn't be resolved — fires before any tab/tickets/notice system exists,
-// so it can't reuse the in-Builder grmNotice banner (per audit open item).
-function FmpDeepLinkMissScreen({ miss, onDismiss }) {
-  const dateLabel = (() => {
-    try { return new Date(miss.date + "T00:00:00").toLocaleDateString(undefined, { weekday:"long", month:"long", day:"numeric" }); }
-    catch { return miss.date; }
-  })();
-  const message = miss.reason === "snapshot"
-    ? `No fixture data is saved for ${dateLabel} yet.`
-    : `That fixture isn't in ${dateLabel}'s data — it may have been removed or the link may be out of date.`;
-
-  return (
-    <div style={{
-      position:"fixed", inset:0, zIndex:800, background:"var(--bg)",
-      display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
-      padding:"32px 24px", fontFamily:"var(--font)", textAlign:"center",
-    }}>
-      <div style={{
-        width:64, height:64, borderRadius:"var(--r-xl)",
-        background:C.faint, border:`1px solid ${C.border}`,
-        display:"flex", alignItems:"center", justifyContent:"center",
-        color:C.muted, marginBottom:20,
-      }}>
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-        </svg>
-      </div>
-      <div style={{ fontSize:14, fontWeight:800, color:C.text, marginBottom:8 }}>Can't open this fixture</div>
-      <div style={{ fontSize:12, color:C.muted, maxWidth:320, lineHeight:1.5, marginBottom:26 }}>{message}</div>
-      <button onClick={onDismiss} className="gb-primary" style={{ padding:"12px 24px", fontSize:12 }}>
-        Back to Live Model
-      </button>
-    </div>
-  );
-}
-
 function FirstRunFlow({ onDone }) {
   const [slide, setSlide] = useState(0);
   const total = ONBOARD_SLIDES.length;
@@ -13426,108 +13018,98 @@ function JarvisFAB({ C, isDesktop, onClick }) {
   );
 }
 
-// ── GRM SCROLL FAB ───────────────────────────────────────────────────────────
-// V3-REBUILD (2026-07-03): full rewrite, not a patch, of the previous
-// ScrollThumb. Root cause of the old one "not working": it defaulted to
-// `document.documentElement || document.body` and only used the passed
-// `scrollEl` ref as a *preference*, re-deriving its own scroll-container
-// detection instead of trusting the app's own canonical `appScrollRef` /
-// `getScrollY` / `setScrollY` (declared once at the top of GRMProInner
-// specifically so every scroll consumer in the app shares one source of
-// truth — see the comment above `appScrollRef`). Two independent
-// implementations of "which element actually scrolls on Vercel" is exactly
-// the kind of parallel system the project's existing-pattern rule warns
-// against, and it's a plausible reason behavion diverged in production even
-// though this file's local preview looked fine. This version takes
-// getScrollY/setScrollY/scrollEl as required props instead of re-deriving
-// them, so there is exactly one implementation of that logic in the app.
+// ── DRAGGABLE SCROLL THUMB ───────────────────────────────────────────────────
+// A floating handle on the right edge that tracks scroll position and can be
+// dragged to jump anywhere on the page instantly, instead of only offering a
+// "scroll to top" tap. Uses Pointer Events so the same code handles mouse,
+// touch, and pen — setPointerCapture lets the drag keep tracking the same
+// pointer even once it moves outside the thumb's own bounds.
 //
-// Second root cause: the old thumb only rendered while `showScrollTop` was
-// true, and that flag auto-cleared 900ms after the last scroll event — so a
-// user pausing to decide whether to grab it would find it gone by the time
-// they reached for it. This version stays visible any time the active view
-// has enough scrollable content to matter (maxScroll > SHOW_THRESHOLD),
-// full stop — no idle timer. It dims slightly at rest and brightens on
-// hover/touch/drag, the same way native overlay scrollbars communicate
-// "present but out of your way" without disappearing outright.
-//
-// Measurement is content-driven, not just event-driven: tabs like Custom
-// List / Code Analyzer / Performance swap their entire content height on
-// tab switch or async data load, often with no `resize` event at all.
-// ResizeObserver on the scroll element catches those; `resetKey` (pass
-// something like `${activeTab}-${mainView}`) forces an immediate
-// re-measure the instant the visible tab changes, so the thumb doesn't
-// briefly show stale (or zero) height from the previous tab.
-const GRM_SCROLL_FAB_SHOW_THRESHOLD = 140; // px of scrollable overflow before the thumb bothers appearing
-
-function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, resetKey, topInset = 84, bottomInset = 96 }) {
-  const [maxScroll, setMaxScroll] = useState(0);
+// S2-FIX (Vercel): PlayCode previews the app in an iframe where <body> naturally
+// overflows and window.scrollY works. Vercel's production build may produce a
+// layout where the root div is the scroll container instead of <body>, making
+// window.scrollY always 0 and window.scrollTo() a no-op. Fix: use cross-browser
+// helpers (getScrollY / setScrollY / getScrollMax) that check
+// document.documentElement.scrollTop and document.body.scrollTop as fallbacks,
+// and also listen on `document` in addition to `window` for scroll events.
+// scrollEl: React ref pointing to the actual scroll container.
+// Vercel's production build may make the root div the scroller instead of
+// <body>, so window.scrollY is always 0. Passing the ref lets us read/write
+// scroll position directly on whichever element is actually scrolling.
+function ScrollThumb({ visible, topInset = 76, bottomInset = 96, scrollEl }) {
   const [top, setTop] = useState(topInset);
   const [dragging, setDragging] = useState(false);
-  const [hovering, setHovering] = useState(false);
+  const thumbH = 44;
 
   const trackTop = topInset;
-  const trackH = () => Math.max(40, window.innerHeight - bottomInset - trackTop - thumbH());
+  const trackBottom = () => window.innerHeight - bottomInset;
+  const trackH = () => Math.max(40, trackBottom() - trackTop - thumbH);
 
-  // Proportional thumb height, like a real scrollbar — bigger when there's
-  // relatively less to scroll, so its size itself communicates page length.
-  const thumbH = () => {
-    const el = scrollEl?.current;
-    if (!el || maxScroll <= 0) return 44;
-    const visibleRatio = el.clientHeight / (el.clientHeight + maxScroll);
-    return Math.min(130, Math.max(28, trackHRaw() * visibleRatio));
+  // Resolve the actual scroll container — prefer the passed ref, then fall
+  // back through the standard globals. This is the definitive fix for Vercel
+  // where window.scrollY / document.documentElement.scrollTop are both 0.
+  const getEl = () => scrollEl?.current || document.documentElement || document.body;
+
+  const getScrollY = () => {
+    const el = getEl();
+    // documentElement / body use scrollTop; window uses scrollY
+    if (el === document.documentElement || el === document.body) return el.scrollTop || window.scrollY || 0;
+    return el.scrollTop || 0;
   };
-  // trackH() depends on thumbH() which depends on trackH() for the ratio calc
-  // above — break the cycle with a raw track estimate that ignores thumb size.
-  const trackHRaw = () => Math.max(40, window.innerHeight - bottomInset - trackTop);
 
-  const measure = useCallback(() => {
-    const el = scrollEl?.current;
-    if (!el) { setMaxScroll(0); return; }
-    setMaxScroll(Math.max(0, el.scrollHeight - el.clientHeight));
-  }, [scrollEl]);
-
-  // Re-measure whenever the visible tab/view changes (resetKey), on mount,
-  // via ResizeObserver for async content growth, and via a light interval
-  // as a last-resort net for environments where ResizeObserver misses a
-  // change (e.g. font swap reflow with no box-size delta at observer tick).
-  useEffect(() => {
-    measure();
-    const el = scrollEl?.current;
-    let ro;
-    if (el && typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => measure());
-      ro.observe(el);
+  const getScrollMax = () => {
+    const el = getEl();
+    if (el === document.documentElement || el === document.body) {
+      const docH = Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+        document.documentElement.offsetHeight,
+      );
+      return Math.max(1, docH - window.innerHeight);
     }
-    const interval = setInterval(measure, 700);
-    window.addEventListener("resize", measure);
-    return () => {
-      if (ro) ro.disconnect();
-      clearInterval(interval);
-      window.removeEventListener("resize", measure);
-    };
-  }, [measure, resetKey]);
+    return Math.max(1, el.scrollHeight - el.clientHeight);
+  };
+
+  const setScrollY = (px) => {
+    const el = getEl();
+    if (el === document.documentElement || el === document.body) {
+      try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
+      document.documentElement.scrollTop = px;
+      document.body.scrollTop = px;
+    } else {
+      el.scrollTop = px;
+    }
+  };
 
   // Keep the thumb's position synced to actual scroll, except while the
   // user is actively dragging it (dragging drives scroll, not the other way).
   useEffect(() => {
     if (dragging) return;
     const sync = () => {
-      if (maxScroll <= 0) return;
-      const ratio = Math.min(1, Math.max(0, getScrollY() / maxScroll));
-      setTop(trackTop + ratio * (trackH()));
+      const ratio = getScrollY() / getScrollMax();
+      setTop(trackTop + ratio * trackH());
     };
     sync();
+    // Listen on window, document, AND the explicit scroll container ref.
+    // Vercel production builds may make the root div the scroller — in that
+    // case window/document never fire scroll events but the element does.
     const el = scrollEl?.current;
-    el?.addEventListener("scroll", sync, { passive: true });
-    return () => el?.removeEventListener("scroll", sync);
-  }, [dragging, maxScroll, topInset, bottomInset, scrollEl, getScrollY]); // eslint-disable-line react-hooks/exhaustive-deps
+    window.addEventListener("scroll", sync, { passive: true });
+    document.addEventListener("scroll", sync, { passive: true });
+    if (el) el.addEventListener("scroll", sync, { passive: true });
+    window.addEventListener("resize", sync);
+    return () => {
+      window.removeEventListener("scroll", sync);
+      document.removeEventListener("scroll", sync);
+      if (el) el.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+    };
+  }, [dragging, topInset, bottomInset, scrollEl]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const moveTo = (clientY) => {
-    const th = trackH();
-    const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH() / 2) / th));
-    setTop(trackTop + ratio * th);
-    setScrollY(ratio * maxScroll);
+    const ratio = Math.min(1, Math.max(0, (clientY - trackTop - thumbH / 2) / trackH()));
+    setTop(trackTop + ratio * trackH());
+    setScrollY(ratio * getScrollMax());
   };
 
   const onPointerDown = (e) => {
@@ -13538,9 +13120,6 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
   const onPointerMove = (e) => { if (dragging) moveTo(e.clientY); };
   const onPointerUp = (e) => { setDragging(false); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {} };
 
-  const visible = !disabled && maxScroll > GRM_SCROLL_FAB_SHOW_THRESHOLD;
-  const active = dragging || hovering;
-
   if (!visible) return null;
   return (
     <div
@@ -13548,24 +13127,21 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      onPointerEnter={() => setHovering(true)}
-      onPointerLeave={() => setHovering(false)}
       style={{
-        position: "fixed", right: 6, top, width: active ? 18 : 14, height: thumbH(),
+        position: "fixed", right: 8, top, width: 16, height: thumbH,
         borderRadius: 999, zIndex: 9999,
         pointerEvents: "auto",
-        background: dragging ? "rgba(130,130,150,0.65)" : active ? "rgba(130,130,150,0.5)" : "rgba(130,130,150,0.30)",
-        border: "1px solid rgba(255,255,255,0.14)",
-        boxShadow: dragging ? "0 4px 18px rgba(0,0,0,0.4)" : "0 2px 8px rgba(0,0,0,0.18)",
+        background: dragging ? "rgba(120,120,140,0.55)" : "rgba(120,120,140,0.32)",
+        border: "1px solid rgba(255,255,255,0.15)",
+        boxShadow: dragging ? "0 4px 16px rgba(0,0,0,0.35)" : "0 2px 8px rgba(0,0,0,0.2)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        touchAction: "none", cursor: dragging ? "grabbing" : "grab",
-        transition: dragging ? "none" : "width .12s ease, background .15s ease, box-shadow .15s ease",
+        touchAction: "none", cursor: "grab",
+        transition: dragging ? "none" : "background .15s, box-shadow .15s, opacity .15s",
+        opacity: visible ? 1 : 0,
       }}
       aria-label="Drag to scroll"
-      role="scrollbar"
-      aria-orientation="vertical"
     >
-      <div style={{ width: 3, height: Math.max(14, thumbH() * 0.35), borderRadius: 2, background: "rgba(255,255,255,0.65)" }} />
+      <div style={{ width: 3, height: 18, borderRadius: 2, background: "rgba(255,255,255,0.6)" }} />
     </div>
   );
 }
@@ -13678,21 +13254,6 @@ function GRMProInner() {
   const [activeTab, setActiveTab] = useState("live");
   const [date, setDate]           = useState(todayStr());
   const [fixtures, setFixtures]   = useState([]);
-
-  // B-FIX: how many distinct dates are currently represented in `fixtures`.
-  // Derived, not stored — `.date` is stamped on every fixture at load time
-  // (see stampFixtureDates), so the stack is just whatever's actually there.
-  // Declared right here (immediately after `fixtures`) rather than further
-  // down near `filtered` — several hooks between here and there reference
-  // it in their dependency arrays, which are evaluated synchronously during
-  // render, so it has to exist before the first of those, not just before
-  // its first *use* inside a deferred callback.
-  const dateStack = useMemo(() => {
-    const seen = new Set();
-    for (const f of fixtures) if (f?.date) seen.add(f.date);
-    return [...seen].sort();
-  }, [fixtures]);
-  const isMultiDate = dateStack.length > 1;
   const fixturesRef = useRef([]);
   useEffect(() => { fixturesRef.current = fixtures; }, [fixtures]);
   const [loading, setLoadingState] = useState(false);
@@ -13807,51 +13368,6 @@ function GRMProInner() {
       }
     } catch {}
   }, []);
-
-  // A-FIX: ?match=<fixtureId>&date=<date> — Fixture Share deep link (Full Model
-  // Page for a single fixture, independent of the ?grm= ticket flow above).
-  // Reuses the same loadSnapshot plumbing the GRM ticket link already uses.
-  // Two-step: (1) capture the params + kick off the snapshot load, (2) once
-  // `fixtures`/`date` actually reflect that snapshot, look the fixture up.
-  // Split into two effects (rather than reading fixtures right after the
-  // await) because loadSnapshot's setFixtures/setDate are async state
-  // updates — the `fixtures` closed over here would still be stale
-  // immediately after awaiting loadSnapshot.
-  const [pendingFmpDeepLink, setPendingFmpDeepLink] = useState(null); // { matchId, date } | null
-  const [fmpDeepLinkMiss, setFmpDeepLinkMiss] = useState(null);       // { matchId, date, reason } | null
-  useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const matchId = params.get("match");
-      const matchDate = params.get("date");
-      if (matchId && matchDate) {
-        window.history.replaceState({}, "", window.location.pathname);
-        setPendingFmpDeepLink({ matchId, date: matchDate });
-      }
-    } catch {}
-  }, []);
-  useEffect(() => {
-    if (!pendingFmpDeepLink) return;
-    let cancelled = false;
-    (async () => {
-      const ok = await loadSnapshot(pendingFmpDeepLink.date);
-      if (!ok && !cancelled) {
-        setFmpDeepLinkMiss({ ...pendingFmpDeepLink, reason: "snapshot" });
-        setPendingFmpDeepLink(null);
-      }
-      // If ok, the effect below resolves the lookup once fixtures/date catch up.
-    })();
-    return () => { cancelled = true; };
-  }, [pendingFmpDeepLink]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!pendingFmpDeepLink) return;
-    if (date !== pendingFmpDeepLink.date) return;   // snapshot for this date hasn't landed yet
-    if (!fixtures.length) return;                    // still loading
-    const found = fixtures.find(x => String(x.id) === String(pendingFmpDeepLink.matchId));
-    if (found) setMainFocusFixture(found);
-    else setFmpDeepLinkMiss({ ...pendingFmpDeepLink, reason: "fixture" });
-    setPendingFmpDeepLink(null);
-  }, [fixtures, date, pendingFmpDeepLink]);
 
   // P16-FIX: Body scroll lock when overlay is open.
   // overscrollBehavior:contain on the overlay div is not enough on iOS/Android —
@@ -13974,6 +13490,39 @@ function GRMProInner() {
     }
   }, [getScrollY]);
 
+  // Scroll-to-top FAB — shows while the user is actively scrolling past the header,
+  // then fades away again after a brief pause so it does not sit there constantly.
+  // S2-FIX: also listen on appScrollRef (the root div) — on Vercel production builds
+  // the scroll container is the root div, not window/document, so window "scroll"
+  // never fires and showScrollTop stays false permanently (thumb never appears).
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const scrollTopHideTimer = useRef(null);
+  useEffect(() => {
+    const onScroll = () => {
+      if (getScrollY() <= 320) {
+        setShowScrollTop(false);
+        if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+        return;
+      }
+      setShowScrollTop(true);
+      if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+      scrollTopHideTimer.current = setTimeout(() => setShowScrollTop(false), 900);
+    };
+
+    const el = appScrollRef.current;
+    window.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("scroll", onScroll, { passive: true });
+    if (el) el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll(); // sync once on mount
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      document.removeEventListener("scroll", onScroll);
+      if (el) el.removeEventListener("scroll", onScroll);
+      if (scrollTopHideTimer.current) clearTimeout(scrollTopHideTimer.current);
+    };
+  }, [getScrollY]);
+
+
   // mainView controls top-level section: "main" (uses activeTab) or "rollover"
   const [mainView, setMainView] = useState("main");
   const [mainFocusFixture, setMainFocusFixture] = useState(null); // Full Model page overlay
@@ -14086,7 +13635,6 @@ function GRMProInner() {
       odds:      rawOdds ? parseFloat(rawOdds) : null,
       conf:      pick.prob ? parseFloat(pick.prob) : null,
       market:    pick.market || "Unknown",
-      date:      fixture.date || null, // B-FIX: for the ticket leg-list date separator in TicketCard
     };
     setDraftLegs(prev => {
       const exists = prev.findIndex(l => l.fixtureId === fixture.id);
@@ -14147,7 +13695,7 @@ function GRMProInner() {
       // A fixture without both fields is useless anyway so discard the whole cache.
       const valid = Array.isArray(data) && data.length > 0 &&
                     data.every(f => f && f.teams && f.markets);
-      if (d === date && valid) { const fd = stampFixtureDates(applyFinishedStates(data), d); setFixtures(fd); setCached(true); setCachedAt(parsed.cachedAt || null); setFrozenFixtures(fd); }
+      if (d === date && valid) { const fd = applyFinishedStates(data); setFixtures(fd); setCached(true); setCachedAt(parsed.cachedAt || null); setFrozenFixtures(fd); }
       else if (!valid && data?.length) {
         // Silently clear invalid cache so user fetches fresh data
         try { localStorage.removeItem(CACHE_KEY); } catch {}
@@ -14302,7 +13850,7 @@ function GRMProInner() {
               const capturedDate = date; // hoist so startAutoRefresh and pool save share same value
               // SA5-FIX: inject SA pattern scores at load time so all features
               // (Trim, SA Admin Row) work from the same enriched dataset.
-              const _fd1 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
+              const _fd1 = injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
               // existed in the sync 200 path. This caused results to never auto-inject
               // after the first fetch (pipeline always returns 202 on a fresh date).
@@ -14340,7 +13888,7 @@ function GRMProInner() {
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores (sync 200 path)
-      const _fd2 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
+      const _fd2 = injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
       startAutoRefresh(date);
 
       if (json.legacySchema) setLegacySnapshot(true);
@@ -14408,7 +13956,7 @@ function GRMProInner() {
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores on snapshot load too
-      const _fdSnap = stampFixtureDates(injectSAScores(data, appSaPatterns), snapDate);
+      const _fdSnap = injectSAScores(data, appSaPatterns);
       setFixtures(_fdSnap); setDate(snapDate); setCached(true); setFrozenFixtures(_fdSnap);
       startAutoRefresh(snapDate);
       if (json.legacySchema) setLegacySnapshot(true);
@@ -14460,100 +14008,6 @@ function GRMProInner() {
       return true;
     } catch(e) { setError(friendlyError(e, "GRM Pro")); return false; }
     finally { setLoading(false); }
-  }, []);
-
-  // B-FIX: Multi-Date Live Model — additive fetch. Unlike loadSnapshot (which
-  // replaces `fixtures` wholesale for a single-date switch), mergeDate ADDS a
-  // date's fixtures alongside whatever's already loaded, per the calendar
-  // widget's long-press="add" gesture. Never touches tickets/draft — per
-  // fetchData's B2-FIX, built tickets already persist across date changes in
-  // this app, so there's nothing date-switch-specific to preserve here either.
-  const [mergingDates, setMergingDates] = useState(new Set()); // dates currently being fetched, for spinner state
-  const mergeDate = useCallback(async (mergeDateStr) => {
-    setMergingDates(prev => new Set(prev).add(mergeDateStr));
-    try {
-      const res = await fetch(`${SERVER}/api/load-snapshot?date=${mergeDateStr}`);
-      if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error || res.statusText); }
-      const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      const enriched = stampFixtureDates(injectSAScores(data, appSaPatterns), mergeDateStr);
-
-      // Same auto-merge-saved-results-for-past-dates step loadSnapshot does,
-      // so a merged-in past date shows final scores too, not just fixtures.
-      let finalData = enriched;
-      if (mergeDateStr !== todayStr()) {
-        try {
-          const rRes = await fetch(`${SERVER}/api/load-results?date=${mergeDateStr}`);
-          if (rRes.ok) {
-            const rJson = await rRes.json();
-            const rData = rJson.results || rJson.data || [];
-            if (Array.isArray(rData) && rData.length) {
-              const rMap = new Map(rData.map(r => [r.id, r]));
-              finalData = enriched.map(f => {
-                const r = rMap.get(f.id);
-                if (!r) return f;
-                return { ...f, hGoals:r.hGoals, aGoals:r.aGoals, state: r.finished?"finished":f.state,
-                         finished:r.finished, result:r.result, readResult:r.readResult,
-                         edgeResult:r.edgeResult, strategyResults:r.strategyResults };
-              });
-            }
-          }
-        } catch {} // results file may not exist for this date — fixtures still merge in fine
-      }
-
-      // Replace any stale entries for this date (re-merge) and append the rest —
-      // every OTHER date already in `fixtures` is left completely untouched.
-      setFixtures(prev => [...prev.filter(f => f.date !== mergeDateStr), ...finalData]);
-      return true;
-    } catch (e) {
-      setError(friendlyError(e, "GRM Pro"));
-      return false;
-    } finally {
-      setMergingDates(prev => { const n = new Set(prev); n.delete(mergeDateStr); return n; });
-    }
-  }, [appSaPatterns]);
-
-  // Remove a date from the stack. Guards against emptying the stack entirely —
-  // the calendar widget itself also disables this so it's a belt-and-braces check.
-  const removeDate = useCallback((removeDateStr) => {
-    setFixtures(prev => {
-      const remaining = prev.filter(f => f.date !== removeDateStr);
-      return remaining.length ? remaining : prev; // never let the stack go to zero dates
-    });
-  }, []);
-
-  // If `date` (the "primary" date the live poller / autoRefresh / FETCH
-  // button are anchored to) ever falls outside the actual dateStack — e.g.
-  // its date just got removed via removeDate — re-anchor to the most recent
-  // remaining date so those features keep pointing at real data instead of
-  // a date with nothing left in `fixtures`. Reactive off dateStack (derived
-  // from fixtures) rather than done inline in removeDate, so it stays
-  // correct regardless of what actually changed `fixtures`.
-  useEffect(() => {
-    if (dateStack.length && !dateStack.includes(date)) {
-      setDate(dateStack[dateStack.length - 1]);
-    }
-  }, [dateStack, date]);
-
-  // B-FIX: tap-to-replace on the calendar widget needs to select a date AND
-  // fetch it in one gesture ("fetches immediately" per the spec) — but
-  // fetchData/fetchBasketball read `date` from their own closure, and
-  // setDate() doesn't take effect until the next render. Queueing the fetch
-  // here and firing it from an effect once `date` actually lands avoids a
-  // stale-closure fetch of the OLD date. (Same pattern as the FMP deep-link
-  // handling above.)
-  const [pendingDateFetch, setPendingDateFetch] = useState(null);
-  useEffect(() => {
-    if (pendingDateFetch === null || pendingDateFetch !== date) return;
-    setPendingDateFetch(null);
-    if (sport === "basketball") fetchBasketball(); else fetchData(false);
-  }, [date, pendingDateFetch, sport, fetchData, fetchBasketball]);
-
-  // replaceDate: the calendar widget's tap gesture. Single-select, clears the
-  // whole stack, fetches immediately — identical to picking a date then
-  // hitting FETCH today, just collapsed into one tap.
-  const replaceDate = useCallback((d) => {
-    setDate(d);
-    setPendingDateFetch(d);
   }, []);
 
   const ensureHistoricalRates = async () => {
@@ -14900,11 +14354,6 @@ function GRMProInner() {
     { id:"custom", label:"Custom",                           color:C.text },
   ];
 
-  // B-FIX: dateStack/isMultiDate are now declared right after the `fixtures`
-  // state near the top of this component (TDZ fix — several hooks between
-  // there and here read dateStack in their dependency arrays, which are
-  // evaluated synchronously during render, not deferred).
-
   const filtered = useMemo(() => {
     // Basketball: bbGames is already fixture-shaped (toFixtureShape applied on
     // fetch, see Change 4). It has no "custom"/"engine" tab concepts yet (those
@@ -14935,9 +14384,6 @@ function GRMProInner() {
         const bS = (b.theRead?.anchor?.strong && !b.markets?._lowConfidence) ? 1 : 0;
         return bS - aS;
       });
-      // B-FIX: date-primary grouping — only when >1 date is actually stacked,
-      // so single-date behavior (the default) is byte-for-byte unchanged.
-      if (isMultiDate) list = [...list].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
       return list;
     }
     if (tab === "engine") {
@@ -14959,11 +14405,6 @@ function GRMProInner() {
       // FT/live/PPD fixtures entirely, wiping their state badges and disabling all guards
       // (isFinished/isPPD), so every game showed "Add to ticket". getStateGroup handles order.
       return list.sort((a, b) => {
-        // B-FIX: date-primary grouping — only when >1 date is stacked.
-        if (isMultiDate) {
-          const da = a.date || "", db = b.date || "";
-          if (da !== db) return da.localeCompare(db);
-        }
         if (sortActive.has("conf")) {
           const ca = a.theRead?.anchor?.prob ?? 0, cb = b.theRead?.anchor?.prob ?? 0;
           if (ca !== cb) return cb - ca;
@@ -14988,12 +14429,6 @@ function GRMProInner() {
     if (sortActive.has("ltd_data"))   list = list.filter(f => (f.markets?._calibrationWeight ?? 100) < 25);
 
     list = [...list].sort((a, b) => {
-      // B-FIX: date-primary grouping — only when >1 date is stacked (football
-      // only; bbGames fixtures don't carry .date so this is a no-op for BB).
-      if (isMultiDate) {
-        const da = a.date || "", db = b.date || "";
-        if (da !== db) return da.localeCompare(db);
-      }
       // Upcoming sort: not started (0) → live (1) → FT (2)
       if (sortActive.has("upcoming")) {
         const ga = getStateGroup(a), gb = getStateGroup(b);
@@ -15018,7 +14453,7 @@ function GRMProInner() {
       return (a.startingAt || "").localeCompare(b.startingAt || "");
     });
     return list;
-  }, [fixtures, bbGames, sport, frozenFixtures, tab, search, leagueFilter, sortActive, enginePool, engineFixtureIds, isMultiDate]);
+  }, [fixtures, bbGames, sport, frozenFixtures, tab, search, leagueFilter, sortActive, enginePool, engineFixtureIds]);
 
   const isDesktop = useIsDesktop();
 
@@ -15126,19 +14561,9 @@ function GRMProInner() {
               <option value="football">Football</option>
               <option value="basketball">Basketball</option>
             </select>
-            <DateStackCalendar
-              dateStack={sport === "basketball" ? [date] : (dateStack.length ? dateStack : [date])}
-              mergingDates={mergingDates}
-              loading={loading}
-              singleDateOnly={sport === "basketball"}
-              onReplace={replaceDate}
-              onApply={async (targetDates) => {
-                const toAdd    = targetDates.filter(d => !dateStack.includes(d));
-                const toRemove = dateStack.filter(d => !targetDates.includes(d));
-                toRemove.forEach(removeDate);
-                await Promise.all(toAdd.map(mergeDate));
-              }}
-            />
+            <input type="date" value={date} onChange={e => { if (!loading) setDate(e.target.value); }} className="gi"
+              style={{ color:C.accent,width:136,fontSize:11,padding:"7px 11px",flexShrink:0,
+                       opacity: loading ? 0.5 : 1, pointerEvents: loading ? "none" : "auto" }}/>
             {/* Show progress% inline on the button so user knows it's running.
                 disabled + pointerEvents:none blocks rapid re-taps that were
                 causing session drift (each tap polled a new unknown session id). */}
@@ -15299,36 +14724,31 @@ function GRMProInner() {
               </button>
             </div>
 
-            <div style={{ padding:"14px 14px 32px", display:"flex", flexDirection:"column", gap:6 }}>
+            <div style={{ padding:"18px 18px 32px", display:"flex", flexDirection:"column", gap:24 }}>
 
-              {/* League Filter — V2-FIX: now behind a FilterSection accordion, collapsed
-                  by default. Previously LeagueFilterList was inlined always-expanded,
-                  which for a full slate (50+ countries) buried Sort & Filter, Appearance,
-                  Tickets, and Admin below the fold, forcing a scroll just to reach them.
-                  Collapsing here (rather than reintroducing a second nested bottom sheet,
-                  which was the pre-regression pattern) keeps one sheet, one scroll
-                  container, and full country/league browsing still just one tap away. */}
-              {availableLeagues.length > 1 && (() => {
-                const selCount = leagueFilter instanceof Set ? leagueFilter.size : (leagueFilter ? 1 : 0);
-                const leagueSummary = selCount === 0 ? "All Leagues"
-                  : selCount === 1 ? (() => { const lg = availableLeagues.find(l => (leagueFilter instanceof Set ? leagueFilter.has(l.leagueId) : leagueFilter === l.leagueId)); return lg ? lg.league : "1 league"; })()
-                  : `${selCount} leagues selected`;
-                return (
-                  <FilterSection title="League" summary={leagueSummary} badge={selCount}>
-                    <LeagueFilterList availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
-                  </FilterSection>
-                );
-              })()}
+              {/* League Filter */}
+              {availableLeagues.length > 1 && (
+                <div>
+                  <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                    letterSpacing:".14em",marginBottom:10 }}>League</div>
+                  <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
+                </div>
+              )}
 
               {/* Sort & Filter */}
-              <FilterSection title="Sort & Filter"
-                summary={sortActive.size === 0 ? "None active" : SORT_OPTIONS.filter(o => sortActive.has(o.id)).map(o => o.label).join(" · ")}
-                badge={sortActive.size}>
-                <SortFilter active={sortActive} setActive={setSortActive} alwaysOpen/>
-              </FilterSection>
+              <div>
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Sort & Filter</div>
+                <SortFilter active={sortActive} setActive={setSortActive} />
+              </div>
+
+              {/* Divider */}
+              <div style={{ height:1,background:C.border }} />
 
               {/* Appearance */}
-              <FilterSection title="Appearance" summary={`${theme.emoji || ""} ${theme.name || ""}`.trim()}>
+              <div>
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Appearance</div>
                 <button onClick={() => { setThemePickerOpen(true); setDrawerOpen(false); }}
                   style={{ width:"100%",padding:"11px 14px",borderRadius:10,cursor:"pointer",
                            background:C.surface,border:`1px solid ${C.border}`,
@@ -15347,12 +14767,17 @@ function GRMProInner() {
                     <polyline points="9 18 15 12 9 6"/>
                   </svg>
                 </button>
-              </FilterSection>
+              </div>
+
+              {/* Divider */}
+              <div style={{ height:1,background:C.border }} />
 
               {/* P-FIX: Tickets — cross-ticket correlation toggle. Off by
                   default; a previously-booked leg always gets flagged
                   regardless of this setting. */}
-              <FilterSection title="Tickets" summary={corrCrossCheckEnabled ? "Cross-check on" : "Cross-check off"} badge={corrCrossCheckEnabled ? 1 : 0}>
+              <div>
+                <div style={{ fontSize:7,fontWeight:800,color:C.muted,textTransform:"uppercase",
+                  letterSpacing:".14em",marginBottom:10 }}>Tickets</div>
                 <button onClick={() => setCorrCrossCheckEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -15387,11 +14812,13 @@ function GRMProInner() {
                     </div>
                   </div>
                 </button>
-              </FilterSection>
+              </div>
 
               {/* Admin controls */}
               {adminMode && (
-                <FilterSection title="Admin" summary="Refresh tools" defaultOpen>
+                <div>
+                  <div style={{ fontSize:7,fontWeight:800,color:C.red,textTransform:"uppercase",
+                    letterSpacing:".14em",marginBottom:10 }}>Admin</div>
                   <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
                     <button onClick={() => { fetchData(true); setDrawerOpen(false); }} disabled={loading}
                       style={{ padding:"9px 14px",borderRadius:8,cursor:"pointer",fontFamily:C.font,
@@ -15425,11 +14852,11 @@ function GRMProInner() {
                       </button>
                     )}
                   </div>
-                </FilterSection>
+                </div>
               )}
 
               {/* Divider */}
-              <div style={{ height:1,background:C.border, margin:"6px 0" }} />
+              <div style={{ height:1,background:C.border }} />
 
               {/* Admin lock + Help */}
               <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
@@ -15738,35 +15165,15 @@ function GRMProInner() {
                     );
                   })()}
                   <div className="grm-grid" style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(380px,1fr))",gap:14,paddingBottom:80 }}>
-                    {filtered.map((f, fIdx) => {
-                      // B-FIX: date-separator header — only rendered when >1 date is
-                      // stacked (isMultiDate), and only at each date boundary since
-                      // `filtered` is already date-sorted first when isMultiDate is true
-                      // (see the sort layer in the filtered useMemo above).
-                      const showDateSep = isMultiDate && f.date && f.date !== filtered[fIdx-1]?.date;
-                      return (
-                        <React.Fragment key={f.id}>
-                          {showDateSep && (
-                            <div style={{
-                              gridColumn:"1 / -1", display:"flex", alignItems:"center", gap:10,
-                              padding: fIdx===0 ? "0 0 4px" : "18px 0 4px",
-                            }}>
-                              <span style={{ fontSize:12, fontWeight:800, color:C.text }}>
-                                {f.date === todayStr() ? "Today" : fmtDateLabel(f.date)}
-                              </span>
-                              <span style={{ flex:1, height:1, background:C.border }} />
-                            </div>
-                          )}
-                          <FixtureErrorBoundary fixtureId={f.id}>
-                            <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
-                              onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
-                              backtestSummary={historicalRates}
-                              adminToken={adminToken}
-                            />
-                          </FixtureErrorBoundary>
-                        </React.Fragment>
-                      );
-                    })}
+                    {filtered.map(f => (
+                      <FixtureErrorBoundary key={f.id} fixtureId={f.id}>
+                        <FixtureCard f={f} onAddToParlay={addLegToDraft} draftLegs={draftLegs} isEngineQualified={engineFixtureIds.has(f.id)}
+                          onFullModel={(fx) => { try { sessionStorage.setItem("grm_scroll", String(getScrollY())); } catch {} setMainFocusFixture(fx); }}
+                          backtestSummary={historicalRates}
+                          adminToken={adminToken}
+                        />
+                      </FixtureErrorBoundary>
+                    ))}
                   </div>
                   {!filtered.length && (
                     <div style={{ textAlign:"center",padding:"60px 0",color:C.text,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>No matches found</div>
@@ -15948,16 +15355,10 @@ function GRMProInner() {
       {/* First-run onboarding overlay */}
       {showOnboarding && <FirstRunFlow onDone={() => setShowOnboarding(false)} />}
 
-      {/* A-FIX: graceful full-screen state when a ?match=&date= deep link
-          couldn't be resolved — see FmpDeepLinkMissScreen for why this can't
-          reuse the in-Builder grmNotice banner. */}
-      {fmpDeepLinkMiss && <FmpDeepLinkMissScreen miss={fmpDeepLinkMiss} onDismiss={() => setFmpDeepLinkMiss(null)} />}
-
       {/* FullModelPage — opened from any FixtureCard "▼ Full Model" button */}
       {mainFocusFixture && (
         <FullModelPage
           f={mainFocusFixture}
-          date={date}
           onBack={() => {
             setMainFocusFixture(null);
             // Return to wherever user came from
@@ -16025,23 +15426,11 @@ function GRMProInner() {
         }} />
       )}
 
-      {/* ── GRM SCROLL FAB ───────────────────────────────────────────────── */}
-      {/* Disabled (not just hidden) whenever a full-screen overlay owns the
-          viewport — Full Model Page, Jarvis chat, the Parley builder, the
-          Filters drawer, theme picker, admin prompt, or the help sheet.
-          Those either scroll their own content or are portaled over
-          everything else, so a background thumb there would drag the wrong
-          surface. Covers every ordinary tab (Live Model, Custom List, Code
-          Analyzer, Performance, Backtest, Rollover) since none of those open
-          an overlay of their own — this intentionally isn't an allow-list of
-          "only these 4 views," so any future tab gets it for free too. */}
-      <GrmScrollFab
-        scrollEl={appScrollRef}
-        getScrollY={getScrollY}
-        setScrollY={setScrollY}
-        disabled={!!mainFocusFixture || parlayJarvisOpen || jarvisOpen || drawerOpen || themePickerOpen || adminPromptOpen || helpOpen}
-        resetKey={`${mainView}-${activeTab}`}
+      {/* ── DRAGGABLE SCROLL THUMB ────────────────────────────────────────── */}
+      <ScrollThumb
+        visible={showScrollTop && !parlayJarvisOpen && !mainFocusFixture}
         bottomInset={isDesktop ? 40 : 106}
+        scrollEl={appScrollRef}
       />
 
       {/* ── HALO BOTTOM NAV ───────────────────────────────────────────────── */}
