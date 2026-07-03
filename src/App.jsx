@@ -7730,9 +7730,19 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
   // only when cross-ticket checking is enabled, this leg also appears in
   // another ticket the user currently has built or saved.
   const [corrOpen, setCorrOpen] = useState(false);
+  // V-FIX (2026-07-03): "Clear booked flag" used to force-remount via
+  // setCorrOpen(false) + setTimeout(()=>setCorrOpen(true)) to get the list
+  // to refresh — but corrRisks is memoized on [ticket.legs, ticket.id,
+  // otherTickets, crossCheckEnabled], none of which change when a booked-leg
+  // record is cleared from storage, so that remount never actually
+  // recomputed anything; it only produced a visible flicker. bookedLegsVersion
+  // is a real dependency: bump it after every clear, and the memo re-runs
+  // loadBookedLegs() (already called fresh inside the factory) with an
+  // up-to-date result.
+  const [bookedLegsVersion, setBookedLegsVersion] = useState(0);
   const corrRisks = useMemo(
     () => computeCorrelationRisks(ticket, { bookedLegs: loadBookedLegs(), otherTickets, crossCheckEnabled }),
-    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled]
+    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled, bookedLegsVersion]
   );
   const hasCorr = corrRisks.length > 0;
 
@@ -7828,14 +7838,55 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                 <div style={{ position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:9999,
                               background:C.surface, border:`1px solid ${C.amber}40`,
                               borderRadius:10, padding:"10px 14px", minWidth:260, maxWidth:320,
+                              maxHeight:"min(70vh, 520px)", overflowY:"auto",
                               boxShadow:"0 8px 24px rgba(0,0,0,.28)" }}>
-                  <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
-                                textTransform:"uppercase", marginBottom:6 }}>
-                    Leg Risk — what this means
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                    <div style={{ fontSize:8, fontWeight:800, color:C.amber, letterSpacing:".08em",
+                                  textTransform:"uppercase" }}>
+                      Leg Risk — what this means
+                    </div>
+                    <button onClick={() => setCorrOpen(false)}
+                      style={{ background:"transparent", border:"none", color:C.muted, cursor:"pointer",
+                               padding:2, display:"flex", flexShrink:0 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
                   </div>
                   <div style={{ fontSize:9, color:C.muted, lineHeight:1.6, marginBottom:8 }}>
                     One or more legs here are tied to a game you've already got money on. If that game's result swings one way, it affects both tickets — not the same as independent legs.
                   </div>
+                  {/* V-FIX (2026-07-03): "Remove this leg" / "Remove from other" used to
+                      call setCorrOpen(false) after every single click, closing the whole
+                      panel — on a ticket with 30 flagged legs that meant re-tapping the
+                      Risk badge 30 times to clear them one by one. corrRisks is already
+                      memoized on ticket.legs / otherTickets, so it recomputes and the
+                      list shrinks in place the moment a leg is actually removed — the
+                      close call was pure friction, not doing anything useful. Panel now
+                      stays open until the user dismisses it (✕ above) or clears
+                      everything, at which point hasCorr goes false and it unmounts
+                      itself naturally. A bulk "Remove all flagged legs" action is added
+                      below for the common case of clearing many at once. */}
+                  {corrRisks.length > 1 && onRemoveLeg && (
+                    <button onClick={() => {
+                      // Sort descending so each index removal is still valid against
+                      // the original array — earlier (lower) indices aren't shifted
+                      // by removing a later (higher) one first.
+                      const idxs = [...new Set(
+                        corrRisks
+                          .filter(r => r.type !== "session")
+                          .map(r => ticket.legs.findIndex(l => l.game === r.game))
+                          .filter(i => i >= 0)
+                      )].sort((a, b) => b - a);
+                      idxs.forEach(i => onRemoveLeg(i));
+                    }}
+                      style={{ width:"100%", fontSize:9, fontWeight:800, padding:"7px 9px", borderRadius:7,
+                               cursor:"pointer", marginBottom:8, background:`${C.red}12`,
+                               border:`1px solid ${C.red}45`, color:C.red }}>
+                      Remove all {corrRisks.filter(r => r.type !== "session").length} flagged legs from this ticket
+                    </button>
+                  )}
                   {corrRisks.map((r, i) => {
                     // Find the leg index in this ticket matching the risky game
                     const legIdx = ticket.legs.findIndex(l =>
@@ -7860,7 +7911,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                       <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
                         {/* Remove this leg from the current ticket */}
                         {onRemoveLeg && legIdx >= 0 && (
-                          <button onClick={() => { onRemoveLeg(legIdx); setCorrOpen(false); }}
+                          <button onClick={() => onRemoveLeg(legIdx)}
                             style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
                                      background:"transparent", border:`1px solid ${C.red}50`, color:C.red }}>
                             Remove this leg
@@ -7873,9 +7924,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                               !(b.game === r.game || (b.fixtureId && ticket.legs.find(l => l.game === r.game && l.fixtureId === b.fixtureId)))
                             );
                             persistBookedLegs(updated);
-                            setCorrOpen(false);
-                            // Force a re-render by toggling open
-                            setTimeout(() => setCorrOpen(true), 50);
+                            setBookedLegsVersion(v => v + 1);
                           }}
                             style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
                                      background:"transparent", border:`1px solid ${C.muted}40`, color:C.muted }}>
@@ -7887,7 +7936,6 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                           <button onClick={() => {
                             const otherLegIdx = (otherTicket.legs||[]).findIndex(l => l.game === r.game);
                             if (otherLegIdx >= 0) onRemoveLegFromOther(otherTicket.id, otherLegIdx);
-                            setCorrOpen(false);
                           }}
                             style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
                                      background:"transparent", border:`1px solid ${C.amber}50`, color:C.amber }}>
@@ -8749,19 +8797,24 @@ function getStateGroup(f) {
 
 // Single option-row renderer shared by all three SORT_OPTIONS groups —
 // previously each group duplicated the same button markup three times.
+// V-FIX (2026-07-03): was reusing FILTER_ROW_H (52px, sized for the League
+// country list) with 13px/11px fonts — for a short fixed list of 6 toggles
+// that read as oversized next to everything else in the drawer. Sized down
+// to its own compact scale: still a real touch target (~40px with two lines
+// of text), just not built for a 50-item scrolling list like League is.
 function SortOptionRow({ opt, isActive, onToggle, liveCol }) {
   return (
     <button onClick={onToggle} className="gb"
-      style={{ minHeight:FILTER_ROW_H, padding:"10px 14px", fontSize:13, textAlign:"left",
-               display:"flex", flexDirection:"column", justifyContent:"center", gap:2,
+      style={{ minHeight:34, padding:"7px 11px", fontSize:11, textAlign:"left",
+               display:"flex", flexDirection:"column", justifyContent:"center", gap:1,
                background:isActive?C.accentDim:"transparent", color:isActive?C.accent:C.text,
                border:`1px solid ${isActive?C.accentBorder:C.faint}`, borderRadius:C.btnRadius }}>
-      <span style={{ fontWeight:isActive?800:600, display:"flex", alignItems:"center", gap:8 }}>
+      <span style={{ fontWeight:isActive?800:600, display:"flex", alignItems:"center", gap:6 }}>
         {opt.icon && <span style={{ color: liveCol ? (isActive?liveCol:C.muted) : (isActive?C.accent:C.muted), display:"flex", opacity: liveCol?1:.75 }}>{opt.icon}</span>}
         {opt.label}
-        {isActive && <span style={{ marginLeft:"auto", display:"flex" }}><CheckIcon color={C.accent} size={13}/></span>}
+        {isActive && <span style={{ marginLeft:"auto", display:"flex" }}><CheckIcon color={C.accent} size={12}/></span>}
       </span>
-      <span style={{ fontSize:11, color:C.muted, opacity:.85, paddingLeft: opt.icon ? 22 : 0 }}>{opt.desc}</span>
+      <span style={{ fontSize:9.5, color:C.muted, opacity:.85, paddingLeft: opt.icon ? 18 : 0 }}>{opt.desc}</span>
     </button>
   );
 }
@@ -8816,9 +8869,9 @@ function SortFilter({ active, setActive, alwaysOpen = false }) {
       {open && (
         <div style={alwaysOpen ? {} : { marginTop:8, padding:12, background:C.surface, border:`1px solid ${C.border}`, borderRadius:C.cardRadius }}>
           {groups.map(({ label, options }) => options.length > 0 && (
-            <div key={label} style={{ marginBottom:14 }}>
-              <div style={{ fontSize:10, color:C.muted, fontWeight:800, textTransform:"uppercase", letterSpacing:".12em", marginBottom:8 }}>{label}</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            <div key={label} style={{ marginBottom:10 }}>
+              <div style={{ fontSize:9, color:C.muted, fontWeight:800, textTransform:"uppercase", letterSpacing:".1em", marginBottom:5 }}>{label}</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
                 {options.map(opt => {
                   const isActive = active.has(opt.id);
                   const liveCol = opt.id === "live" ? C.green : opt.id === "scheduled" ? C.gold : null;
@@ -8830,7 +8883,7 @@ function SortFilter({ active, setActive, alwaysOpen = false }) {
 
           {hasActive && (
             <button onClick={() => { setActive(new Set()); if (!alwaysOpen) setOpen(false); }} className="gb"
-              style={{ width:"100%", minHeight:FILTER_TRIGGER_H, padding:"10px", fontSize:12, fontWeight:700,
+              style={{ width:"100%", minHeight:36, padding:"8px", fontSize:11, fontWeight:700,
                        color:C.text, border:`1px solid ${C.border}`, background:"transparent", borderRadius:C.btnRadius, textAlign:"center" }}>
               ✕ Clear all
             </button>
@@ -15301,24 +15354,20 @@ function GRMProInner() {
 
             <div style={{ padding:"14px 14px 32px", display:"flex", flexDirection:"column", gap:6 }}>
 
-              {/* League Filter — V2-FIX: now behind a FilterSection accordion, collapsed
-                  by default. Previously LeagueFilterList was inlined always-expanded,
-                  which for a full slate (50+ countries) buried Sort & Filter, Appearance,
-                  Tickets, and Admin below the fold, forcing a scroll just to reach them.
-                  Collapsing here (rather than reintroducing a second nested bottom sheet,
-                  which was the pre-regression pattern) keeps one sheet, one scroll
-                  container, and full country/league browsing still just one tap away. */}
-              {availableLeagues.length > 1 && (() => {
-                const selCount = leagueFilter instanceof Set ? leagueFilter.size : (leagueFilter ? 1 : 0);
-                const leagueSummary = selCount === 0 ? "All Leagues"
-                  : selCount === 1 ? (() => { const lg = availableLeagues.find(l => (leagueFilter instanceof Set ? leagueFilter.has(l.leagueId) : leagueFilter === l.leagueId)); return lg ? lg.league : "1 league"; })()
-                  : `${selCount} leagues selected`;
-                return (
-                  <FilterSection title="League" summary={leagueSummary} badge={selCount}>
-                    <LeagueFilterList availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
-                  </FilterSection>
-                );
-              })()}
+              {/* League Filter — V3-FIX (2026-07-03): reverted the V2 accordion-inline
+                  approach. Collapsing it behind a header still left the actual list
+                  rendered inline inside the 280px-wide drawer once opened — on a busy
+                  Saturday (50+ countries) that's the same "dumped in a cramped column"
+                  problem, just one tap later. Correct fix, confirmed against a reference
+                  mock: League gets its own dedicated bottom sheet (full-width, portaled
+                  over everything — see <LeagueFilter> below), not a panel nested inside
+                  the drawer. <LeagueFilter> already exists and is already used elsewhere
+                  in the app for exactly this (compact pill trigger + slide-up sheet on
+                  mobile / dropdown on desktop) — reusing it here instead of building a
+                  second implementation. */}
+              {availableLeagues.length > 1 && (
+                <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
+              )}
 
               {/* Sort & Filter */}
               <FilterSection title="Sort & Filter"
