@@ -8608,22 +8608,49 @@ function useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter) {
 // a dedicated panel already owns the "open/closed" state (the main Filters
 // drawer, and — inline, one level of nesting — inside LeagueFilter's own
 // popover below), so there's one rendering implementation, not two.
+//
+// V4-FIX (2026-07-03): rows used to auto-expand whenever a country had
+// exactly one league (`leagues.length === 1`). On a real slate, most
+// countries only HAVE one league running that day — so on a busy Saturday
+// the overwhelming majority of rows were force-expanded regardless of tap
+// state, and the list was back to a tall, uneven dump despite the
+// collapsed-by-default intent. Every row is now the same two-line height
+// whether or not it's expanded — collapsed unless the user taps it,
+// searches, or already has a selection inside it — matching a reference
+// layout provided directly (country name + "Tap to see leagues"/"N
+// selected" subtitle, count + chevron on the right, uniform row height).
 function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onSelectLeague }) {
   const { search, setSearch, expanded, setExpanded, searchLow, filteredGroups, selected, toggleLeague, toggleCountry } =
     useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter);
+
+  const totalLeagues = useMemo(() => filteredGroups.reduce((s, g) => s + g.leagues.length, 0), [filteredGroups]);
 
   return (
     <div>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…" className="gi"
         style={{ fontSize:13, padding:"11px 14px", marginBottom:10 }}/>
 
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+        <div style={{ borderRadius:C.cardRadius, border:`1px solid ${C.border}`, background:C.surface, padding:"9px 12px" }}>
+          <div style={{ fontSize:8, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700 }}>Countries</div>
+          <div style={{ fontSize:16, fontWeight:800, color:C.text, marginTop:3 }}>{filteredGroups.length}</div>
+        </div>
+        <div style={{ borderRadius:C.cardRadius, border:`1px solid ${C.border}`, background:C.surface, padding:"9px 12px" }}>
+          <div style={{ fontSize:8, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700 }}>Leagues</div>
+          <div style={{ fontSize:16, fontWeight:800, color:C.text, marginTop:3 }}>{totalLeagues}</div>
+        </div>
+      </div>
+
       <button onClick={() => { setLeagueFilter(null); setSearch(""); onSelectLeague?.(); }} className="gb"
-        style={{ width:"100%", minHeight:FILTER_ROW_H, textAlign:"left", padding:"12px 14px", fontSize:13,
-                 display:"flex", alignItems:"center", justifyContent:"space-between",
+        style={{ width:"100%", textAlign:"left", padding:"12px 14px", fontSize:13,
+                 display:"flex", alignItems:"center", justifyContent:"space-between", gap:10,
                  background:selected.size===0?C.accent:C.surface, color:selected.size===0?C.accentText:C.text,
                  border:`1px solid ${selected.size===0?C.accentBorder:C.border}`, borderRadius:C.btnRadius,
-                 fontWeight:selected.size===0?800:600, marginBottom:8 }}>
-        All Leagues
+                 marginBottom:8 }}>
+        <div>
+          <div style={{ fontWeight:800 }}>All Leagues</div>
+          <div style={{ fontSize:10, opacity:.75, marginTop:2, fontWeight:selected.size===0?600:400 }}>Clear all selections</div>
+        </div>
         {selected.size === 0 && <CheckIcon color={C.accentText} size={14}/>}
       </button>
 
@@ -8635,26 +8662,37 @@ function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onS
 
       <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
         {filteredGroups.map(({ country, leagues }) => {
-          // Auto-expand: if searching, if country has selections, or if country has only 1 league
+          // Auto-expand only for an active search (so matches are visible) or an
+          // existing selection inside this country (so the user sees what's
+          // already picked without an extra tap) — NOT just because the country
+          // happens to have a single league today. That was the bug.
           const hasSelection = leagues.some(l => selected.has(l.leagueId));
-          const isExp = expanded.has(country) || !!searchLow || hasSelection || leagues.length === 1;
+          const isExp = expanded.has(country) || !!searchLow || hasSelection;
           const countrySelected = leagues.filter(l => selected.has(l.leagueId)).length;
           const allCountrySel = countrySelected === leagues.length;
           return (
             <div key={country} style={{ borderRadius:C.cardRadius, border:`1px solid ${C.border}`, overflow:"hidden" }}>
               <div
-                onClick={() => setExpanded(prev => { const n=new Set(prev); (isExp && !searchLow && !hasSelection && leagues.length>1) ? n.delete(country) : n.add(country); return n; })}
-                style={{ display:"flex", alignItems:"center", gap:10, minHeight:FILTER_ROW_H, padding:"10px 14px", cursor:"pointer",
+                onClick={() => setExpanded(prev => { const n=new Set(prev); (isExp && !searchLow && !hasSelection) ? n.delete(country) : n.add(country); return n; })}
+                style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 14px", cursor:"pointer",
                          background:countrySelected>0?C.accentDim:"transparent" }}>
                 <button onClick={e=>{ e.stopPropagation(); toggleCountry(country,leagues); }} className="gb"
-                  style={{ width:22, height:22, borderRadius:6, flexShrink:0, padding:0, display:"flex", alignItems:"center", justifyContent:"center",
+                  style={{ width:20, height:20, borderRadius:6, flexShrink:0, padding:0, display:"flex", alignItems:"center", justifyContent:"center",
                            border:`1.5px solid ${allCountrySel?C.accent:C.border}`,
                            background:allCountrySel?C.accent:countrySelected>0?C.accentDim:"transparent" }}>
-                  {allCountrySel && <CheckIcon color={C.accentText}/>}
+                  {allCountrySel && <CheckIcon color={C.accentText} size={12}/>}
                 </button>
-                <span style={{ fontSize:13, fontWeight:700, color:countrySelected>0?C.accent:C.text, flex:1 }}>{country}</span>
-                <span style={{ fontSize:11, color:C.muted }}>{leagues.length}</span>
-                {leagues.length > 1 && <ChevronIcon open={isExp} color={C.muted}/>}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:700, color:countrySelected>0?C.accent:C.text,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{country}</div>
+                  <div style={{ fontSize:10, color:C.muted, marginTop:2 }}>
+                    {countrySelected > 0 ? `${countrySelected} selected` : "Tap to see leagues"}
+                  </div>
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4, flexShrink:0 }}>
+                  <span style={{ fontSize:10, color:C.muted }}>{leagues.length} {leagues.length === 1 ? "league" : "leagues"}</span>
+                  <ChevronIcon open={isExp} color={C.muted}/>
+                </div>
               </div>
               {isExp && (
                 <div style={{ borderTop:`1px solid ${C.faint}` }}>
@@ -8749,10 +8787,13 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
               <div style={{ width:36, height:4, borderRadius:2, background:C.border }} />
             </div>
           )}
-          <div style={{ padding:"6px 16px 12px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ fontSize:14, fontWeight:800, color:C.text }}>Select Leagues</span>
+          <div style={{ padding:"6px 16px 12px", display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+            <div>
+              <div style={{ fontSize:14, fontWeight:800, color:C.text }}>Select Leagues</div>
+              <div style={{ fontSize:10, color:C.muted, marginTop:2 }}>Tap a country to see its leagues</div>
+            </div>
             <button onClick={() => setOpen(false)}
-              style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1 }}>✕</button>
+              style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1, flexShrink:0 }}>✕</button>
           </div>
           <div style={{ flex:1, overflowY:"auto", padding:"0 14px 16px" }}>
             <LeagueFilterList
