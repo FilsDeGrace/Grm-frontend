@@ -4056,7 +4056,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // probabilities; SA Pattern instead filters fixtures by whether they match
   // a validated (out-of-sample tested) historical pattern for a given market.
   // SA4-FIX: moved from admin-only to a collapsible panel visible to all users.
-  // PE:Mix is still gated to adminMode (it pulls from the PE engine internals).
+  // PE:Mix de-gated 2026-07-04 (Sterling's call) — no longer admin-only.
   const [saExpanded,  setSaExpanded]  = useState(false); // panel collapsed by default
   const [saMarket,    setSaMarket]    = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
   const [saPatterns,  setSaPatterns]  = useState(null); // raw sa-patterns.json payload
@@ -4117,14 +4117,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
   // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
   useEffect(() => {
-    // PE:Mix remains admin-only — it reads from internal PE engine data
-    if (!adminMode || saMarket !== "PE:Mix") return;
+    // De-gated 2026-07-04 (Sterling's call): PE:Mix used to be admin-only
+    // because it reads internal PE engine data — the whole SA scope (including
+    // /api/sa-patterns and this endpoint's backend route) is now public.
+    if (saMarket !== "PE:Mix") return;
     if (saMixLoading) return;
     setSaMixLoading(true);
     setSaMixLegs(null);
     setSaMixError(null);
-    const dateParam = date ? `&date=${date}` : ``;
-    fetch(`${SERVER}/api/sa-mix?adminToken=${encodeURIComponent(adminToken)}${dateParam}`)
+    const dateParam = date ? `?date=${date}` : ``;
+    fetch(`${SERVER}/api/sa-mix${dateParam}`)
       .then(r => r.json())
       .then(d => {
         if (d?.homeLegs) setSaMixLegs(d.homeLegs);
@@ -4132,7 +4134,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       })
       .catch(e => setSaMixError(e.message))
       .finally(() => setSaMixLoading(false));
-  }, [adminMode, saMarket, date, adminToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [saMarket, date]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -5005,7 +5007,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* ── STRATEGY ANALYST — collapsible, visible to all users ── */}
       {/* SA4-FIX: was admin-only ({adminMode && ...}). Now a collapsed panel
-          any user can expand. PE:Mix market button still requires adminMode. */}
+          any user can expand. PE:Mix de-gated 2026-07-04 — no longer admin-only. */}
       <div style={{ marginBottom:10 }}>
         {/* Collapse toggle header */}
         <button
@@ -5062,7 +5064,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               {SA_MARKET_LABELS.map(mk => {
                 const isMix    = mk.id === "PE:Mix";
                 const isOn     = saMarket === mk.id;
-                if (isMix && !adminMode) return null;
+                // De-gated 2026-07-04 (Sterling's call) — PE:Mix used to be
+                // hidden here (`if (isMix && !adminMode) return null;`) since
+                // the backend route was admin-only. Now the whole SA scope is
+                // public, so this button shows to everyone.
                 return (
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
