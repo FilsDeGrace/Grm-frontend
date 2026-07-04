@@ -13563,12 +13563,30 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
   const trackTop = topInset;
   const trackH = () => Math.max(40, window.innerHeight - bottomInset - trackTop - thumbH());
 
+  // V-FIX (2026-07-03): scrollEl (appScrollRef) is usually NOT an actual CSS
+  // scroll container — the root div it points to has no overflowY set, so it
+  // just grows to fit content while the real document scrolls. Reading
+  // el.clientHeight/scrollHeight directly off a non-scrolling div always gave
+  // ~0 overflow, which is why this never showed up at all. getMetrics()
+  // checks whether the ref is a genuine scroll container before trusting it,
+  // and falls back to document.scrollingElement (the real scroller in the
+  // normal case) otherwise — same fallback logic as getScrollY/setScrollY
+  // above, so the FAB and the scroll-position helpers always agree on which
+  // element is actually scrolling.
+  const isRealScrollEl = (el) => !!el && el.scrollHeight > el.clientHeight + 1;
+  const getMetrics = useCallback(() => {
+    const el = scrollEl?.current;
+    if (isRealScrollEl(el)) return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight };
+    const se = document.scrollingElement || document.documentElement || document.body;
+    return { clientHeight: window.innerHeight, scrollHeight: se.scrollHeight };
+  }, [scrollEl]);
+
   // Proportional thumb height, like a real scrollbar — bigger when there's
   // relatively less to scroll, so its size itself communicates page length.
   const thumbH = () => {
-    const el = scrollEl?.current;
-    if (!el || maxScroll <= 0) return 44;
-    const visibleRatio = el.clientHeight / (el.clientHeight + maxScroll);
+    if (maxScroll <= 0) return 44;
+    const { clientHeight } = getMetrics();
+    const visibleRatio = clientHeight / (clientHeight + maxScroll);
     return Math.min(130, Math.max(28, trackHRaw() * visibleRatio));
   };
   // trackH() depends on thumbH() which depends on trackH() for the ratio calc
@@ -13576,22 +13594,23 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
   const trackHRaw = () => Math.max(40, window.innerHeight - bottomInset - trackTop);
 
   const measure = useCallback(() => {
-    const el = scrollEl?.current;
-    if (!el) { setMaxScroll(0); return; }
-    setMaxScroll(Math.max(0, el.scrollHeight - el.clientHeight));
-  }, [scrollEl]);
+    const { clientHeight, scrollHeight } = getMetrics();
+    setMaxScroll(Math.max(0, scrollHeight - clientHeight));
+  }, [getMetrics]);
 
   // Re-measure whenever the visible tab/view changes (resetKey), on mount,
   // via ResizeObserver for async content growth, and via a light interval
   // as a last-resort net for environments where ResizeObserver misses a
   // change (e.g. font swap reflow with no box-size delta at observer tick).
+  // Observes document.body (not just scrollEl) since scrollEl is usually not
+  // the real scroll container — body's box growth is what actually matters.
   useEffect(() => {
     measure();
-    const el = scrollEl?.current;
     let ro;
-    if (el && typeof ResizeObserver !== "undefined") {
+    if (typeof ResizeObserver !== "undefined") {
       ro = new ResizeObserver(() => measure());
-      ro.observe(el);
+      ro.observe(document.body);
+      if (scrollEl?.current) ro.observe(scrollEl.current);
     }
     const interval = setInterval(measure, 700);
     window.addEventListener("resize", measure);
@@ -13600,10 +13619,13 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
       clearInterval(interval);
       window.removeEventListener("resize", measure);
     };
-  }, [measure, resetKey]);
+  }, [measure, resetKey, scrollEl]);
 
   // Keep the thumb's position synced to actual scroll, except while the
   // user is actively dragging it (dragging drives scroll, not the other way).
+  // Listens on window/document in addition to scrollEl — when scrollEl isn't
+  // the real scroll container, it never fires "scroll" at all, so relying on
+  // it alone silently freezes the thumb's position.
   useEffect(() => {
     if (dragging) return;
     const sync = () => {
@@ -13613,8 +13635,14 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
     };
     sync();
     const el = scrollEl?.current;
+    window.addEventListener("scroll", sync, { passive: true });
+    document.addEventListener("scroll", sync, { passive: true });
     el?.addEventListener("scroll", sync, { passive: true });
-    return () => el?.removeEventListener("scroll", sync);
+    return () => {
+      window.removeEventListener("scroll", sync);
+      document.removeEventListener("scroll", sync);
+      el?.removeEventListener("scroll", sync);
+    };
   }, [dragging, maxScroll, topInset, bottomInset, scrollEl, getScrollY]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const moveTo = (clientY) => {
@@ -13653,6 +13681,7 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
         boxShadow: dragging ? "0 4px 18px rgba(0,0,0,0.4)" : "0 2px 8px rgba(0,0,0,0.18)",
         display: "flex", alignItems: "center", justifyContent: "center",
         touchAction: "none", cursor: dragging ? "grabbing" : "grab",
+        userSelect: "none", WebkitUserSelect: "none",
         transition: dragging ? "none" : "width .12s ease, background .15s ease, box-shadow .15s ease",
       }}
       aria-label="Drag to scroll"
@@ -13700,18 +13729,35 @@ function GRMProInner() {
   // sees them already initialized, regardless of where it's defined.
   const appScrollRef = useRef(null);
 
+  // V-FIX (2026-07-03): getScrollY/setScrollY used to trust appScrollRef.current
+  // unconditionally — "if the ref exists, it's the scroller." But the div this
+  // ref is attached to (below, `minHeight:"100vh"`) has no `overflowY` set, so
+  // it is never actually a CSS scroll container: it just grows to fit its
+  // content and the real document scrolls. Its scrollTop is always 0 and its
+  // scrollHeight always equals its clientHeight, in every environment — this
+  // was never actually Vercel-specific, the earlier S2-FIX diagnosis was
+  // wrong. That's also why GrmScrollFab never showed: it measured maxScroll
+  // off this same non-scrolling div and always got ~0. Now checks whether the
+  // ref is a genuine scroll container (scrollHeight actually exceeds
+  // clientHeight) before trusting it, and falls back to
+  // document.scrollingElement — the standards-based way to get whichever of
+  // <html>/<body> is actually scrolling — instead of manually guessing
+  // between documentElement and body.
+  const isRealScrollEl = (el) => !!el && el.scrollHeight > el.clientHeight + 1;
+
   const getScrollY = useCallback(() => {
     const el = appScrollRef.current;
-    if (el) return el.scrollTop || 0;
-    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+    if (isRealScrollEl(el)) return el.scrollTop || 0;
+    const se = document.scrollingElement || document.documentElement || document.body;
+    return se.scrollTop || window.scrollY || 0;
   }, []);
 
   const setScrollY = useCallback((px) => {
     const el = appScrollRef.current;
-    if (el) { el.scrollTop = px; return; }
+    if (isRealScrollEl(el)) { el.scrollTop = px; return; }
+    const se = document.scrollingElement || document.documentElement || document.body;
+    se.scrollTop = px;
     try { window.scrollTo({ top: px, behavior: "auto" }); } catch {}
-    document.documentElement.scrollTop = px;
-    document.body.scrollTop = px;
   }, []);
 
   // UX-FIX: blank/white first-paint on fresh installs (new phone, incognito) until the
@@ -15336,24 +15382,37 @@ function GRMProInner() {
                   </button>
                 )}
               </div>
+              {/* V-FIX (2026-07-03, Log #21): this button's background/border were both
+                  explicitly "transparent" in the default (no-filters-active) state, and
+                  the base .grm-pill class defaults to the same — so with nothing active,
+                  it was genuinely invisible chrome: muted text floating in the header,
+                  no border, no background, nothing reading as "button" until hover or an
+                  active filter. Now uses C.surface/C.border always (theme tokens, so it's
+                  correct on every palette by construction, not just the default one) so
+                  it reads as a real button in its default state too, plus a static
+                  chevron as a "there's more behind this" disclosure cue — same convention
+                  used by the accordion headers inside the drawer it opens. */}
               <button onClick={() => setDrawerOpen(true)}
                 className="grm-pill"
                 style={{
                   flexShrink:0,
-                  background:(leagueFilter||sortActive.size>0)?C.accentDim:"transparent",
-                  borderColor:(leagueFilter||sortActive.size>0)?C.accentBorder:"transparent",
-                  color:(leagueFilter||sortActive.size>0)?C.accent:C.muted,
+                  background:(leagueFilter||sortActive.size>0)?C.accentDim:C.surface,
+                  borderColor:(leagueFilter||sortActive.size>0)?C.accentBorder:C.border,
+                  color:(leagueFilter||sortActive.size>0)?C.accent:C.text,
                   border:"1px solid",
+                  boxShadow:(leagueFilter||sortActive.size>0)?"none":"0 1px 3px rgba(0,0,0,.14)",
                   animation: filterBtnShake ? "grm-risk-shake .6s ease" : "none",
                 }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
                 </svg>
                 Filters
-                {(leagueFilter||sortActive.size>0) && (
+                {(leagueFilter||sortActive.size>0) ? (
                   <span style={{ background:C.accent,color:C.accentText,borderRadius:8,fontSize:8,fontWeight:900,padding:"1px 5px",lineHeight:1.4 }}>
                     {(leagueFilter?1:0)+sortActive.size}
                   </span>
+                ) : (
+                  <ChevronIcon open={false} color={C.muted}/>
                 )}
               </button>
             </div>
