@@ -5653,13 +5653,24 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 // Mode B: Upload a custom list JSON file (for CustomListView exports)
 function UploadBacktester() {
   const isMobile = useIsMobile();
-  const [mode, setMode]         = useState("code"); // "code" | "json"
+  const [mode, setMode]         = useState("code"); // "code" | "json" | "batch"
   const [ticketCode, setTicketCode] = useState("");
   const [dragging,setDragging]  = useState(false);
   const [uploading,setUploading]= useState(false);
   const [result,setResult]      = useState(null);
   const [error,setError]        = useState(null);
   const fileRef = useRef(null);
+
+  // BATCH-EVAL (priority feature — 2026-07-04): evaluate every saved ticket
+  // in one call and see hit-rate broken down by trim method (Smart Split vs
+  // Top-N vs untagged/manual, etc). Reads straight from the same localStorage
+  // Saved Tickets store as the "Ticket Code" mode above (Option B from
+  // Alden's notes: evaluator reads Saved Tickets directly, no manual
+  // injection step needed).
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchError, setBatchError]     = useState(null);
+  const [batchResult, setBatchResult]   = useState(null);
+  const [excludedCodes, setExcludedCodes] = useState(() => new Set());
 
   const savedTickets = loadSavedTickets();
 
@@ -5696,13 +5707,33 @@ function UploadBacktester() {
   const onDrop = e => { e.preventDefault(); setDragging(false); const f=e.dataTransfer.files?.[0]; if(f) processFile(f); };
   const resColor = r => r==="WIN"?C.green:r==="LOSS"?C.red:r==="VOID"?C.muted:C.faint;
 
+  const runBatchEval = async () => {
+    setBatchError(null); setBatchResult(null); setBatchLoading(true);
+    try {
+      const toSend = savedTickets.filter(t => !excludedCodes.has(t.code));
+      if (!toSend.length) { setBatchError("No saved tickets to evaluate (all excluded, or none saved yet)."); setBatchLoading(false); return; }
+      const res = await fetch(`${SERVER}/api/backtest-batch`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tickets: toSend }),
+      });
+      const t = await res.text(); let data;
+      try { data = JSON.parse(t); } catch { throw new Error(`Server error: ${t.slice(0,200)}`); }
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      setBatchResult(data);
+    } catch (e) { setBatchError(friendlyError(e, "Backtest")); }
+    setBatchLoading(false);
+  };
+  const toggleExcluded = code => setExcludedCodes(prev => {
+    const next = new Set(prev); next.has(code) ? next.delete(code) : next.add(code); return next;
+  });
+
   return (
     <div>
       <div style={{ fontSize:9,color:C.radar,fontWeight:800,textTransform:"uppercase",letterSpacing:".15em",marginBottom:14 }}>📂 Backtest Evaluator</div>
 
       {/* Mode toggle */}
-      <div style={{ display:"flex",gap:6,marginBottom:14 }}>
-        {[["code","Ticket Code"],["json","JSON Upload"]].map(([id,label]) => (
+      <div style={{ display:"flex",gap:6,marginBottom:14,flexWrap:"wrap" }}>
+        {[["code","Ticket Code"],["json","JSON Upload"],["batch",`All Saved (${savedTickets.length})`]].map(([id,label]) => (
           <button key={id} onClick={() => { setMode(id); setResult(null); setError(null); }} className="gb"
             style={{ padding:"5px 14px",fontSize:9,background:mode===id?C.radar:"transparent",color:mode===id?C.accentText:C.muted,border:`1px solid ${mode===id?C.radar:C.faint}` }}>
             {label}
@@ -5756,6 +5787,93 @@ function UploadBacktester() {
             {uploading ? <span className="pu" style={{ fontSize:11,color:C.radar }}>Evaluating…</span>
               : <span style={{ fontSize:11,color:C.text }}>Drop JSON here or <span style={{ color:C.radar }}>click to upload</span></span>}
           </div>
+        </div>
+      )}
+
+      {/* Mode C: Batch — evaluate every Saved Ticket at once, grouped by trim method */}
+      {mode === "batch" && (
+        <div>
+          <div style={{ fontSize:9,color:C.text,marginBottom:10,lineHeight:1.6 }}>
+            Evaluates <span style={{ color:C.radar }}>all Saved Tickets</span> against actual results in one pass, then breaks down
+            win/loss and hit rate <span style={{ color:C.gold }}>per trimming method</span> (Smart Split, Top-N, etc) so you can
+            compare which method is actually performing.
+          </div>
+
+          {!savedTickets.length ? (
+            <div style={{ fontSize:10,color:C.text,padding:"14px 0" }}>No saved tickets yet — save some from Ticket › Saved first.</div>
+          ) : (
+            <>
+              <div style={{ maxHeight:180,overflowY:"auto",border:`1px solid ${C.faint}`,borderRadius:8,marginBottom:10 }}>
+                {savedTickets.map(t => {
+                  const excluded = excludedCodes.has(t.code);
+                  return (
+                    <label key={t.code} style={{ display:"flex",alignItems:"center",gap:8,padding:"6px 10px",borderBottom:`1px solid ${C.faint}`,fontSize:9,cursor:"pointer",opacity:excluded?0.4:1 }}>
+                      <input type="checkbox" checked={!excluded} onChange={() => toggleExcluded(t.code)} />
+                      <span style={{ color:C.radar,fontWeight:800,letterSpacing:".05em" }}>{t.code}</span>
+                      <span style={{ color:C.text }}>{t.date}</span>
+                      <span style={{ color:C.amber,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{t.trimMethodLabel || "Untagged / manual"}</span>
+                      <span style={{ color:C.text }}>{(t.legs||[]).length} legs</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <button onClick={runBatchEval} disabled={batchLoading} className="gb"
+                style={{ padding:"8px 20px",fontSize:11,fontWeight:800,background:batchLoading?C.faint:C.radar,color:batchLoading?C.muted:C.accentText,marginBottom:14 }}>
+                {batchLoading ? <span className="pu">Evaluating…</span> : `Evaluate ${savedTickets.length - excludedCodes.size} Tickets`}
+              </button>
+            </>
+          )}
+
+          {batchError && <div style={{ marginBottom:14,color:C.red,fontSize:11,background:`${C.red}10`,border:`1px solid ${C.red}30`,borderRadius:8,padding:"10px 14px" }}>✕ {batchError}</div>}
+
+          {batchResult && (
+            <div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+              {batchResult.overall && (
+                <div className="gc" style={{ padding:"12px 14px" }}>
+                  <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",marginBottom:6 }}>Overall</div>
+                  <div style={{ fontSize:22,fontWeight:800,color:batchResult.overall.hitRate>=55?C.green:batchResult.overall.hitRate>=45?C.gold:C.red }}>
+                    {batchResult.overall.hitRate != null ? `${batchResult.overall.hitRate}%` : "—"}
+                  </div>
+                  <div style={{ fontSize:9,color:C.text,marginTop:3 }}>
+                    {batchResult.overall.wins}W / {batchResult.overall.losses}L / {batchResult.overall.voids} void / {batchResult.overall.pending} pending · {batchResult.evaluated} evaluated
+                  </div>
+                </div>
+              )}
+
+              <div className="gc" style={{ overflow:"hidden" }}>
+                <div style={{ padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
+                  Performance by Trim Method
+                </div>
+                <div style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 50px 60px":"1fr 60px 70px 70px",gap:8,padding:"8px 14px",borderBottom:`1px solid ${C.faint}`,fontSize:7,color:C.text,textTransform:"uppercase",letterSpacing:".08em",fontWeight:700 }}>
+                  <span>Method</span><span>Tix</span><span>Hit%</span>{!isMobile && <span>Leg%</span>}
+                </div>
+                {Object.entries(batchResult.byMethod)
+                  .sort((a,b) => (b[1].hitRate ?? -1) - (a[1].hitRate ?? -1))
+                  .map(([key, m]) => (
+                  <div key={key} style={{ display:"grid",gridTemplateColumns:isMobile?"1fr 50px 60px":"1fr 60px 70px 70px",gap:8,padding:"9px 14px",borderBottom:`1px solid ${C.faint}`,alignItems:"center",fontSize:10 }}>
+                    <div>
+                      <div style={{ fontWeight:700,color:C.text }}>{m.label}</div>
+                      <div style={{ fontSize:7,color:C.muted }}>{m.wins}W / {m.losses}L / {m.voids}V{m.pending ? ` / ${m.pending} pend` : ""}</div>
+                    </div>
+                    <span style={{ color:C.text }}>{m.tickets}</span>
+                    <span style={{ fontWeight:800,color:m.hitRate==null?C.muted:m.hitRate>=55?C.green:m.hitRate>=45?C.gold:C.red }}>{m.hitRate!=null?`${m.hitRate}%`:"—"}</span>
+                    {!isMobile && <span style={{ color:C.text }}>{m.legHitRate!=null?`${m.legHitRate}%`:"—"}</span>}
+                  </div>
+                ))}
+              </div>
+
+              {batchResult.skippedCount > 0 && (
+                <div style={{ fontSize:8,color:C.amber,background:`${C.amber}08`,border:`1px solid ${C.amber}22`,borderRadius:7,padding:"8px 11px",lineHeight:1.6 }}>
+                  ⚠ {batchResult.skippedCount} ticket{batchResult.skippedCount!==1?"s":""} skipped (no results file yet for that date, or malformed) — {batchResult.skipped.slice(0,5).map(s=>s.code||`#${s.index}`).join(", ")}{batchResult.skippedCount>5?"…":""}
+                </div>
+              )}
+
+              <button onClick={() => { setBatchResult(null); setBatchError(null); }} className="gb"
+                style={{ alignSelf:"flex-start",padding:"6px 16px",background:"transparent",border:`1px solid ${C.faint}`,color:C.text,fontSize:10 }}>
+                ↺ Run Again
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -11073,6 +11191,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [trimInputs, setTrimInputs] = useState({});         // per-mode field values, keyed by field key
   const [trimResult, setTrimResult] = useState(null);        // [{ label, legs, totalOdds }] | null
   const [trimError, setTrimError] = useState(null);
+  // UX-FIX (2026-07-04, Alden feedback): ticket source list was a flat dump of
+  // every saved ticket (unusable once there are dozens). Now a collapsed
+  // dropdown/sheet with an optional filter box — see "1. Pick a ticket" render.
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+  const [sourceFilter, setSourceFilter] = useState("");
+  // UX-FIX (2026-07-04, Alden feedback): multi-ticket trim results (chunk/
+  // probsplit/smart) previously only supported "Add ALL to Builder" — no way
+  // to add just 1 or 2 of the generated sub-tickets. Selection defaults to
+  // "all" (preserves old one-tap behaviour) but every card is now individually
+  // checkable, plus has its own standalone Add button for a single quick add.
+  const [selectedTrimResults, setSelectedTrimResults] = useState(() => new Set());
 
   const trimOddsOf = (legs) => parseFloat(
     legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0).toFixed(2)
@@ -11096,13 +11225,63 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   };
   const trimRanked = (legs) => [...legs].sort((a, b) => trimScore(b) - trimScore(a));
 
+  // FEATURE (2026-07-04, Alden feedback #4): "most methods use target legs,
+  // but I want odds... 20 odds AND 7 legs each, an and/or situation."
+  // Fills leg-groups from an already-ranked array, closing the current group
+  // and starting a fresh one the moment adding the next leg would breach
+  // EITHER cap (whichever is supplied — pass one, both, or neither). This is
+  // the AND/OR behaviour requested: give only maxOdds → groups sized purely
+  // by odds; give only maxLegs → old behaviour unchanged; give both → each
+  // group respects both simultaneously, stopping at whichever hits first.
+  // A single leg that alone exceeds maxOdds is still kept (as its own
+  // group) rather than silently dropped — same "never destroy data, surface
+  // the overage" philosophy as the existing "Shave to target odds" mode.
+  const greedyOddsLegChunk = (legs, { maxLegs = null, maxOdds = null } = {}) => {
+    const groups = [];
+    let current = [], currentOdds = 1;
+    for (const leg of legs) {
+      const legOdds = parseFloat(leg.odds) || 1;
+      const wouldExceedLegs = maxLegs && current.length + 1 > maxLegs;
+      const wouldExceedOdds = maxOdds && current.length > 0 && parseFloat((currentOdds * legOdds).toFixed(4)) > maxOdds;
+      if (current.length > 0 && (wouldExceedLegs || wouldExceedOdds)) {
+        groups.push(current);
+        current = []; currentOdds = 1;
+      }
+      current.push(leg);
+      currentOdds = parseFloat((currentOdds * legOdds).toFixed(4));
+    }
+    if (current.length) groups.push(current);
+    return groups;
+  };
+
+  // saCoverage: how many legs in this result actually had SA pattern data
+  // applied to their ranking score (vs falling back to raw confidence).
+  // Answers Alden feedback #1 / dev-log #23 directly — instead of just
+  // trusting trimScore blends SA lift internally, this makes it visible
+  // per result card so it's "verifiable at a glance" as the dev log asked.
+  const trimSaCoverage = (legs) => {
+    let used = 0;
+    for (const l of legs) {
+      if (!l.fixtureId || !fixtures?.length) continue;
+      const fix = fixtures.find(f => String(f.id) === String(l.fixtureId));
+      if (fix?._saScores && l.market && fix._saScores[l.market]) used++;
+    }
+    return { used, total: legs.length };
+  };
+
   const TRIM_MODES = [
     { id:"topn",     label:"Keep top N legs",            multi:false, fields:[{ key:"n",    label:"N",                placeholder:"e.g. 8" }] },
     { id:"oddscap",  label:"Shave to target odds",        multi:false, fields:[{ key:"odds", label:"Target max odds",  placeholder:"e.g. 5.00" }] },
     { id:"minprob",  label:"Drop legs below min prob %",  multi:false, fields:[{ key:"prob", label:"Min prob %",       placeholder:"e.g. 75" }] },
-    { id:"chunk",    label:"Split into N-leg tickets",    multi:true,  fields:[{ key:"n",    label:"Legs per ticket",  placeholder:"e.g. 5" }] },
+    { id:"chunk",    label:"Split into tickets (legs and/or odds)", multi:true,  fields:[
+        { key:"n",    label:"Max legs / ticket (optional)", placeholder:"e.g. 7" },
+        { key:"odds", label:"Max odds / ticket (optional)", placeholder:"e.g. 20" },
+      ] },
     { id:"probsplit",label:"Split by prob threshold",     multi:true,  fields:[{ key:"prob", label:"Threshold %",      placeholder:"e.g. 75" }] },
-    { id:"smart",    label:"Smart Split (auto tier A/B/C)",multi:true, fields:[{ key:"n",    label:"Max legs per sub-ticket", placeholder:"5 (default)" }] },
+    { id:"smart",    label:"Smart Split (auto tier A/B/C)",multi:true, fields:[
+        { key:"n",    label:"Max legs / sub-ticket (optional, 5 default)", placeholder:"5 default" },
+        { key:"odds", label:"Max odds / sub-ticket (optional)",            placeholder:"e.g. 30" },
+      ] },
   ];
 
   const runTrimMode = () => {
@@ -11111,12 +11290,21 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     if (!src) { setTrimError("Pick a ticket first."); return; }
     const ranked = trimRanked(src.legs);
     const num = (key) => parseFloat(trimInputs[key]);
-    const asResult = (legs, label) => ({ legs, label, totalOdds: trimOddsOf(legs) });
+    // BACKTEST-METHOD-TAG: every trim result now carries `method` (the stable
+    // TRIM_MODES id, e.g. "smart"/"topn") alongside the human `label`. This is
+    // what lets a ticket be saved with its trimming method attached, so the
+    // Backtest Evaluator can later group performance by method (Smart Split
+    // vs Top-N vs etc). See saveTicketInternal / "Add to Builder" handlers
+    // below, which copy trimMethod through onto the ticket object.
+    const asResult = (legs, label) => ({ legs, label, method: trimModeId, totalOdds: trimOddsOf(legs), saCoverage: trimSaCoverage(legs) });
+    // UX-FIX: selection defaults to "everything selected" so the old
+    // one-tap "add all" habit still works — see multi-select add UI below.
+    const commit = (arr) => { setTrimResult(arr); setSelectedTrimResults(new Set(arr.map((_, i) => i))); };
 
     if (trimModeId === "topn") {
       const n = parseInt(num("n"), 10);
       if (!n || n < 1) { setTrimError("Enter a valid N."); return; }
-      setTrimResult([asResult(ranked.slice(0, n), `Top ${n} legs`)]);
+      commit([asResult(ranked.slice(0, n), `Top ${n} legs`)]);
 
     } else if (trimModeId === "oddscap") {
       const target = num("odds");
@@ -11127,25 +11315,36 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setTrimError(`Even your single best leg (×${s[0].odds}) is over ×${target} — can't reach that target without dropping below 1 leg.`);
         return;
       }
-      setTrimResult([asResult(s, `Trimmed to ×${target} max`)]);
+      commit([asResult(s, `Trimmed to ×${target} max`)]);
 
     } else if (trimModeId === "minprob") {
       const minP = parseInt(num("prob"), 10);
       if (!minP || minP < 1) { setTrimError("Enter a valid min prob %."); return; }
       const kept = ranked.filter(l => l.conf == null || parseFloat(l.conf) >= minP);
       if (!kept.length) { setTrimError(`No legs meet ≥${minP}%. Try lower.`); return; }
-      setTrimResult([asResult(kept, `Prob ≥${minP}%`)]);
+      commit([asResult(kept, `Prob ≥${minP}%`)]);
 
     } else if (trimModeId === "chunk") {
-      const n = parseInt(num("n"), 10);
-      if (!n || n < 1) { setTrimError("Enter a valid legs-per-ticket."); return; }
-      const chunks = [];
-      for (let i = 0; i < ranked.length; i += n) chunks.push(ranked.slice(i, i + n));
-      if (chunks.length > 1 && chunks[chunks.length - 1].length < 2) {
-        const last = chunks.pop();
-        chunks[chunks.length - 1] = [...chunks[chunks.length - 1], ...last];
+      // FEATURE #4: legs-per-ticket AND/OR odds-per-ticket. At least one of
+      // the two must be supplied — with neither, there's nothing to size by.
+      const n       = parseInt(num("n"), 10) || null;
+      const oddsCap = num("odds") || null;
+      if (!n && !oddsCap) { setTrimError("Enter a max legs and/or max odds per ticket."); return; }
+      const groups = greedyOddsLegChunk(ranked, { maxLegs: n, maxOdds: oddsCap });
+      // Anti-orphan merge: fold a trailing 1-leg group into the previous one —
+      // but only if the merge doesn't itself breach whichever cap(s) are set.
+      // A genuinely oversized last leg (e.g. its odds alone exceed oddsCap)
+      // is left standing alone rather than forced into a group that breaks
+      // the very cap the user asked for.
+      if (groups.length > 1 && groups[groups.length - 1].length < 2) {
+        const last = groups[groups.length - 1];
+        const prevIdx = groups.length - 2;
+        const merged = [...groups[prevIdx], ...last];
+        const okLegs = !n || merged.length <= n;
+        const okOdds = !oddsCap || trimOddsOf(merged) <= oddsCap;
+        if (okLegs && okOdds) { groups.pop(); groups[prevIdx] = merged; }
       }
-      setTrimResult(chunks.map((legs, i) => asResult(legs, `Ticket ${i + 1}/${chunks.length}`)));
+      commit(groups.map((legs, i) => asResult(legs, `Ticket ${i + 1}/${groups.length}`)));
 
     } else if (trimModeId === "probsplit") {
       const p = parseInt(num("prob"), 10);
@@ -11156,20 +11355,34 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       if (hi.length) out.push(asResult(hi, `Prob ≥${p}%`));
       if (lo.length) out.push(asResult(lo, `Prob <${p}%`));
       if (!out.length) { setTrimError("Nothing to split."); return; }
-      setTrimResult(out);
+      commit(out);
 
     } else if (trimModeId === "smart") {
-      const max = parseInt(num("n"), 10) || 5;
-      const A = ranked.filter(l => trimScore(l) >= 75);
-      const B = ranked.filter(l => trimScore(l) >= 50 && trimScore(l) < 75);
+      // FEATURE #1 + #4: tiers are already ranked by trimScore, which blends
+      // probability with SA lift when SA data exists (see trimScore above) —
+      // this was already true, just not visible; saCoverage on each result
+      // (rendered in the card header) now surfaces it. Sub-ticket sizing
+      // within each tier now also accepts legs and/or odds, same as chunk.
+      const maxLegsInput = parseInt(num("n"), 10) || null;
+      const oddsCap      = num("odds") || null;
+      // Preserve old default (5 legs/sub-ticket) only when the user hasn't
+      // opted into odds-based sizing at all — otherwise let odds alone drive
+      // group size, per the "and/or" request.
+      const maxLegs = maxLegsInput || (oddsCap ? null : 5);
+      const A  = ranked.filter(l => trimScore(l) >= 75);
+      const B  = ranked.filter(l => trimScore(l) >= 50 && trimScore(l) < 75);
       const Cc = ranked.filter(l => trimScore(l) < 50);
       const out = [];
-      const chunk = (arr, lbl) => { for (let i = 0; i < arr.length; i += max) out.push(asResult(arr.slice(i, i + max), lbl)); };
-      chunk(A, "🔥 Tier A — Elite (≥75)");
-      chunk(B, "✅ Tier B — Solid (50-74)");
-      chunk(Cc, "⚠️ Tier C — Speculative (<50)");
+      const emit = (arr, lbl) => {
+        if (!arr.length) return;
+        const groups = greedyOddsLegChunk(arr, { maxLegs, maxOdds: oddsCap });
+        groups.forEach((legs, i) => out.push(asResult(legs, groups.length > 1 ? `${lbl} · ${i + 1}/${groups.length}` : lbl)));
+      };
+      emit(A, "🔥 Tier A — Elite (≥75)");
+      emit(B, "✅ Tier B — Solid (50-74)");
+      emit(Cc, "⚠️ Tier C — Speculative (<50)");
       if (!out.length) { setTrimError("Nothing to split."); return; }
-      setTrimResult(out);
+      commit(out);
     }
   };
 
@@ -12455,24 +12668,59 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   <span style={{ color:C.gold,fontWeight:800 }}>Tip:</span> Saved tickets appear here with their code. To trim a ticket you haven't saved yet, save it first from the Builder tab.
                 </div>
 
-                {/* Source picker */}
+                {/* Source picker — collapsed dropdown/sheet, not a flat dump.
+                    UX-FIX (2026-07-04, Alden feedback #2): with 15-100+ saved
+                    tickets the old flat button list was unusable. Now shows
+                    the current selection (or a placeholder) and expands into
+                    a scrollable, filterable sheet on tap. */}
                 <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>1. Pick a ticket</div>
-                <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:16 }}>
-                  {trimSources.map(s => {
-                    const on = trimSourceKey === s.key;
+                <div style={{ marginBottom:16 }}>
+                  {(() => {
+                    const selected = trimSources.find(s => s.key === trimSourceKey);
+                    const filtered = trimSources.filter(s => s.label.toLowerCase().includes(sourceFilter.toLowerCase()));
                     return (
-                      <button key={s.key} onClick={() => {
-                        setTrimSourceKey(s.key); setTrimResult(null); setTrimError(null);
-                      }} className="gb-ghost" style={{
-                        textAlign:"left", padding:"9px 12px", fontSize:10, fontWeight:700,
-                        color: on ? C.accent : C.text,
-                        background: on ? `${C.accent}10` : C.faint,
-                        borderColor: on ? `${C.accent}50` : C.border,
-                      }}>
-                        {s.label}
-                      </button>
+                      <>
+                        <button onClick={() => setSourcePickerOpen(o => !o)} className="gb-ghost" style={{
+                          width:"100%", textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between",
+                          padding:"10px 12px", fontSize:10, fontWeight:700,
+                          color: selected ? C.accent : C.text,
+                          background: selected ? `${C.accent}10` : C.faint,
+                          borderColor: selected ? `${C.accent}50` : C.border,
+                        }}>
+                          <span>{selected ? selected.label : `Select a ticket (${trimSources.length} available)`}</span>
+                          <span style={{ fontSize:9, opacity:.7, marginLeft:8, flexShrink:0 }}>{sourcePickerOpen ? "▲" : "▼"}</span>
+                        </button>
+                        {sourcePickerOpen && (
+                          <div style={{ border:`1px solid ${C.border}`, borderRadius:10, marginTop:6, overflow:"hidden", background:C.surface }}>
+                            {trimSources.length > 6 && (
+                              <input type="text" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}
+                                placeholder="Filter by code, ticket #, legs…" className="gi"
+                                style={{ width:"100%", padding:"9px 12px", fontSize:10, borderBottom:`1px solid ${C.border}`, boxSizing:"border-box" }} autoFocus />
+                            )}
+                            <div style={{ maxHeight:280, overflowY:"auto" }}>
+                              {filtered.length === 0 ? (
+                                <div style={{ padding:"14px 12px", fontSize:9, color:C.muted, textAlign:"center" }}>No tickets match "{sourceFilter}".</div>
+                              ) : filtered.map(s => {
+                                const on = trimSourceKey === s.key;
+                                return (
+                                  <button key={s.key} onClick={() => {
+                                    setTrimSourceKey(s.key); setTrimResult(null); setTrimError(null);
+                                    setSourcePickerOpen(false); setSourceFilter("");
+                                  }} style={{
+                                    display:"block", width:"100%", textAlign:"left", padding:"10px 12px", fontSize:10, fontWeight:700,
+                                    color: on ? C.accent : C.text, background: on ? `${C.accent}10` : "transparent",
+                                    border:"none", borderTop:`1px solid ${C.faint}`, cursor:"pointer",
+                                  }}>
+                                    {s.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </>
                     );
-                  })}
+                  })()}
                 </div>
 
                 {trimSourceKey && (
@@ -12533,13 +12781,42 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     {trimResult && (
                       <>
                         <div style={{ display:"flex",flexDirection:"column",gap:10,marginBottom:14 }}>
-                          {trimResult.map((r, ri) => (
-                            <div key={ri} style={{ background:C.surface,border:`1px solid ${C.accent}40`,borderRadius:12,padding:"10px 12px" }}>
-                              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-                                <span style={{ fontSize:10,fontWeight:800,color:C.accent }}>{r.label} · {r.legs.length} legs</span>
-                                <span style={{ fontSize:13,fontWeight:800,color:C.text }}>×{r.totalOdds}</span>
+                          {trimResult.map((r, ri) => {
+                            const isMulti = trimResult.length > 1;
+                            const checked = selectedTrimResults.has(ri);
+                            const toggleCard = () => setSelectedTrimResults(prev => {
+                              const next = new Set(prev); next.has(ri) ? next.delete(ri) : next.add(ri); return next;
+                            });
+                            const addOne = () => {
+                              setTickets(prev => [...prev, { id: Date.now() + ri, source:"card_add", legs: r.legs,
+                                totalOdds: r.totalOdds, stake: 0, exhausted: false, slotLabel: r.label,
+                                trimMethod: r.method || trimModeId, trimMethodLabel: r.label }]);
+                            };
+                            return (
+                            <div key={ri} style={{ background:C.surface,border:`1px solid ${checked||!isMulti?C.accent:C.faint}40`,borderRadius:12,padding:"10px 12px",opacity:isMulti&&!checked?0.55:1 }}>
+                              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8 }}>
+                                <div style={{ display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0 }}>
+                                  {/* UX-FIX #3: per-card checkbox — pick exactly which sub-tickets to add,
+                                      rather than all-or-nothing. Only shown when there's more than one card. */}
+                                  {isMulti && (
+                                    <input type="checkbox" checked={checked} onChange={toggleCard} style={{ flexShrink:0 }} />
+                                  )}
+                                  <span style={{ fontSize:10,fontWeight:800,color:C.accent,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{r.label} · {r.legs.length} legs</span>
+                                </div>
+                                <span style={{ fontSize:13,fontWeight:800,color:C.text,flexShrink:0 }}>×{r.totalOdds}</span>
                               </div>
-                              <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
+                              {/* FEATURE #1: SA-lift coverage — makes it visible, per card, whether
+                                  this ranking actually had Strategy Analyst data to blend in (dev log
+                                  #23's "Expected" outcome — verifiable at a glance, not just trusted). */}
+                              {r.saCoverage?.total > 0 && (
+                                <div style={{ fontSize:7,fontWeight:700,letterSpacing:".04em",marginBottom:7,
+                                              color: r.saCoverage.used > 0 ? C.accent : C.muted }}>
+                                  {r.saCoverage.used > 0
+                                    ? `SA lift applied to ${r.saCoverage.used}/${r.saCoverage.total} legs`
+                                    : `No SA pattern data for these legs — ranked on confidence only`}
+                                </div>
+                              )}
+                              <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:isMulti?8:0 }}>
                                 {r.legs.map((leg, i) => {
                                   // SA5: show SA lift badge if fixture data is available
                                   const fix = leg.fixtureId && fixtures?.find(f => String(f.id) === String(leg.fixtureId));
@@ -12560,15 +12837,27 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                   );
                                 })}
                               </div>
+                              {/* UX-FIX #3: standalone add for exactly this one sub-ticket — no need
+                                  to touch the checkbox/bulk flow for a quick single add. */}
+                              {isMulti && (
+                                <button onClick={() => { addOne(); setView("parlay"); scrollPanelToTop(); }}
+                                  className="gb-ghost" style={{ width:"100%",padding:"6px 0",fontSize:9,color:C.gold,borderColor:`${C.gold}40` }}>
+                                  + Add this one to Builder
+                                </button>
+                              )}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
 
                         {trimResult.length === 1 ? (
                           <div style={{ display:"flex",gap:6 }}>
                             <button onClick={() => {
                               setTickets(prev => [...prev, { id: Date.now(), source:"card_add", legs: trimResult[0].legs,
-                                totalOdds: trimResult[0].totalOdds, stake: 0, exhausted: false, slotLabel: trimResult[0].label }]);
+                                totalOdds: trimResult[0].totalOdds, stake: 0, exhausted: false, slotLabel: trimResult[0].label,
+                                // BACKTEST-METHOD-TAG: carried through saveTicketInternal's {...ticket} spread
+                                // so a saved ticket remembers which trim method produced it.
+                                trimMethod: trimResult[0].method || trimModeId, trimMethodLabel: trimResult[0].label }]);
                               setTrimResult(null); setView("parlay"); scrollPanelToTop();
                             }} className="gb-ghost" style={{ flex:1, padding:"7px 0", fontSize:10, color:C.gold, borderColor:`${C.gold}40` }}>
                               Add to Builder
@@ -12579,18 +12868,32 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                             </button>
                           </div>
                         ) : (
-                          <button onClick={() => {
-                            setTickets(prev => [
-                              ...prev,
-                              ...trimResult.map((r, ri) => ({
-                                id: Date.now() + ri, source:"card_add", legs: r.legs,
-                                totalOdds: r.totalOdds, stake: 0, exhausted: false, slotLabel: r.label,
-                              })),
-                            ]);
-                            setTrimResult(null); setView("parlay"); scrollPanelToTop();
-                          }} className="gb" style={{ width:"100%",padding:"10px 0",fontSize:11,fontWeight:800,color:C.bg,background:C.gold }}>
-                            Add all {trimResult.length} to Builder
-                          </button>
+                          // UX-FIX #3: bulk action now respects the checkboxes above instead of
+                          // being a forced all-or-nothing "Add all". Select All/None helpers included
+                          // since defaulting to "all selected" preserves the old one-tap behaviour.
+                          <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
+                            <div style={{ display:"flex",gap:12,fontSize:9,color:C.muted }}>
+                              <button onClick={() => setSelectedTrimResults(new Set(trimResult.map((_, i) => i)))} style={{ background:"none",border:"none",color:C.accent,cursor:"pointer",padding:0,fontSize:9,fontWeight:700 }}>Select All</button>
+                              <button onClick={() => setSelectedTrimResults(new Set())} style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",padding:0,fontSize:9,fontWeight:700 }}>Select None</button>
+                            </div>
+                            <button onClick={() => {
+                              const chosen = trimResult.filter((_, ri) => selectedTrimResults.has(ri));
+                              if (!chosen.length) return; // guarded by disabled state too
+                              setTickets(prev => [
+                                ...prev,
+                                ...chosen.map((r, ri) => ({
+                                  id: Date.now() + ri, source:"card_add", legs: r.legs,
+                                  totalOdds: r.totalOdds, stake: 0, exhausted: false, slotLabel: r.label,
+                                  // BACKTEST-METHOD-TAG: see single-result "Add to Builder" handler above.
+                                  trimMethod: r.method || trimModeId, trimMethodLabel: r.label,
+                                })),
+                              ]);
+                              setTrimResult(null); setView("parlay"); scrollPanelToTop();
+                            }} disabled={selectedTrimResults.size === 0} className="gb"
+                              style={{ width:"100%",padding:"10px 0",fontSize:11,fontWeight:800,color:selectedTrimResults.size===0?C.muted:C.bg,background:selectedTrimResults.size===0?C.faint:C.gold }}>
+                              Add Selected ({selectedTrimResults.size}/{trimResult.length}) to Builder
+                            </button>
+                          </div>
                         )}
                       </>
                     )}
