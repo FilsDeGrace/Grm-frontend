@@ -4050,6 +4050,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
   // Kickoff time filter — "before" (≤ HH:MM) or "after" (≥ HH:MM)
   const [kickoffFilter, setKickoffFilter] = useState(null); // null | { mode:"before"|"after", hour:number }
+  // PROB-FIX (2026-07-08): Pick-probability threshold filter — mirrors the kickoff
+  // filter's UX exactly (mode toggle + value buttons, not persisted to sessionStorage,
+  // same as kickoffFilter). Requested by Sterling to solve two related problems:
+  //   1. Pick market: "Select All" has no way to scope to only games ≥ some prob
+  //      (e.g. 75%) without this — previously it was all-or-nothing.
+  //   2. SA row: sorts by SA Lift descending, not probability, so games with high
+  //      lift but low probability sit above games with both. This filter doesn't
+  //      change the sort (lift order is intentional — that's the point of SA row),
+  //      but it narrows the list to a probability floor/ceiling first, so the
+  //      lift-sorted results you see all clear your probability bar too.
+  // Filters on `row.pick.prob` — the probability of whichever pick is actually
+  // displayed for that row (varies by family on the Pick market; is the SA
+  // market's own computed prob on SA rows) — not a raw f.markets.* field.
+  const [probFilter, setProbFilter] = useState(null); // null | { mode:"above"|"below", value:number }
 
   // ── SA Pattern mode (user-facing, collapsible) ────────────────────────
   // Separate from `family`: family picks WHICH market off a fixture's model
@@ -4530,6 +4544,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           if (kickoffFilter.mode === "before" && mins > filterMins) return false;
           if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
         }
+        // PROB-FIX: pick probability threshold — floor (above) or ceiling (below)
+        // on the actually-displayed pick's prob, so Select All can be scoped safely.
+        if (probFilter && row.pick?.prob != null) {
+          if (probFilter.mode === "above" && row.pick.prob < probFilter.value) return false;
+          if (probFilter.mode === "below" && row.pick.prob > probFilter.value) return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -4540,7 +4560,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         return 0; // maintain existing prob sort above
       });
-  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter]);
+  }, [fixtures, family, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
 
   // SA Pattern mode — separate list, only built when an admin has a market selected.
   // Reuses the same { f, pick } shape as `rows` so the existing row JSX renders it
@@ -4620,6 +4640,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           if (kickoffFilter.mode === "before" && mins > filterMins) return false;
           if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
         }
+        // PROB-FIX: pick probability threshold, same semantics as Pick-market rows
+        if (probFilter && row.pick?.prob != null) {
+          if (probFilter.mode === "above" && row.pick.prob < probFilter.value) return false;
+          if (probFilter.mode === "below" && row.pick.prob > probFilter.value) return false;
+        }
         return true;
       });
       if (sortActive.has("strong_first")) {
@@ -4658,6 +4683,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         })) continue;
         const _fbPickLabel = saMarket.replace(/^TB:/,""); const _fbPick = { label: _fbPickLabel, market: _fbPickLabel };
         if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_fbPick, f))) continue;
+        // PROB-FIX: pick probability threshold — this fallback branch (patterns
+        // 403/gated or empty) pre-existingly skips kickoffFilter and sortActive
+        // quality filters entirely (not touched here — flagged to Sterling,
+        // out of scope for this fix). Applying probFilter here anyway since
+        // that's this task and `prob` is already in scope.
+        if (probFilter) {
+          if (probFilter.mode === "above" && prob < probFilter.value) continue;
+          if (probFilter.mode === "below" && prob > probFilter.value) continue;
+        }
         const odds = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
         out.push({
           f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: C.accent },
@@ -4726,6 +4760,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (kickoffFilter.mode === "before" && mins > filterMins) return false;
         if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
       }
+      // PROB-FIX: pick probability threshold — narrows the lift-sorted list to a
+      // probability floor/ceiling without changing the lift sort order itself.
+      if (probFilter && row.pick?.prob != null) {
+        if (probFilter.mode === "above" && row.pick.prob < probFilter.value) return false;
+        if (probFilter.mode === "below" && row.pick.prob > probFilter.value) return false;
+      }
       return true;
     });
     if (sortActive.has("strong_first")) {
@@ -4736,7 +4776,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
 
   const displayRows = saMarket ? saRows : rows;
 
@@ -5200,6 +5240,60 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               {kickoffFilter.mode === "before"
                 ? `Showing games kicking off at or before ${String(kickoffFilter.hour).padStart(2,"0")}:00`
                 : `Showing games kicking off at or after ${String(kickoffFilter.hour).padStart(2,"0")}:00`}
+            </div>
+          )}
+        </div>
+        {/* PROB-FIX (2026-07-08): Pick probability filter — same UX pattern as
+            Kickoff time above. Works on both the Pick market list and SA row
+            (filters row.pick.prob in both `rows` and `saRows`). Lets you scope
+            Select All to only games clearing a probability floor, and lets SA
+            row's lift-sorted list be narrowed to also clear a probability bar. */}
+        <div style={{ marginTop:9 }}>
+          <div style={{ fontSize:8,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
+            Pick Probability
+            {probFilter && (
+              <button onClick={() => setProbFilter(null)}
+                style={{ marginLeft:8,fontSize:8,background:"none",border:"none",color:C.red,cursor:"pointer",padding:0,fontWeight:700 }}>
+                ✕ clear
+              </button>
+            )}
+          </div>
+          <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
+            {/* Mode toggle: Above / Below */}
+            {["above","below"].map(mode => {
+              const isActive = probFilter?.mode === mode;
+              return (
+                <button key={mode} onClick={() => setProbFilter(prev =>
+                  prev?.mode === mode ? null : { mode, value: prev?.value ?? 75 }
+                )} className="gb"
+                  style={{ padding:"4px 10px",fontSize:9,textTransform:"none",flexShrink:0,
+                           ...(isActive ? chipOn(C.accent) : chipOff) }}>
+                  {mode === "above" ? "≥ Above" : "≤ Below"}
+                </button>
+              );
+            })}
+            {/* Value selector — only shown when a mode is active */}
+            {probFilter && (
+              <div style={{ display:"flex",gap:4,flexWrap:"wrap" }}>
+                {[50,55,60,65,70,75,80,85,90,95].map(v => {
+                  const isOn = probFilter.value === v;
+                  return (
+                    <button key={v} onClick={() => setProbFilter(prev => ({ ...prev, value: v }))}
+                      className="gb"
+                      style={{ padding:"4px 8px",fontSize:9,textTransform:"none",flexShrink:0,
+                               ...(isOn ? chipOn(C.gold) : chipOff) }}>
+                      {v}%
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {probFilter && (
+            <div style={{ fontSize:8,color:C.muted,marginTop:4,lineHeight:1.5 }}>
+              {probFilter.mode === "above"
+                ? `Showing picks at or above ${probFilter.value}% probability`
+                : `Showing picks at or below ${probFilter.value}% probability`}
             </div>
           )}
         </div>
