@@ -31,6 +31,7 @@ import {
   ComboRow,
   FixtureBookNow,
   AskJarvis,
+  copyToClipboard,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
@@ -1640,9 +1641,48 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
   );
 }
 
-export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, backtestSummary }) {
+export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLegs, backtestSummary }) {
   const m         = f.markets;
   const scrollRef = useRef(null);
+
+  // A-FIX: Fixture Share — deep link to this fixture's Full Model Page.
+  // Link only (no copy-code, unlike ticket sharing) per audit decision.
+  const [justShared, setJustShared] = useState(false);
+  // FMP-FIX (2026-07-10): was `date || f.date` — `date` is the app's ambient
+  // active-viewing date, not necessarily this fixture's own date (e.g. a
+  // multi-date merged-in fixture viewed while a different date is active).
+  // Sharing should always describe the fixture being shared, so f.date now
+  // takes priority; `date` is only a fallback for the rare case f.date is
+  // missing.
+  const shareUrl = useCallback(() => {
+    const base = window.location.origin + window.location.pathname;
+    const shareDate = f.date || date || "";
+    return `${base}?match=${encodeURIComponent(f.id)}&date=${encodeURIComponent(shareDate)}`;
+  }, [f.id, f.date, date]);
+  const handleShare = useCallback(() => {
+    copyToClipboard(`Check out this GRM Full Model: ${shareUrl()}`, () => {
+      setJustShared(true);
+      setTimeout(() => setJustShared(false), 1800);
+    });
+  }, [shareUrl]);
+
+  // FMP-FIX (2026-07-10): the share link never showed up anywhere in the
+  // browser's own address bar — handleShare only ever copied it to the
+  // clipboard for someone ELSE to open. Now the URL bar reflects whichever
+  // fixture is currently open here too, so it's visible/copyable directly,
+  // and a page refresh while viewing an FMP lands back on the same fixture
+  // (via the ?match=&date= deep-link handling in App.jsx). Restores whatever
+  // URL was there before on close/unmount, same "don't leave the URL bar
+  // stuck on a stale FMP link" behavior the ?grm= and ?match= inbound
+  // handlers already use elsewhere.
+  useEffect(() => {
+    let prevUrl;
+    try { prevUrl = window.location.href; } catch { prevUrl = null; }
+    try { window.history.replaceState({}, "", shareUrl()); } catch {}
+    return () => {
+      if (prevUrl) { try { window.history.replaceState({}, "", prevUrl); } catch {} }
+    };
+  }, [f.id, f.date, date]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const draftLeg     = Array.isArray(draftLegs) ? draftLegs.find(l => l.fixtureId === f.id) : null;
   const inDraft      = !!draftLeg;
@@ -1708,6 +1748,29 @@ export default function FullModelPage({ f, onBack, onAddToParlay, draftLegs, bac
           </div>
           <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>{f.league}</div>
         </div>
+        <button
+          onClick={handleShare}
+          className="gb-ghost"
+          title="Copy a link to this fixture's Full Model"
+          style={{ padding: "7px 12px", fontSize: 11, display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
+                   color: justShared ? C.green : undefined }}>
+          {justShared ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+              Copied
+            </>
+          ) : (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>
+              </svg>
+              Share
+            </>
+          )}
+        </button>
         <StatusBadge state={f.state} time={f.time} minute={f.minute} />
       </div>
 

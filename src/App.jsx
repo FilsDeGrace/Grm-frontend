@@ -930,16 +930,72 @@ function recordBookedLegs(legs, ticketCode) {
   persistBookedLegs([...loadBookedLegs(), ...stamped]);
 }
 
+// 38-FIX: "unresolvable on bookmaker" tag — mirrors BOOKED_LEGS_KEY exactly,
+// stamped from the same book() handler that feeds recordBookedLegs, using the
+// same legBooked[]-derived confirmed/not-confirmed split (37-FIX) rather than
+// trying to parse data.failed's mixed shape.
+// Design note: the original spec (log #38) called for expiring a tag once the
+// leg's *kickoff time* has passed. Checked leg-construction sites across the
+// app (e.g. ~line 14667) — legs only carry a `date` (YYYY-MM-DD), never a
+// kickoff timestamp, so kickoff-precision expiry isn't buildable without
+// threading fixture.time through every leg-construction site first (a much
+// bigger, separate change). Shipping with date-level expiry instead: a tag
+// goes stale once its leg's `date` is in the past, which is coarser but safe
+// (never blocks a same-day rebook attempt) and needs no new data plumbing.
+const FAILED_LEGS_KEY = "grm_failed_legs_v1";
+function loadFailedLegs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FAILED_LEGS_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function persistFailedLegs(legs) {
+  try {
+    localStorage.setItem(FAILED_LEGS_KEY, JSON.stringify(legs.slice(-300)));
+  } catch {}
+}
+function recordFailedLegs(legs, ticketCode) {
+  if (!Array.isArray(legs) || !legs.length) return;
+  const stamped = legs
+    .filter(l => l.fixtureId || l.game)
+    .map(l => ({
+      fixtureId: l.fixtureId || l.game,
+      game:      l.game,
+      pick:      l.pick,
+      market:    l.market,
+      league:    l.league,
+      date:      l.date || null, // used for date-level expiry, see note above
+      ticketCode,
+      failedAt:  new Date().toISOString(),
+    }));
+  if (!stamped.length) return;
+  persistFailedLegs([...loadFailedLegs(), ...stamped]);
+}
+
 // P-FIX: a leg is correlated if it was already booked before (always checked —
 // real money risk, can't be toggled off), or — only when cross-ticket checking
 // is on — if it also shows up in another ticket the user currently has built
 // or saved. Two different games in the same league are NOT correlated; that
 // was the bug this replaces.
-function computeCorrelationRisks(ticket, { bookedLegs = [], otherTickets = [], crossCheckEnabled = false } = {}) {
+// 38-FIX: also flags a leg if it previously came back unresolvable from a
+// bookmaker (opt-in via unresolvableEnabled, off by default like cross-check),
+// unless that tag has gone stale (its leg's date is in the past — see the
+// date-level-expiry note on recordFailedLegs above).
+function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], otherTickets = [], crossCheckEnabled = false, unresolvableEnabled = false } = {}) {
   const legs = ticket?.legs || [];
   if (!legs.length) return [];
   const bookedByFixture = new Map();
   bookedLegs.forEach(b => { if (b.fixtureId && !bookedByFixture.has(b.fixtureId)) bookedByFixture.set(b.fixtureId, b); });
+
+  const today = todayStr();
+  const failedByFixture = new Map();
+  if (unresolvableEnabled) {
+    failedLegs.forEach(f => {
+      if (!f.fixtureId) return;
+      if (f.date && f.date < today) return; // expired — leg's date has passed
+      if (!failedByFixture.has(f.fixtureId)) failedByFixture.set(f.fixtureId, f);
+    });
+  }
 
   const risks = [];
   legs.forEach(l => {
@@ -948,6 +1004,12 @@ function computeCorrelationRisks(ticket, { bookedLegs = [], otherTickets = [], c
     const booked = bookedByFixture.get(fid);
     if (booked) {
       risks.push({ type:"booked", game: l.game || booked.game, pick: l.pick, bookedPick: booked.pick, ticketCode: booked.ticketCode });
+    }
+    if (unresolvableEnabled) {
+      const failed = failedByFixture.get(fid);
+      if (failed) {
+        risks.push({ type:"unresolvable", game: l.game || failed.game, pick: l.pick, ticketCode: failed.ticketCode });
+      }
     }
     if (crossCheckEnabled) {
       const match = otherTickets.find(t => t.id !== ticket.id && (t.legs||[]).some(ol => (ol.fixtureId || ol.game) === fid));
@@ -6417,14 +6479,38 @@ function TicketBookNowButton({ legs }) {
   const cr = C.cardRadius || 16;
   const br = C.btnRadius  || 12;
 
+  // 37-FIX: buildLegs() filters out invalid legs (missing home/away/pick/market)
+  // before anything is sent to the bookmaker, so `sl` (what's actually submitted)
+  // can be a *subset* of the `legs` prop — the two are no longer 1:1 by index once
+  // that filter drops anything. To correctly correlate the bookmaker's per-leg
+  // legBooked[] result (parallel to what IT received, i.e. to `sl`) back to the
+  // right entry in the original `legs` prop, we rebuild the same filtered list
+  // here but keep each entry's original index alongside it, instead of relying
+  // on position alone.
+  const buildLegsWithOrigIndex = () => {
+    const out = [];
+    (legs || []).forEach((leg, origIndex) => {
+      const home = leg.home || (leg.game || "").split(" vs ")[0]?.trim() || "";
+      const away = leg.away || (leg.game || "").split(" vs ")[1]?.trim() || "";
+      let mkt = leg.market || "";
+      if (!mkt || mkt === "Unknown") mkt = inferMarket(leg.pick || "");
+      if (mkt.startsWith("TeamTotal")) mkt = "TeamTotal";
+      const built = { home, away, market: mkt, pick: leg.pick || "" };
+      if (built.home && built.away && built.pick && built.market !== "Unknown") {
+        out.push({ leg: built, origIndex });
+      }
+    });
+    return out;
+  };
+
   const book = async () => {
-    const sl = buildLegs();
-    if (!sl.length) { setError("No valid legs to book"); return; }
+    const built = buildLegsWithOrigIndex();
+    if (!built.length) { setError("No valid legs to book"); return; }
     setBooking(true); setResult(null); setError(null);
     try {
       const res  = await fetch(`${SERVER}${selectedBookie.api}`, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ legs: sl }),
+        body: JSON.stringify({ legs: built.map(b => b.leg) }),
       });
       // S6-FIX: bookmaker APIs (SportyBet, Duel, LL) may return plain text or HTML on
       // errors rather than JSON. Always read as text first, parse safely — never let
@@ -6439,7 +6525,27 @@ function TicketBookNowButton({ legs }) {
       // P-FIX: this is the one and only place correlation tracking gets fed —
       // a real, successful bookmaker booking. Building or saving a ticket
       // never reaches here.
-      if (data?.code) recordBookedLegs(legs, data.code);
+      // 37-FIX: only record legs that were (a) actually submitted — excludes
+      // anything buildLegsWithOrigIndex already dropped as invalid — AND
+      // (b) confirmed booked by data.legBooked[i]. If the bookmaker response
+      // doesn't include legBooked (e.g. LuckyLedger, not currently fixed —
+      // discontinued, per Sterling), fall back to the prior (imprecise)
+      // behavior of recording everything submitted, rather than silently
+      // recording nothing for that bookmaker.
+      if (data?.code) {
+        const confirmedLegs = Array.isArray(data.legBooked)
+          ? built.filter((b, i) => data.legBooked[i]).map(b => legs[b.origIndex]).filter(Boolean)
+          : built.map(b => legs[b.origIndex]).filter(Boolean);
+        recordBookedLegs(confirmedLegs, data.code);
+        // 38-FIX: same split, inverted — legs that were submitted but NOT
+        // confirmed booked get tagged unresolvable. Only possible when
+        // legBooked is present (SportyBet/Duel) — skipped for LuckyLedger,
+        // consistent with 37-FIX not touching LL either.
+        if (Array.isArray(data.legBooked)) {
+          const notBookedLegs = built.filter((b, i) => !data.legBooked[i]).map(b => legs[b.origIndex]).filter(Boolean);
+          recordFailedLegs(notBookedLegs, data.code);
+        }
+      }
     } catch(e) {
       const msg = e.message || "";
       setError(
@@ -7931,7 +8037,7 @@ function TicketActions({ ticket, onRemove, onEditDraft, onAddLegs, onRemix, remi
   );
 }
 
-function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false, parleyEntryPulse = 0, claimAutoOpen, onRemoveLegFromOther }) {
+function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, isJarvis, onOpenFixture, onSaveInternal, savedCode, remixing = false, onEditDraft, onAddLegs, otherTickets = [], crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0, claimAutoOpen, onRemoveLegFromOther }) {
   const [stakeInput, setStakeInput] = useState(ticket.stake > 0 ? String(ticket.stake) : "");
   const stake      = parseFloat(stakeInput) || 0;
   const potential  = parseFloat((stake * parseFloat(ticket.totalOdds)).toFixed(2));
@@ -7957,9 +8063,13 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
   // loadBookedLegs() (already called fresh inside the factory) with an
   // up-to-date result.
   const [bookedLegsVersion, setBookedLegsVersion] = useState(0);
+  // 38-FIX: same reasoning as bookedLegsVersion above — mirrors it exactly,
+  // separate counter so clearing an unresolvable tag doesn't need to fake-bump
+  // the booked-flag one (and vice versa).
+  const [failedLegsVersion, setFailedLegsVersion] = useState(0);
   const corrRisks = useMemo(
-    () => computeCorrelationRisks(ticket, { bookedLegs: loadBookedLegs(), otherTickets, crossCheckEnabled }),
-    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled, bookedLegsVersion]
+    () => computeCorrelationRisks(ticket, { bookedLegs: loadBookedLegs(), failedLegs: loadFailedLegs(), otherTickets, crossCheckEnabled, unresolvableEnabled: unresolvableTagEnabled }),
+    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled, unresolvableTagEnabled, bookedLegsVersion, failedLegsVersion]
   );
   const hasCorr = corrRisks.length > 0;
 
@@ -8121,6 +8231,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                       <div style={{ marginBottom:7 }}>
                         {r.type === "booked"
                           ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked ({r.bookedPick}). This leg: {r.pick}.</>
+                          : r.type === "unresolvable"
+                          ? <><span style={{ color:C.amber, fontWeight:700 }}>Unresolvable on bookmaker</span> — <em>{r.game}</em> came back unbookable last time you tried this leg today.</>
                           : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
                         }
                       </div>
@@ -8146,6 +8258,20 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                             style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
                                      background:"transparent", border:`1px solid ${C.muted}40`, color:C.muted }}>
                             Clear booked flag
+                          </button>
+                        )}
+                        {/* 38-FIX: clear the unresolvable record so it's no longer flagged */}
+                        {r.type === "unresolvable" && (
+                          <button onClick={() => {
+                            const updated = loadFailedLegs().filter(f =>
+                              !(f.game === r.game || (f.fixtureId && ticket.legs.find(l => l.game === r.game && l.fixtureId === f.fixtureId)))
+                            );
+                            persistFailedLegs(updated);
+                            setFailedLegsVersion(v => v + 1);
+                          }}
+                            style={{ fontSize:8, fontWeight:700, padding:"4px 9px", borderRadius:6, cursor:"pointer",
+                                     background:"transparent", border:`1px solid ${C.muted}40`, color:C.muted }}>
+                            Clear unresolvable flag
                           </button>
                         )}
                         {/* For session risks — remove this leg from the OTHER ticket */}
@@ -10819,7 +10945,7 @@ function ParlayExplainer() {
         {tab === "modes" && (
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
             <div style={{ fontSize:9, color:C.muted, lineHeight:1.65, marginBottom:4 }}>
-              Jarvis tickets are <span style={{ color:C.accent, fontWeight:700 }}>pre-built by the TA engine</span> before kickoff — not generated on demand. The engine uses learned patterns from Data Analysis (DA) and Situational Analysis (SA) to select and rank legs. You see the result when you open the Jarvis tab.
+              Jarvis tickets are <span style={{ color:C.accent, fontWeight:700 }}>pre-built by the TA engine</span> before kickoff — not generated on demand. The engine uses learned patterns from Deep Analyst (DA) and Strategy Analyst (SA) to select and rank legs. You see the result when you open the Jarvis tab.
             </div>
             <div style={{ fontSize:8, color:C.muted, marginTop:4, lineHeight:1.6 }}>
               The engine exports one ticket per mode each day. Past dates show WIN/LOSS/PENDING per leg once results are in.
@@ -10981,9 +11107,9 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   }
 
   // ── Strategy label + rationale — derived from TA signal data ───────────────
-  // DA  = Directional Accuracy: how often this exact market+context has landed
+  // DA  = Deep Analyst: how often this exact market+context has landed
   //        historically in GRM's learned data. High DA = pattern has real backing.
-  // SA  = Situational Agreement: separate pattern engine that checks team form,
+  // SA  = Strategy Analyst: separate pattern engine that checks team form,
   //        fixture context, and market behaviour. SA patterns confirm the pick
   //        from a different angle. DA + SA together = two independent signals agree.
   const getStrategyLabel = (strat, idx) => {
@@ -11005,7 +11131,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     else if (hasDA && isGoals)       name = "Goals Backed";
     else if (hasDA)                  name = "Pattern Backed";
     else if (hasSA && isDC)          name = "Draw Cover";
-    else if (hasSA)                  name = "Situational Pick";
+    else if (hasSA)                  name = "Strategy Pick";
     else if (isDC)                   name = "Safety Net";
     else if (dom.includes("under"))  name = "Under Pick";
     else if (dom.includes("over"))   name = "Goals Over";
@@ -11252,7 +11378,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, parleyEntryPulse = 0 }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0 }) {
   // Only the first ticket card (in render order) that actually has a leg-risk
   // flag should auto-open its explainer on entry — otherwise every flagged
   // ticket would pop its panel open simultaneously, which is just noise.
@@ -11470,6 +11596,20 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const emit = (arr, lbl) => {
         if (!arr.length) return;
         const groups = greedyOddsLegChunk(arr, { maxLegs, maxOdds: oddsCap });
+        // 39-FIX: port chunk's anti-orphan-merge (line ~11559 above) into smart's
+        // per-tier grouping — a tier that tails off into a 1-leg group folds into
+        // the previous group *within that same tier*, same guard rails (don't
+        // merge if it would breach whichever cap is set). Tier partitioning
+        // itself (A/B/C before odds-capping) stays as-is per the 2026-07-09
+        // decision — this only fixes the orphan-group inconsistency vs `chunk`.
+        if (groups.length > 1 && groups[groups.length - 1].length < 2) {
+          const last = groups[groups.length - 1];
+          const prevIdx = groups.length - 2;
+          const merged = [...groups[prevIdx], ...last];
+          const okLegs = !maxLegs || merged.length <= maxLegs;
+          const okOdds = !oddsCap || trimOddsOf(merged) <= oddsCap;
+          if (okLegs && okOdds) { groups.pop(); groups[prevIdx] = merged; }
+        }
         groups.forEach((legs, i) => out.push(asResult(legs, groups.length > 1 ? `${lbl} · ${i + 1}/${groups.length}` : lbl)));
       };
       emit(A, "🔥 Tier A — Elite (≥75)");
@@ -12266,6 +12406,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   savedCode={savedCodes[ticketContentKey(draftTicket)]}
                   otherTickets={corrOtherTickets}
                   crossCheckEnabled={crossCheckEnabled}
+                  unresolvableTagEnabled={unresolvableTagEnabled}
                   parleyEntryPulse={parleyEntryPulse}
                   claimAutoOpen={claimAutoOpen}
                   onRemoveLegFromOther={(ticketId, legIdx) =>
@@ -12567,6 +12708,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       savedCode={savedCodes[ticketContentKey(t)]}
                       otherTickets={corrOtherTickets}
                       crossCheckEnabled={crossCheckEnabled}
+                      unresolvableTagEnabled={unresolvableTagEnabled}
                       parleyEntryPulse={parleyEntryPulse}
                       claimAutoOpen={claimAutoOpen}
                       onEditDraft={legs => {
@@ -14352,13 +14494,19 @@ function GRMProInner() {
 
   // A-FIX: ?match=<fixtureId>&date=<date> — Fixture Share deep link (Full Model
   // Page for a single fixture, independent of the ?grm= ticket flow above).
-  // Reuses the same loadSnapshot plumbing the GRM ticket link already uses.
-  // Two-step: (1) capture the params + kick off the snapshot load, (2) once
-  // `fixtures`/`date` actually reflect that snapshot, look the fixture up.
+  // FMP-FIX (2026-07-10): was using loadSnapshot, which wholesale-replaces
+  // `fixtures` AND switches the app's active `date` to the shared date — so
+  // opening someone else's link silently changed your whole current view,
+  // not just opened one fixture. Switched to mergeDate: adds the shared
+  // date's fixtures alongside whatever's already loaded, active `date` is
+  // left untouched (same "load silently, add it" behavior the multi-date
+  // calendar's long-press already uses).
+  // Two-step: (1) capture the params + kick off the merge, (2) once
+  // `fixtures` actually contains the merged date, look the fixture up.
   // Split into two effects (rather than reading fixtures right after the
-  // await) because loadSnapshot's setFixtures/setDate are async state
-  // updates — the `fixtures` closed over here would still be stale
-  // immediately after awaiting loadSnapshot.
+  // await) because mergeDate's setFixtures is an async state update — the
+  // `fixtures` closed over here would still be stale immediately after
+  // awaiting mergeDate.
   const [pendingFmpDeepLink, setPendingFmpDeepLink] = useState(null); // { matchId, date } | null
   const [fmpDeepLinkMiss, setFmpDeepLinkMiss] = useState(null);       // { matchId, date, reason } | null
   useEffect(() => {
@@ -14376,24 +14524,26 @@ function GRMProInner() {
     if (!pendingFmpDeepLink) return;
     let cancelled = false;
     (async () => {
-      const ok = await loadSnapshot(pendingFmpDeepLink.date);
+      const ok = await mergeDate(pendingFmpDeepLink.date);
       if (!ok && !cancelled) {
         setFmpDeepLinkMiss({ ...pendingFmpDeepLink, reason: "snapshot" });
         setPendingFmpDeepLink(null);
       }
-      // If ok, the effect below resolves the lookup once fixtures/date catch up.
+      // If ok, the effect below resolves the lookup once fixtures catch up.
     })();
     return () => { cancelled = true; };
   }, [pendingFmpDeepLink]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pendingFmpDeepLink) return;
-    if (date !== pendingFmpDeepLink.date) return;   // snapshot for this date hasn't landed yet
-    if (!fixtures.length) return;                    // still loading
+    // FMP-FIX: was gated on `date === pendingFmpDeepLink.date`, which never
+    // becomes true anymore now that mergeDate doesn't touch `date`. Gate on
+    // the merged date actually being present in `fixtures` instead.
+    if (!fixtures.some(fx => fx.date === pendingFmpDeepLink.date)) return; // merge hasn't landed yet
     const found = fixtures.find(x => String(x.id) === String(pendingFmpDeepLink.matchId));
     if (found) setMainFocusFixture(found);
     else setFmpDeepLinkMiss({ ...pendingFmpDeepLink, reason: "fixture" });
     setPendingFmpDeepLink(null);
-  }, [fixtures, date, pendingFmpDeepLink]);
+  }, [fixtures, pendingFmpDeepLink]);
 
   // P16-FIX: Body scroll lock when overlay is open.
   // overscrollBehavior:contain on the overlay div is not enough on iOS/Android —
@@ -14542,6 +14692,15 @@ function GRMProInner() {
   useEffect(() => {
     try { localStorage.setItem("grm_corr_cross_check_v1", corrCrossCheckEnabled ? "1" : "0"); } catch {}
   }, [corrCrossCheckEnabled]);
+  // 38-FIX: "unresolvable on bookmaker" tag toggle — same opt-in-off pattern
+  // as cross-check above, deliberately separate storage key/state so the two
+  // can be toggled independently.
+  const [unresolvableTagEnabled, setUnresolvableTagEnabled] = useState(() => {
+    try { return localStorage.getItem("grm_unresolvable_tag_v1") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("grm_unresolvable_tag_v1", unresolvableTagEnabled ? "1" : "0"); } catch {}
+  }, [unresolvableTagEnabled]);
   const DRAFT_KEY = "grm_draft_legs";
   const [draftLegs, setDraftLegs] = useState(() => {
     try {
@@ -15940,6 +16099,45 @@ function GRMProInner() {
                 </button>
               </FilterSection>
 
+              {/* 38-FIX: unresolvable-on-bookmaker toggle — off by default,
+                  mirrors the cross-check toggle immediately above it. */}
+              <FilterSection title="Unresolvable" summary={unresolvableTagEnabled ? "Tag on" : "Tag off"} badge={unresolvableTagEnabled ? 1 : 0}>
+                <button onClick={() => setUnresolvableTagEnabled(v => !v)}
+                  style={{
+                    width:"100%", padding:"10px 14px",
+                    borderRadius:10, cursor:"pointer", fontFamily:C.font,
+                    background: unresolvableTagEnabled ? `${C.amber}12` : "transparent",
+                    border:`1px solid ${unresolvableTagEnabled ? C.amber : C.border}`,
+                    display:"flex", alignItems:"center", gap:10,
+                    transition:"all .15s",
+                  }}>
+                  <div style={{
+                    width:34, height:20, borderRadius:10, flexShrink:0,
+                    background: unresolvableTagEnabled ? C.amber : C.faint,
+                    border:`1px solid ${unresolvableTagEnabled ? C.amber : C.border}`,
+                    position:"relative", transition:"background .2s",
+                  }}>
+                    <div style={{
+                      position:"absolute", top:2,
+                      left: unresolvableTagEnabled ? 16 : 2,
+                      width:14, height:14, borderRadius:"50%",
+                      background: unresolvableTagEnabled ? C.accentText : C.muted,
+                      transition:"left .2s",
+                      boxShadow:"0 1px 3px rgba(0,0,0,.2)",
+                    }}/>
+                  </div>
+                  <div style={{ textAlign:"left", flex:1 }}>
+                    <div style={{ fontSize:10, fontWeight:800,
+                      color: unresolvableTagEnabled ? C.amber : C.text }}>
+                      Unresolvable-on-Bookmaker Tag
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
+                      Flag a leg if it previously came back unbookable on this bookmaker today. Clears automatically once its date passes.
+                    </div>
+                  </div>
+                </button>
+              </FilterSection>
+
               {/* Admin controls */}
               {adminMode && (
                 <FilterSection title="Admin" summary="Refresh tools" defaultOpen>
@@ -16556,6 +16754,7 @@ function GRMProInner() {
             setActiveTab("live");
           }}
           crossCheckEnabled={corrCrossCheckEnabled}
+          unresolvableTagEnabled={unresolvableTagEnabled}
           parleyEntryPulse={parleyEntryPulse}
         />
       )}
