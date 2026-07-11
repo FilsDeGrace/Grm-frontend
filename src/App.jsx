@@ -2553,7 +2553,7 @@ const IcoCheckSm = ({size=9,col}) => (
   </svg>
 );
 
-export function StatusBadge({ state, time, minute }) {
+export function StatusBadge({ state, time, minute, date }) {
   const s = (state || "").toLowerCase().replace(/[_\-\s]/g, "");
   // Live / in-play states
   if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
@@ -2586,9 +2586,15 @@ export function StatusBadge({ state, time, minute }) {
     return <span style={{ fontSize:8,color:C.amber,fontWeight:700,letterSpacing:".1em" }}>{lbl}</span>;
   }
   // Default: kick-off time with clock icon
+  // 3.1-FIX: date was never shown here, only time — so a fixture loaded from
+  // another date (multi-date calendar, FMP deep links, the +/- kickoff-window
+  // buffer) looked identical to a same-day one. Only shown when it isn't
+  // today, to avoid cluttering the common single-date case.
+  const dateLabel = date && date !== todayStr() ? fmtDateLabel(date) : null;
   return (
     <span style={{ display:"inline-flex",alignItems:"center",gap:3,fontSize:9,color:C.text }}>
       <IcoClock col={C.muted} size={8}/>
+      {dateLabel && <span style={{ color:C.muted, fontWeight:700 }}>{dateLabel}&nbsp;·&nbsp;</span>}
       {time}
     </span>
   );
@@ -3784,7 +3790,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
               In Draft
             </span>
           )}
-          <StatusBadge state={displayF.state} time={f.time} minute={displayF.minute} />
+          <StatusBadge state={displayF.state} time={f.time} minute={displayF.minute} date={f.date} />
           {displayF.hGoals != null && (
             <span style={{ fontSize:12, fontWeight:800, color:C.text,
                            padding:"1px 8px", background:C.surface, borderRadius:5 }}>
@@ -4112,7 +4118,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
                 <div style={{ fontSize:8,color:C.text }}>{f.teams.home} vs {f.teams.away} · {f.league}</div>
               </div>
               <div style={{ fontSize:8,color:C.text,textAlign:"center" }}>
-                <StatusBadge state={f.state} time={f.time} minute={f.minute} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
               </div>
               <span style={{ fontSize:13,fontWeight:800,color:C.radar }}>{Math.round(e.prob)}%</span>
               <span style={{ fontSize:10,fontWeight:700,color:C.text,textAlign:"right" }}>
@@ -5702,7 +5708,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ minWidth:0 }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
                 <div style={{ fontSize:8,color:C.text,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
-                  <StatusBadge state={f.state} time={f.time} minute={f.minute} />
+                  <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
                 </div>
                 <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4 }}>
@@ -5761,7 +5767,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 </div>
               </div>
               <div style={{ alignSelf:"center",fontSize:9,color:C.text }}>
-                <StatusBadge state={f.state} time={f.time} minute={f.minute} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
               </div>
               <div style={{ alignSelf:"center" }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
@@ -7303,7 +7309,9 @@ function FixtureSearchDropdown({ fixtures, selectedFixture, onSelect, placeholde
             <button key={f.id} onClick={() => { onSelect(f); setOpen(false); setQuery(""); }} className="gb"
               style={{ width:"100%",textAlign:"left",padding:"8px 12px",background:"transparent",border:"none",borderBottom:`1px solid ${C.faint}`,color:C.text,fontSize:10,fontWeight:600,borderRadius:0,letterSpacing:0,textTransform:"none",cursor:"pointer" }}>
               <div style={{ lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
-              <div style={{ fontSize:7,color:C.text,marginTop:1 }}>{f.league} · {f.time}</div>
+              <div style={{ fontSize:7,color:C.text,marginTop:1 }}>
+                {f.league} · {f.date && f.date !== todayStr() ? `${fmtDateLabel(f.date)} · ` : ""}{f.time}
+              </div>
             </button>
           ))}
         </div>
@@ -8227,6 +8235,12 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               ? <span style={{ fontSize:11,fontWeight:800,color:accentColor }}>{ticket.slotLabel}</span>
               : <span style={{ fontSize:11,fontWeight:800,color:accentColor }}>Ticket #{ticket.id}</span>;
           })()}
+          {/* 2-FIX: the "N built tickets · M legs" line above the list is an
+              aggregate — doesn't tell you how those legs split across tickets.
+              Each ticket now shows its own count too. */}
+          <span style={{ fontSize:10, fontWeight:700, color:C.muted }}>
+            · {ticket.legs.length} leg{ticket.legs.length !== 1 ? "s" : ""}
+          </span>
           {exhausted && (
             <span className="grm-chip" style={{ color:C.amber,borderColor:`${C.amber}40`,background:C.amberDim }}>
               ⚠ Exhausted
@@ -9079,17 +9093,33 @@ function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onS
           it, still ahead of the Countries/Leagues stat row, sidesteps whatever
           was clipping the header-adjacent area specifically. */}
       {setLeagueFilterMode && (
-        <div style={{ display:"flex", borderRadius:8, overflow:"hidden",
-                      border:`1px solid ${C.border}`, marginBottom:10 }}>
-          {[["include","Only selected"],["exclude","Exclude selected"]].map(([m,l]) => (
-            <button key={m} onClick={() => setLeagueFilterMode(m)}
-              style={{ flex:1, padding:"8px 0", fontSize:9, fontWeight:800, cursor:"pointer",
-                       fontFamily:C.font, border:"none",
-                       background: leagueFilterMode === m ? C.accentDim : "transparent",
-                       color: leagueFilterMode === m ? C.accent : C.muted }}>
-              {l}
-            </button>
-          ))}
+        <div style={{ marginBottom:10 }}>
+          {/* Discoverability fix: the segmented control alone didn't read as
+              "tap to switch modes" to a first-time user — it just looked like
+              two static labels. A named micro-label above it (matching the
+              Countries/Leagues stat style below) plus a plain-English caption
+              that updates with the active mode make both the control's
+              purpose and its current effect obvious without extra taps. */}
+          <div style={{ fontSize:8, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:700, marginBottom:5 }}>
+            League Filter Mode
+          </div>
+          <div style={{ display:"flex", borderRadius:8, overflow:"hidden",
+                        border:`1px solid ${C.border}` }}>
+            {[["include","Only selected"],["exclude","Exclude selected"]].map(([m,l]) => (
+              <button key={m} onClick={() => setLeagueFilterMode(m)}
+                style={{ flex:1, padding:"8px 0", fontSize:9, fontWeight:800, cursor:"pointer",
+                         fontFamily:C.font, border:"none",
+                         background: leagueFilterMode === m ? C.accentDim : "transparent",
+                         color: leagueFilterMode === m ? C.accent : C.muted }}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize:9, color:C.muted, marginTop:5, lineHeight:1.4 }}>
+            {leagueFilterMode === "exclude"
+              ? "Showing every league EXCEPT the ones you pick below."
+              : "Showing ONLY the leagues you pick below."}
+          </div>
         </div>
       )}
 
@@ -11515,6 +11545,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     return true;
   }, []);
   const [view, setView] = useState("parlay");
+  // 18-FIX: brief highlight on the draft ticket right after Edit Legs copies
+  // a built ticket into it, so there's a clear visual confirmation of what
+  // just happened and where to look — previously the draft just silently
+  // updated with no signal at all.
+  const [draftJustCopied, setDraftJustCopied] = useState(false);
 
   // ── TRIM / SPLIT ──────────────────────────────────────────────────────────
   // Ported from trimmer.mjs (your terminal tool) — same mode set, same
@@ -12518,7 +12553,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         {view === "parlay" && (
           <>
             {draftTicket && (
-              <div style={{ marginBottom:16 }}>
+              <div style={{
+                marginBottom:16, borderRadius:14,
+                animation: draftJustCopied ? "draftCopiedPulse 1.4s ease-out" : "none",
+              }}>
                 <div style={{ fontSize:9,color:C.gold,fontWeight:800,textTransform:"uppercase",letterSpacing:".12em",marginBottom:8,display:"flex",alignItems:"center",gap:5 }}>
                   {/* N14b-FIX: SVG replaces 📝 emoji — emoji renders inconsistently across Android versions */}
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -12854,6 +12892,14 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                         // this the user stays wherever they were scrolled and the
                         // new draft looks like it never appeared.
                         scrollPanelToTop();
+                        // 18-FIX: brief highlight so it's obvious what just landed
+                        // in the draft slot. Reset first (in case of rapid repeats)
+                        // so the animation always restarts cleanly.
+                        setDraftJustCopied(false);
+                        requestAnimationFrame(() => {
+                          setDraftJustCopied(true);
+                          setTimeout(() => setDraftJustCopied(false), 1400);
+                        });
                       }}
                       onAddLegs={{ fixtures: parlayFixtures, addLeg: (f, pick) => {
                         // Append a new leg directly to this ticket — no draft copy needed.
@@ -14081,6 +14127,11 @@ function JarvisFAB({ C, isDesktop, onClick }) {
         }
         @keyframes grm-fade-in { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
         @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+        @keyframes draftCopiedPulse{
+          0%{ box-shadow:0 0 0 0 ${C.gold}00; background-color:${C.gold}00; }
+          15%{ box-shadow:0 0 0 3px ${C.gold}55; background-color:${C.gold}18; }
+          100%{ box-shadow:0 0 0 0 ${C.gold}00; background-color:${C.gold}00; }
+        }
       `}</style>
 
       {/* Single wrapper div — this is the ONLY element that owns position.
@@ -14512,6 +14563,15 @@ function GRMProInner() {
     return [...seen].sort();
   }, [fixtures]);
   const isMultiDate = dateStack.length > 1;
+  // 3-FIX: date pills in the tab row (All | Engine | Custom | <dates>) — jump-
+  // to-date, doesn't change the active date (kept consistent with 3.2's fix:
+  // merged-in dates shouldn't silently become "active" just from being
+  // visible/tapped).
+  const [dateOverflowOpen, setDateOverflowOpen] = useState(false);
+  const scrollToDateSep = (d) => {
+    setDateOverflowOpen(false);
+    document.getElementById(`date-sep-${d}`)?.scrollIntoView({ behavior:"smooth", block:"start" });
+  };
   const fixturesRef = useRef([]);
   useEffect(() => { fixturesRef.current = fixtures; }, [fixtures]);
   const [loading, setLoadingState] = useState(false);
@@ -15144,7 +15204,16 @@ function GRMProInner() {
               const capturedDate = date; // hoist so startAutoRefresh and pool save share same value
               // SA5-FIX: inject SA pattern scores at load time so all features
               // (Trim, SA Admin Row) work from the same enriched dataset.
-              const _fd1 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate); setFixtures(_fd1); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
+              // 3.2-FIX: was setFixtures(_fd1) — a full wholesale replace of the
+              // whole `fixtures` pool with just this one date's data. Since this
+              // runs on every 90s auto-refresh tick, it silently dropped ANY
+              // other date merged in via mergeDate (multi-date calendar, FMP
+              // deep links) — past, present, or future, whichever wasn't the
+              // currently active `date`. Now replaces only this date's own
+              // slice of the pool, same pattern mergeDate itself already uses.
+              const _fd1 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate);
+              setFixtures(prev => [...prev.filter(f => f.date !== capturedDate), ..._fd1]);
+              safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
               // existed in the sync 200 path. This caused results to never auto-inject
               // after the first fetch (pipeline always returns 202 on a fresh date).
@@ -15182,7 +15251,10 @@ function GRMProInner() {
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores (sync 200 path)
-      const _fd2 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date); setFixtures(_fd2); safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
+      const _fd2 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date);
+      // 3.2-FIX: same reasoning as the async path above.
+      setFixtures(prev => [...prev.filter(f => f.date !== date), ..._fd2]);
+      safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
       startAutoRefresh(date);
 
       if (json.legacySchema) setLegacySnapshot(true);
@@ -16080,6 +16152,47 @@ function GRMProInner() {
                   {t.label}
                 </button>
               ))}
+              {/* 3-FIX: date pills — only shown when more than one date is
+                  actually loaded (isMultiDate). Tapping one scrolls to that
+                  date's section in the list below; doesn't touch `date`
+                  (the active date for Parley/Rollover) at all. */}
+              {isMultiDate && (
+                <>
+                  {dateStack.slice(0, 2).map(d => (
+                    <button key={d} onClick={() => scrollToDateSep(d)} className="grm-pill">
+                      {d === todayStr() ? "Today" : fmtDateLabel(d)}
+                    </button>
+                  ))}
+                  {dateStack.length > 2 && (
+                    <div style={{ position:"relative" }}>
+                      <button onClick={() => setDateOverflowOpen(v => !v)} className="grm-pill">
+                        +{dateStack.length - 2} more ▾
+                      </button>
+                      {dateOverflowOpen && (
+                        <>
+                          <div onClick={() => setDateOverflowOpen(false)}
+                            style={{ position:"fixed", inset:0, zIndex:8998 }}/>
+                          <div style={{
+                            position:"absolute", top:"calc(100% + 6px)", left:0, zIndex:8999,
+                            background:C.modalBg, border:`1px solid ${C.border}`, borderRadius:10,
+                            boxShadow:"0 8px 24px rgba(0,0,0,.4)", padding:6, minWidth:140,
+                            display:"flex", flexDirection:"column", gap:2,
+                          }}>
+                            {dateStack.slice(2).map(d => (
+                              <button key={d} onClick={() => scrollToDateSep(d)}
+                                style={{ textAlign:"left", padding:"8px 10px", borderRadius:7,
+                                         background:"transparent", border:"none", cursor:"pointer",
+                                         fontFamily:C.font, fontSize:11, fontWeight:700, color:C.text }}>
+                                {d === todayStr() ? "Today" : fmtDateLabel(d)}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Row 3 — Search + Filter utility strip */}
@@ -16655,9 +16768,10 @@ function GRMProInner() {
                       return (
                         <React.Fragment key={f.id}>
                           {showDateSep && (
-                            <div style={{
+                            <div id={`date-sep-${f.date}`} style={{
                               gridColumn:"1 / -1", display:"flex", alignItems:"center", gap:10,
                               padding: fIdx===0 ? "0 0 4px" : "18px 0 4px",
+                              scrollMarginTop: 130, // clears the fixed .grm-header when scrolled to
                             }}>
                               <span style={{ fontSize:12, fontWeight:800, color:C.text }}>
                                 {f.date === todayStr() ? "Today" : fmtDateLabel(f.date)}

@@ -1777,7 +1777,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             </>
           )}
         </button>
-        <StatusBadge state={f.state} time={f.time} minute={f.minute} />
+        <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
       </div>
 
       {/* ══ MATCH IDENTITY ══════════════════════════════════════════════════ */}
