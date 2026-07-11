@@ -171,7 +171,7 @@ function BottomFormStrip({ recentResults }) {
             <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
               <WLDChip result={r.outcome} score={`${r.scored}-${r.conceded}`} />
               {(venue || age) && (
-                <span style={{ fontSize: 6, color: C.muted, opacity: .6, lineHeight: 1 }}>
+                <span style={{ fontSize: 8, color: C.text, opacity: .55, lineHeight: 1, fontWeight: 600 }}>
                   {venue}{venue && age ? " · " : ""}{age}
                 </span>
               )}
