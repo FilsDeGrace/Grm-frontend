@@ -9061,7 +9061,7 @@ function useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter) {
 // searches, or already has a selection inside it — matching a reference
 // layout provided directly (country name + "Tap to see leagues"/"N
 // selected" subtitle, count + chevron on the right, uniform row height).
-function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onSelectLeague }) {
+function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onSelectLeague, leagueFilterMode, setLeagueFilterMode }) {
   const { search, setSearch, expanded, setExpanded, searchLow, filteredGroups, selected, toggleLeague, toggleCountry } =
     useLeagueGroups(availableLeagues, leagueFilter, setLeagueFilter);
 
@@ -9071,6 +9071,27 @@ function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onS
     <div>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search league or country…" className="gi"
         style={{ fontSize:13, padding:"11px 14px", marginBottom:10 }}/>
+
+      {/* 49-FIX: moved here from LeagueFilter's own header area — that spot
+          kept getting visually stuck/hidden under whatever's above it (mobile
+          dvh fix didn't fully resolve it in every environment). This search
+          box renders fine in the same spot, so putting the toggle right after
+          it, still ahead of the Countries/Leagues stat row, sidesteps whatever
+          was clipping the header-adjacent area specifically. */}
+      {setLeagueFilterMode && (
+        <div style={{ display:"flex", borderRadius:8, overflow:"hidden",
+                      border:`1px solid ${C.border}`, marginBottom:10 }}>
+          {[["include","Only selected"],["exclude","Exclude selected"]].map(([m,l]) => (
+            <button key={m} onClick={() => setLeagueFilterMode(m)}
+              style={{ flex:1, padding:"8px 0", fontSize:9, fontWeight:800, cursor:"pointer",
+                       fontFamily:C.font, border:"none",
+                       background: leagueFilterMode === m ? C.accentDim : "transparent",
+                       color: leagueFilterMode === m ? C.accent : C.muted }}>
+              {l}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
         <div style={{ borderRadius:C.cardRadius, border:`1px solid ${C.border}`, background:C.surface, padding:"9px 12px" }}>
@@ -9237,29 +9258,16 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter, leagueF
             <button onClick={() => setOpen(false)}
               style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1, flexShrink:0 }}>✕</button>
           </div>
-          {/* 49-FIX: Only selected (existing behavior) vs Exclude selected —
-              a two-way segmented control, not a checkbox, so the current mode
-              is always visible at a glance. */}
-          {setLeagueFilterMode && (
-            <div style={{ margin:"0 16px 10px", display:"flex", borderRadius:8, overflow:"hidden",
-                          border:`1px solid ${C.border}` }}>
-              {[["include","Only selected"],["exclude","Exclude selected"]].map(([m,l]) => (
-                <button key={m} onClick={() => setLeagueFilterMode(m)}
-                  style={{ flex:1, padding:"7px 0", fontSize:9, fontWeight:800, cursor:"pointer",
-                           fontFamily:C.font, border:"none",
-                           background: leagueFilterMode === m ? C.accentDim : "transparent",
-                           color: leagueFilterMode === m ? C.accent : C.muted }}>
-                  {l}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* 49-FIX: toggle moved inside LeagueFilterList, right after its
+              search box — see that component for why. */}
           <div style={{ flex:1, overflowY:"auto", padding:"0 14px 16px" }}>
             <LeagueFilterList
               availableLeagues={availableLeagues}
               leagueFilter={leagueFilter}
               setLeagueFilter={setLeagueFilter}
               onSelectLeague={() => setOpen(false)}
+              leagueFilterMode={leagueFilterMode}
+              setLeagueFilterMode={setLeagueFilterMode}
             />
           </div>
           </div>{/* end sheet/dropdown */}
