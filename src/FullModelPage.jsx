@@ -163,11 +163,17 @@ function BottomFormStrip({ recentResults }) {
           const age = r.daysAgo != null
             ? r.daysAgo === 0 ? "today" : `${r.daysAgo}d`
             : null;
+          // 13-FIX: venue (H/A) — server.js already sends this per result
+          // (`role: isHome ? "H" : "A"`), it just wasn't being shown here.
+          // Without it every result reads as if it were a home result.
+          const venue = r.role === "H" ? "H" : r.role === "A" ? "A" : null;
           return (
             <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
               <WLDChip result={r.outcome} score={`${r.scored}-${r.conceded}`} />
-              {age && (
-                <span style={{ fontSize: 6, color: C.muted, opacity: .6, lineHeight: 1 }}>{age}</span>
+              {(venue || age) && (
+                <span style={{ fontSize: 6, color: C.muted, opacity: .6, lineHeight: 1 }}>
+                  {venue}{venue && age ? " · " : ""}{age}
+                </span>
               )}
             </div>
           );

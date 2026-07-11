@@ -63,6 +63,11 @@ function sanitizeBookmakerError(raw, bookmakerLabel = "Bookmaker") {
   // Map known bookmaker/server phrases to friendly messages
   if (/internal server error|500/i.test(low))
     return `${bookmakerLabel} is having issues right now — try again in a moment.`;
+  // 35-FIX: was falling through to the generic "not found" branch below,
+  // which drops the "check kickoff time or try another bookmaker" guidance
+  // server.js's isNoMatch branch already provides. Checked first so it wins.
+  if (/no selections resolved|no confident event match|not priced/i.test(low))
+    return `Game(s) not found or not priced on ${bookmakerLabel} — check kickoff time or try another bookmaker.`;
   if (/not found|404/i.test(low))
     return `${bookmakerLabel} couldn't find this fixture — it may not be listed yet.`;
   if (/unauthori[sz]ed|401/i.test(low))
@@ -1644,6 +1649,17 @@ async function fetchServerDate() {
 }
 const todayStr = () => window.__grmServerDate || _serverDateCache || new Date().toISOString().split("T")[0];
 
+// 49-FIX: single source of truth for league filter matching, used at every
+// leagueFilter application site so include/exclude mode stays consistent
+// everywhere instead of needing the flip applied at 6+ separate call sites.
+function matchesLeagueFilter(leagueId, leagueFilter, mode) {
+  if (!leagueFilter) return true;
+  const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
+  if (!lf.size) return true;
+  const has = lf.has(leagueId);
+  return mode === "exclude" ? !has : has;
+}
+
 // ── COLOUR SYSTEM — theme-driven ──────────────────────────────────────────
 // C is a mutable object. syncC(theme) stamps all theme tokens into it so
 // every existing C.xxx reference in JSX automatically reflects the active
@@ -2164,7 +2180,7 @@ function injectStyles(T) {
       background:linear-gradient(140deg,var(--surface) 0%,var(--gold-dim) 100%);
       border:1px solid var(--glass-border);
       border-radius:var(--r-xl);
-      padding:18px 20px;margin-bottom:20px;
+      padding:18px 20px;margin-top:14px;margin-bottom:20px;
       box-shadow:var(--shadow-card);
     }
     .grm-mindbox::before{
@@ -3588,28 +3604,51 @@ function BookNowButton({ fixture }) {
                   Opens SportyBet · your picks are pre-loaded
                 </div>
               )}
-              {result.failed?.length > 0 && (
-                <div style={{ marginTop:8,background:`${C.amber}10`,border:`1px solid ${C.amber}30`,borderRadius:6,padding:"8px 10px" }}>
-                  <div style={{ fontSize:8,color:C.amber,fontWeight:800,marginBottom:6 }}>
-                    ⚠ {result.failed.length} leg{result.failed.length!==1?"s":""} couldn't be booked
-                  </div>
-                  {result.failed.map((f, i) => {
-                    const isObj = f && typeof f === "object";
-                    const label = isObj ? f.label : f;
-                    const reason = isObj
-                      ? f.failReason === "tt_unavailable"
-                        ? "Team Total market not available on SportyBet for this match. Try Over 2.5 or BTTS instead."
-                        : "Match not found on SportyBet. May not be listed yet or have a different name."
-                      : "Could not be resolved.";
-                    return (
-                      <div key={i} style={{ marginBottom: i < result.failed.length-1 ? 6 : 0 }}>
-                        <div style={{ fontSize:8,color:C.text,fontWeight:700 }}>{label}</div>
-                        <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{reason}</div>
+              {(() => {
+                const allFailed = Array.isArray(result.failed) ? result.failed : [];
+                const realFailed = allFailed.filter(f => !(f && typeof f === "object" && f.isWarning));
+                const fallbackBooked = allFailed.filter(f => f && typeof f === "object" && f.isWarning);
+                if (!realFailed.length && !fallbackBooked.length) return null;
+                return (
+                  <>
+                    {realFailed.length > 0 && (
+                      <div style={{ marginTop:8,background:`${C.amber}10`,border:`1px solid ${C.amber}30`,borderRadius:6,padding:"8px 10px" }}>
+                        <div style={{ fontSize:8,color:C.amber,fontWeight:800,marginBottom:6 }}>
+                          ⚠ {realFailed.length} leg{realFailed.length!==1?"s":""} couldn't be booked
+                        </div>
+                        {realFailed.map((f, i) => {
+                          const isObj = f && typeof f === "object";
+                          const label = isObj ? f.label : f;
+                          const reason = isObj
+                            ? f.failReason === "tt_unavailable"
+                              ? "Team Total market not available on SportyBet for this match. Try Over 2.5 or BTTS instead."
+                              : "Match not found on SportyBet. May not be listed yet or have a different name."
+                            : "Could not be resolved.";
+                          return (
+                            <div key={i} style={{ marginBottom: i < realFailed.length-1 ? 6 : 0 }}>
+                              <div style={{ fontSize:8,color:C.text,fontWeight:700 }}>{label}</div>
+                              <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>{reason}</div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
+                    )}
+                    {fallbackBooked.length > 0 && (
+                      <div style={{ marginTop:8,background:`${C.green}10`,border:`1px solid ${C.green}30`,borderRadius:6,padding:"8px 10px" }}>
+                        <div style={{ fontSize:8,color:C.green,fontWeight:800,marginBottom:6 }}>
+                          Booked via fallback market
+                        </div>
+                        {fallbackBooked.map((f, i) => (
+                          <div key={i} style={{ marginBottom: i < fallbackBooked.length-1 ? 6 : 0 }}>
+                            <div style={{ fontSize:8,color:C.text,fontWeight:700 }}>{f.label || f.game}</div>
+                            <div style={{ fontSize:7,color:C.muted,marginTop:1 }}>Original market unavailable — booked on an equivalent goal-band market instead.</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -6449,6 +6488,10 @@ function TicketBookNowButton({ legs }) {
   const [bookie, setBookie]     = useState("");
   const [booking, setBooking]   = useState(false);
   const [error, setError]       = useState(null);
+  // 35-FIX: whether the last error is worth retrying. Defaults true (most
+  // errors are transient); set false specifically for "no match/no selections
+  // resolved" style errors, which fail identically on every retry.
+  const [retryable, setRetryable] = useState(true);
   // N27-FIX: auto-open if a persisted result exists from a previous mount
   useEffect(() => {
     try { const s = sessionStorage.getItem("grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80)); if (s) setOpen(true); } catch {}
@@ -6506,7 +6549,7 @@ function TicketBookNowButton({ legs }) {
   const book = async () => {
     const built = buildLegsWithOrigIndex();
     if (!built.length) { setError("No valid legs to book"); return; }
-    setBooking(true); setResult(null); setError(null);
+    setBooking(true); setResult(null); setError(null); setRetryable(true);
     try {
       const res  = await fetch(`${SERVER}${selectedBookie.api}`, {
         method:"POST", headers:{"Content-Type":"application/json"},
@@ -6520,7 +6563,13 @@ function TicketBookNowButton({ legs }) {
       let data;
       try { data = JSON.parse(rawText); }
       catch { throw new Error(sanitizeBookmakerError(rawText, bmLabel)); }
-      if (!res.ok || data.error) throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, bmLabel));
+      if (!res.ok || data.error) {
+        // 35-FIX: capture the server's retryable flag (SportyBet/Duel now send
+        // it) before throwing — a plain Error loses any extra fields, so this
+        // has to happen here, not in the catch block below.
+        if (data.retryable === false) setRetryable(false);
+        throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, bmLabel));
+      }
       setResult({ ...data, bookieId: bookie });
       // P-FIX: this is the one and only place correlation tracking gets fed —
       // a real, successful bookmaker booking. Building or saving a ticket
@@ -6691,11 +6740,20 @@ function TicketBookNowButton({ legs }) {
                           background:`${C.red}0e`, border:`1px solid ${C.red}30`,
                           borderRadius:8, lineHeight:1.5 }}>
               {error}
-              <button onClick={book} style={{ display:"block", marginTop:6, fontSize:9, padding:"3px 10px",
-                                              background:"transparent", border:`1px solid ${C.red}`,
-                                              color:C.red, borderRadius:5, cursor:"pointer", fontFamily:C.font }}>
-                Try again
-              </button>
+              {/* 35-FIX: "Try again" implies retrying might work — misleading
+                  for a no-match error, which will fail identically every time.
+                  Retryable (network/transient) errors still get the button. */}
+              {retryable ? (
+                <button onClick={book} style={{ display:"block", marginTop:6, fontSize:9, padding:"3px 10px",
+                                                background:"transparent", border:`1px solid ${C.red}`,
+                                                color:C.red, borderRadius:5, cursor:"pointer", fontFamily:C.font }}>
+                  Try again
+                </button>
+              ) : (
+                <div style={{ marginTop:6, fontSize:8, color:C.muted, fontStyle:"italic" }}>
+                  Retrying won't help — try a different bookmaker or wait closer to kickoff instead.
+                </div>
+              )}
             </div>
           )}
         </>
@@ -6705,7 +6763,10 @@ function TicketBookNowButton({ legs }) {
 
           {/* Status header */}
           {(() => {
-            const failCount = Array.isArray(result.failed) ? result.failed.length : (result.failed || 0);
+            // 52-FIX: isWarning entries (fallback-booked, genuinely booked)
+            // shouldn't count toward "partial failure" — only real failures do.
+            const realFailedList = Array.isArray(result.failed) ? result.failed.filter(f => !(f && typeof f === "object" && f.isWarning)) : [];
+            const failCount = realFailedList.length;
             const isPartial = failCount > 0;
             const booked    = isPartial ? (result.resolved ?? (legCount - failCount)) : (result.total ?? legCount);
             return (
@@ -6814,33 +6875,71 @@ function TicketBookNowButton({ legs }) {
 
           {/* Per-leg failures */}
           {(() => {
-            const failed = Array.isArray(result.failed) ? result.failed : [];
-            if (!failed.length) return null;
+            const allFailed = Array.isArray(result.failed) ? result.failed : [];
+            // 52-FIX: sportybet.js already tags fallback-booked legs with
+            // isWarning:true — they're genuinely booked (via a substitute
+            // pick), just previously shown identically to a real failure.
+            // Split them out here instead.
+            const realFailed = allFailed.filter(f => !(f && typeof f === "object" && f.isWarning));
+            const fallbackBooked = allFailed.filter(f => f && typeof f === "object" && f.isWarning);
+            if (!realFailed.length && !fallbackBooked.length) return null;
             return (
-              <div style={{ background:`${C.amber}08`, border:`1px solid ${C.amber}25`,
-                            borderRadius:br, padding:"10px 12px" }}>
-                <div style={{ fontSize:9, fontWeight:800, color:C.amber, marginBottom:8,
-                              letterSpacing:".06em", textTransform:"uppercase" }}>
-                  {failed.length} leg{failed.length > 1 ? "s" : ""} not booked
-                </div>
-                {failed.map((fail, i) => {
-                  const isObj  = fail && typeof fail === "object";
-                  const label  = isObj ? (fail.label || fail.game || `Leg ${i+1}`) : String(fail);
-                  const reason = isObj && fail.failReason === "tt_unavailable"
-                    ? "Team Total not listed — try Over 2.5 or BTTS via Custom Pick"
-                    : isObj && fail.failReason === "not_listed"
-                    ? "Fixture not yet listed on this bookmaker — check again closer to kickoff"
-                    : "Game or market not matched. Try SportyBet, or wait closer to kickoff.";
-                  return (
-                    <div key={i} style={{ marginBottom: i < failed.length - 1 ? 8 : 0,
-                                          paddingBottom: i < failed.length - 1 ? 8 : 0,
-                                          borderBottom: i < failed.length - 1 ? `1px solid ${C.amber}20` : "none" }}>
-                      <div style={{ fontSize:10, color:C.text, fontWeight:700 }}>{label}</div>
-                      <div style={{ fontSize:9, color:C.muted, lineHeight:1.5, marginTop:2 }}>{reason}</div>
+              <>
+                {realFailed.length > 0 && (
+                  <div style={{ background:`${C.amber}08`, border:`1px solid ${C.amber}25`,
+                                borderRadius:br, padding:"10px 12px" }}>
+                    <div style={{ fontSize:9, fontWeight:800, color:C.amber, marginBottom:8,
+                                  letterSpacing:".06em", textTransform:"uppercase" }}>
+                      {realFailed.length} leg{realFailed.length > 1 ? "s" : ""} not booked
                     </div>
-                  );
-                })}
-              </div>
+                    {realFailed.map((fail, i) => {
+                      const isObj  = fail && typeof fail === "object";
+                      const label  = isObj ? (fail.label || fail.game || `Leg ${i+1}`) : String(fail);
+                      // 50-FIX: was unconditionally "Try SportyBet" — now only
+                      // suggests SportyBet when it isn't already the active
+                      // bookmaker being tried.
+                      const otherBookieLabel = selectedBookie?.id === "sportybet"
+                        ? "check kickoff time or try another bookmaker"
+                        : "try SportyBet, or wait closer to kickoff";
+                      const reason = isObj && fail.failReason === "tt_unavailable"
+                        ? "Team Total not listed — try Over 2.5 or BTTS via Custom Pick"
+                        : isObj && fail.failReason === "not_listed"
+                        ? "Fixture not yet listed on this bookmaker — check again closer to kickoff"
+                        : `Game or market not matched. ${otherBookieLabel[0].toUpperCase()}${otherBookieLabel.slice(1)}.`;
+                      return (
+                        <div key={i} style={{ marginBottom: i < realFailed.length - 1 ? 8 : 0,
+                                              paddingBottom: i < realFailed.length - 1 ? 8 : 0,
+                                              borderBottom: i < realFailed.length - 1 ? `1px solid ${C.amber}20` : "none" }}>
+                          <div style={{ fontSize:10, color:C.text, fontWeight:700 }}>{label}</div>
+                          <div style={{ fontSize:9, color:C.muted, lineHeight:1.5, marginTop:2 }}>{reason}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {fallbackBooked.length > 0 && (
+                  <div style={{ background:`${C.green}08`, border:`1px solid ${C.green}25`,
+                                borderRadius:br, padding:"10px 12px", marginTop: realFailed.length ? 8 : 0 }}>
+                    <div style={{ fontSize:9, fontWeight:800, color:C.green, marginBottom:8,
+                                  letterSpacing:".06em", textTransform:"uppercase" }}>
+                      {fallbackBooked.length} leg{fallbackBooked.length > 1 ? "s" : ""} booked via fallback
+                    </div>
+                    {fallbackBooked.map((fail, i) => {
+                      const label = fail.label || fail.game || `Leg ${i+1}`;
+                      return (
+                        <div key={i} style={{ marginBottom: i < fallbackBooked.length - 1 ? 8 : 0,
+                                              paddingBottom: i < fallbackBooked.length - 1 ? 8 : 0,
+                                              borderBottom: i < fallbackBooked.length - 1 ? `1px solid ${C.green}20` : "none" }}>
+                          <div style={{ fontSize:10, color:C.text, fontWeight:700 }}>{label}</div>
+                          <div style={{ fontSize:9, color:C.muted, lineHeight:1.5, marginTop:2 }}>
+                            Original market unavailable — booked on an equivalent goal-band market instead.
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
             );
           })()}
 
@@ -9069,12 +9168,12 @@ function LeagueFilterList({ availableLeagues, leagueFilter, setLeagueFilter, onS
 // parley builder) where a dedicated always-open panel isn't appropriate.
 // Renders LeagueFilterList inside the popover so the browsing UI itself has
 // exactly one implementation (see comment above LeagueFilterList).
-function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
+function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter, leagueFilterMode = "include", setLeagueFilterMode }) {
   const [open, setOpen] = useState(false);
   const selected = leagueFilter instanceof Set ? leagueFilter : new Set(leagueFilter ? [leagueFilter] : []);
   const activeLabel = selected.size === 0 ? "All Leagues"
-    : selected.size === 1 ? (() => { const lg = availableLeagues.find(l => selected.has(l.leagueId)); return lg ? `${lg.league}${lg.country ? ` · ${lg.country}` : ""}` : "1 league"; })()
-    : `${selected.size} leagues`;
+    : selected.size === 1 ? (() => { const lg = availableLeagues.find(l => selected.has(l.leagueId)); const base = lg ? `${lg.league}${lg.country ? ` · ${lg.country}` : ""}` : "1 league"; return leagueFilterMode === "exclude" ? `Exclude: ${base}` : base; })()
+    : `${leagueFilterMode === "exclude" ? "Exclude " : ""}${selected.size} leagues`;
 
   const btnRef = useRef(null);
   const [btnRect, setBtnRect] = useState(null);
@@ -9138,6 +9237,23 @@ function LeagueFilter({ availableLeagues, leagueFilter, setLeagueFilter }) {
             <button onClick={() => setOpen(false)}
               style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:20, padding:6, lineHeight:1, flexShrink:0 }}>✕</button>
           </div>
+          {/* 49-FIX: Only selected (existing behavior) vs Exclude selected —
+              a two-way segmented control, not a checkbox, so the current mode
+              is always visible at a glance. */}
+          {setLeagueFilterMode && (
+            <div style={{ margin:"0 16px 10px", display:"flex", borderRadius:8, overflow:"hidden",
+                          border:`1px solid ${C.border}` }}>
+              {[["include","Only selected"],["exclude","Exclude selected"]].map(([m,l]) => (
+                <button key={m} onClick={() => setLeagueFilterMode(m)}
+                  style={{ flex:1, padding:"7px 0", fontSize:9, fontWeight:800, cursor:"pointer",
+                           fontFamily:C.font, border:"none",
+                           background: leagueFilterMode === m ? C.accentDim : "transparent",
+                           color: leagueFilterMode === m ? C.accent : C.muted }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
           <div style={{ flex:1, overflowY:"auto", padding:"0 14px 16px" }}>
             <LeagueFilterList
               availableLeagues={availableLeagues}
@@ -10715,7 +10831,7 @@ function DataAnalystPanel({ data, loading, days }) {
             <div>
               <div style={{ fontSize:7, color:C.muted, marginBottom:4, fontWeight:600 }}>Pick Type</div>
               <div style={{ display:"flex", gap:3 }}>
-                {[["all","All"],["safe","Safe"],["value","Edge"]].map(([v,l]) => (
+                {[["all","All"],["safe","Read"],["value","Edge"]].map(([v,l]) => (
                   <button key={v} onClick={() => setF("type", v)}
                     style={{ flex:1, padding:"6px 0", fontSize:8, borderRadius:5, cursor:"pointer",
                       fontFamily:C.font, fontWeight: filters.type===v ? 700 : 400,
@@ -12396,6 +12512,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                   </svg>
                   Draft Ticket
+                  {/* 55-FIX: leg count was only ever visible on the nav badge */}
+                  <span style={{ color:C.muted, fontWeight:600, textTransform:"none", letterSpacing:"normal" }}>
+                    · {draftTicket.legs.length} leg{draftTicket.legs.length !== 1 ? "s" : ""}
+                  </span>
                 </div>
                 <TicketCard
                   ticket={draftTicket} date={date} isJarvis={false}
@@ -12689,7 +12809,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             {tickets.length > 0 && (
               <>
                 <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10 }}>
-                  <span style={{ fontSize:9,color:C.text }}>{tickets.length} built ticket{tickets.length>1?"s":""}</span>
+                  <span style={{ fontSize:9,color:C.text }}>{tickets.length} built ticket{tickets.length>1?"s":""} · {tickets.reduce((s,t)=>s+(t.legs?.length||0),0)} legs</span>
                   <button onClick={() => setTickets([])} className="gb" style={{ fontSize:9,color:C.red,border:`1px solid ${C.red}40`,padding:"3px 8px" }}>Clear all</button>
                 </div>
                 <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
@@ -14412,6 +14532,11 @@ function GRMProInner() {
   const [tab, setTab]             = useState("all");
   const [search, setSearch]       = useState("");
   const [leagueFilter, setLeagueFilter] = useState(null);
+  // 49-FIX: "include" (default, existing behavior) shows only selected leagues;
+  // "exclude" shows everything EXCEPT selected leagues. Scoped to the main
+  // Live Model league filter only — the separate Parley builder league filter
+  // (parlayLeagueFilter) is untouched, not asked for.
+  const [leagueFilterMode, setLeagueFilterMode] = useState("include");
   const [sortActive,   setSortActive]   = useState(new Set());
   const [frozenFixtures, setFrozenFixtures] = useState([]); // engine pool snapshot — set at fetch, never updated by live polling
 
@@ -15627,8 +15752,7 @@ function GRMProInner() {
         list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league || "").toLowerCase().includes(s));
       }
       if (leagueFilter) {
-        const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
-        list = list.filter(f => lf.has(f.leagueId));
+        list = list.filter(f => matchesLeagueFilter(f.leagueId, leagueFilter, leagueFilterMode));
       }
       if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
       if (sortActive.has("strong_first")) list = [...list].sort((a, b) => {
@@ -15649,8 +15773,7 @@ function GRMProInner() {
         list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league||"").toLowerCase().includes(s));
       }
       if (leagueFilter) {
-        const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]);
-        list = list.filter(f => lf.has(f.leagueId));
+        list = list.filter(f => matchesLeagueFilter(f.leagueId, leagueFilter, leagueFilterMode));
       }
       // All sortActive filters apply to engine tab too
       if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
@@ -15683,7 +15806,7 @@ function GRMProInner() {
     // "all" branch — basketball's only path, sourced from `source` (bbGames for BB)
     let list = [...source];
     if (search) { const s = search.toLowerCase(); list = list.filter(f => f.teams.home.toLowerCase().includes(s) || f.teams.away.toLowerCase().includes(s) || (f.league||"").toLowerCase().includes(s)); }
-    if (leagueFilter) { const lf = leagueFilter instanceof Set ? leagueFilter : new Set([leagueFilter]); list = list.filter(f => lf.has(f.leagueId)); }
+    if (leagueFilter) { list = list.filter(f => matchesLeagueFilter(f.leagueId, leagueFilter, leagueFilterMode)); }
     if (sortActive.has("strong_only")) list = list.filter(f => f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence);
     if (sortActive.has("hq_data"))    list = list.filter(f => (f.markets?._calibrationWeight ?? 0) >= 50);
     if (sortActive.has("ltd_data"))   list = list.filter(f => (f.markets?._calibrationWeight ?? 100) < 25);
@@ -16027,7 +16150,7 @@ function GRMProInner() {
                   mobile / dropdown on desktop) — reusing it here instead of building a
                   second implementation. */}
               {availableLeagues.length > 1 && (
-                <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} />
+                <LeagueFilter availableLeagues={availableLeagues} leagueFilter={leagueFilter} setLeagueFilter={setLeagueFilter} leagueFilterMode={leagueFilterMode} setLeagueFilterMode={setLeagueFilterMode} />
               )}
 
               {/* Sort & Filter */}
@@ -16061,8 +16184,12 @@ function GRMProInner() {
 
               {/* P-FIX: Tickets — cross-ticket correlation toggle. Off by
                   default; a previously-booked leg always gets flagged
-                  regardless of this setting. */}
-              <FilterSection title="Tickets" summary={corrCrossCheckEnabled ? "Cross-check on" : "Cross-check off"} badge={corrCrossCheckEnabled ? 1 : 0}>
+                  regardless of this setting.
+                  38-FIX / #54-FIX: unresolvable-on-bookmaker toggle lives
+                  here too, not as its own accordion — #54 called out that
+                  it should live in the same place as the correlation-risk
+                  toggle, since both are ticket-level risk indicators. */}
+              <FilterSection title="Tickets" summary={`Cross-check ${corrCrossCheckEnabled ? "on" : "off"} · Unresolvable tag ${unresolvableTagEnabled ? "on" : "off"}`} badge={(corrCrossCheckEnabled?1:0) + (unresolvableTagEnabled?1:0)}>
                 <button onClick={() => setCorrCrossCheckEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -16070,7 +16197,7 @@ function GRMProInner() {
                     background: corrCrossCheckEnabled ? `${C.amber}12` : "transparent",
                     border:`1px solid ${corrCrossCheckEnabled ? C.amber : C.border}`,
                     display:"flex", alignItems:"center", gap:10,
-                    transition:"all .15s",
+                    transition:"all .15s", marginBottom:8,
                   }}>
                   <div style={{
                     width:34, height:20, borderRadius:10, flexShrink:0,
@@ -16097,11 +16224,7 @@ function GRMProInner() {
                     </div>
                   </div>
                 </button>
-              </FilterSection>
 
-              {/* 38-FIX: unresolvable-on-bookmaker toggle — off by default,
-                  mirrors the cross-check toggle immediately above it. */}
-              <FilterSection title="Unresolvable" summary={unresolvableTagEnabled ? "Tag on" : "Tag off"} badge={unresolvableTagEnabled ? 1 : 0}>
                 <button onClick={() => setUnresolvableTagEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -16416,7 +16539,7 @@ function GRMProInner() {
                                     borderRadius:8, display:"flex", alignItems:"center",
                                     justifyContent:"space-between", gap:8 }}>
                         <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
-                          Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                          {leagueFilterMode === "exclude" ? "Excluding" : "Filtering"}: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
                         </span>
                         <button onClick={() => setLeagueFilter(null)}
                           style={{ fontSize:8, color:C.muted, background:"transparent",
@@ -16475,7 +16598,7 @@ function GRMProInner() {
                                     borderRadius:8, display:"flex", alignItems:"center",
                                     justifyContent:"space-between", gap:8 }}>
                         <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
-                          Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                          {leagueFilterMode === "exclude" ? "Excluding" : "Filtering"}: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
                         </span>
                         <button onClick={() => setLeagueFilter(null)}
                           style={{ fontSize:8, color:C.muted, background:"transparent",
@@ -16543,7 +16666,7 @@ function GRMProInner() {
                                 borderRadius:8, display:"flex", alignItems:"center",
                                 justifyContent:"space-between", gap:8 }}>
                     <span style={{ fontSize:9, color:C.accent, fontWeight:700 }}>
-                      Filtering: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
+                      {leagueFilterMode === "exclude" ? "Excluding" : "Filtering"}: {label} · {filtered.length} game{filtered.length !== 1 ? "s" : ""}
                     </span>
                     <button onClick={() => setLeagueFilter(null)}
                       style={{ fontSize:8, color:C.muted, background:"transparent",
