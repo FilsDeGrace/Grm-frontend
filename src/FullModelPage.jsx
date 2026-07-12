@@ -32,6 +32,7 @@ import {
   FixtureBookNow,
   AskJarvis,
   copyToClipboard,
+  matchCAConditions,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
@@ -1196,8 +1197,73 @@ const _inFlightFetches = new Map();
 const _inFlightExpiry  = 38000;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CONDITION STRATEGY (CA) SECTION
+// Deliberately its own labeled section, not merged into or replacing the
+// default Strategy tag elsewhere on the fixture card — see App.jsx's toggle
+// copy: these are two independently-computed systems and are allowed to
+// disagree (hand-tuned live heuristic vs. holdout-validated mined pattern).
+// ─────────────────────────────────────────────────────────────────────────────
+const CA_FIELD_LABELS = {
+  totalXG: "Total xG", homeXG: "Home xG", awayXG: "Away xG",
+  homeCS: "Home CS%", awayCS: "Away CS%", btts: "BTTS%",
+  homeWin: "Home Win%", awayWin: "Away Win%", draw: "Draw%", oddsFloor: "Odds",
+};
+function fmtCACondition(cond) {
+  const label = CA_FIELD_LABELS[cond.field] || cond.field;
+  return `${label} ${cond.op} ${cond.value}`;
+}
+function CAComboRow({ c, isAvoid }) {
+  const marketLabel = (c.market || "").replace(/^TB:/, "");
+  const statusColor = c.status === "VALID" ? (isAvoid ? C.red : C.accent) : C.amber;
+  return (
+    <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, color: C.text }}>
+          {isAvoid ? "⚠ Avoid — " : "✓ "}{marketLabel}
+        </span>
+        <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} of top {c.rank <= 20 ? "20" : "N"} · {c.status}</span>
+      </div>
+      <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>
+        {c.conditions.map(fmtCACondition).join(" · ")}
+      </div>
+      <div style={{ fontSize: 9, color: statusColor, marginTop: 4, fontWeight: 700 }}>
+        Holdout {c.holdoutHitRate}% (baseline {c.holdoutBaselineHR}%, {c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp)
+      </div>
+      <div style={{ fontSize: 8, color: C.muted, marginTop: 2 }}>
+        Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% (depth {c.depth}, n={c.holdoutSample})
+      </div>
+    </div>
+  );
+}
+function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
+  if (!caModeEnabled) return null;
+  if (caError) return (
+    <SectionPanel label="Condition Strategy">
+      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{caError}</div>
+    </SectionPanel>
+  );
+  const { positive, avoid } = caMatches;
+  if (!positive.length && !avoid.length) return (
+    <SectionPanel label="Condition Strategy">
+      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>
+        No holdout-validated condition matches this fixture right now.
+      </div>
+    </SectionPanel>
+  );
+  return (
+    <SectionPanel label="Condition Strategy" labelRight="holdout-tested, separate from Strategy tag">
+      {positive.map((c, i) => <CAComboRow key={`p${i}`} c={c} isAvoid={false} />)}
+      {avoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
+    </SectionPanel>
+  );
+}
+
+// External Predictions section — shows what other public prediction sources
+// say about this fixture (odds-implied, third-party model consensus, etc).
+// ─────────────────────────────────────────────────────────────────────────────
 // EXTERNAL PREDICTIONS SECTION
 // Drop this component definition anywhere above FullModelPage().
+// ─────────────────────────────────────────────────────────────────────────────
 // Then insert <ExternalPredictions fixture={f} onAddToParlay={onAddToParlay ? handleAdd : null} />
 // right after the Team Totals </SectionPanel> and before {/* Combos */}
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1647,7 +1713,7 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
   );
 }
 
-export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLegs, backtestSummary }) {
+export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLegs, backtestSummary, caModeEnabled }) {
   const m         = f.markets;
   const scrollRef = useRef(null);
 
@@ -1696,6 +1762,26 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
   const readInDraft  = inDraft && !!readAnchor && draftLeg.pick === readAnchor.pick;
   const edgeInDraft  = inDraft && !!f.theEdge   && draftLeg.pick === f.theEdge.pick;
   const radarInDraft = inDraft && (draftLeg?.market === "TeamTotal" || draftLeg?.market?.includes("TeamTotal"));
+
+  // ── CONDITION STRATEGY (CA) ──────────────────────────────────────────────
+  // Deliberately isolated from every other section here: only fetches when
+  // caModeEnabled is on, fetches once per mount (not per fixture field
+  // change), and matching itself runs client-side (matchCAConditions is pure
+  // JS over f.markets, no server round-trip per fixture) — same mechanism
+  // SA's matchSAPatterns already uses elsewhere in the app. If the toggle's
+  // off, none of this fires — zero added cost to opening a Full Model page.
+  const [caPatterns, setCaPatterns] = useState(null);
+  const [caError, setCaError] = useState(null);
+  useEffect(() => {
+    if (!caModeEnabled) { setCaPatterns(null); setCaError(null); return; }
+    let cancelled = false;
+    fetch(`${SERVER}/api/ca-patterns`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) { if (d?.byMarket) setCaPatterns(d); else setCaError(d?.error || "No condition data"); } })
+      .catch(e => { if (!cancelled) setCaError(e.message); });
+    return () => { cancelled = true; };
+  }, [caModeEnabled]);
+  const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [] };
 
   // All explainers computed once
   const isBBSport = f._sport === "basketball";
@@ -2796,6 +2882,11 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             </div>
           </SectionPanel>
         )}
+
+        {/* Condition Strategy (CA) — just above External Predictions, per plan.
+            Self-gates on caModeEnabled and renders nothing at all when off or
+            when there are no matches, so it never adds empty visual clutter. */}
+        <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (

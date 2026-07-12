@@ -693,6 +693,56 @@ function matchSAPatterns(f, market, patterns) {
   return { positive, avoid };
 }
 
+// ── CA CONDITION MATCHER ──────────────────────────────────────────────────
+// CA (conditions-analyst.mjs) conditions are continuous thresholds
+// ({field, op, value}), not SA's tertile-bucket equality above — this is a
+// direct port of conditions-analyst.mjs's extractDims() + conditionMatches(),
+// run client-side against one fixture's live markets object. NOT a reuse of
+// matchSAPatterns: the two systems check fundamentally different shapes of
+// condition, so porting the real dims-extraction logic (not guessing at
+// field names) matters — mismatched field names here would silently match
+// nothing and look like "this fixture just has no CA matches" instead of
+// erroring, which is worse than a crash.
+// Field source is byte-for-byte the same as conditions-analyst.mjs's
+// extractDims(): homeCS/awayCS/homeWin/awayWin/draw straight off f.markets,
+// btts aliases m.bttsYes (falls back to m.btts), oddsFloor comes off
+// f.theRead/f.theEdge (not m at all — it's a fixture-level field, not a
+// markets one), totalXG is derived (homeXG + awayXG), not a stored field.
+function caExtractDims(f) {
+  const m = f.markets || {};
+  const hXG = +(m.homeXG ?? 0), aXG = +(m.awayXG ?? 0);
+  const oddsFloorRaw = f.theRead?.anchor?.odds ?? f.theEdge?.odds ?? null;
+  return {
+    totalXG: hXG + aXG, homeXG: hXG, awayXG: aXG,
+    homeCS: +(m.homeCS ?? NaN), awayCS: +(m.awayCS ?? NaN),
+    btts: +(m.bttsYes ?? m.btts ?? NaN),
+    homeWin: +(m.homeWin ?? NaN), awayWin: +(m.awayWin ?? NaN), draw: +(m.draw ?? NaN),
+    oddsFloor: oddsFloorRaw != null ? +oddsFloorRaw : NaN,
+  };
+}
+function caConditionMatches(dims, cond) {
+  const v = dims[cond.field];
+  if (v == null || Number.isNaN(v)) return false;
+  return cond.op === ">=" ? v >= cond.value : v < cond.value;
+}
+// caPatterns: the { byMarket, byMarketAvoid } payload from GET /api/ca-patterns.
+// Returns { positive: [...matched combos, best holdout HR first], avoid: [...] },
+// flattened across all 14 markets — FullModelPage groups by combo.market itself.
+export function matchCAConditions(f, caPatterns) {
+  if (!caPatterns) return { positive: [], avoid: [] };
+  const dims = caExtractDims(f);
+  const positive = [], avoid = [];
+  for (const combos of Object.values(caPatterns.byMarket || {})) {
+    for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) positive.push(c);
+  }
+  for (const combos of Object.values(caPatterns.byMarketAvoid || {})) {
+    for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) avoid.push(c);
+  }
+  positive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
+  avoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
+  return { positive, avoid };
+}
+
 // ── EXCLUDE SELECTION GROUPS ─────────────────────────────────────────────
 // Same two-tier shape as Custom Pick (market family → individual line/option),
 // but used for exclusion: each option gets its own toggle so a single line
@@ -14963,6 +15013,17 @@ function GRMProInner() {
   useEffect(() => {
     try { localStorage.setItem("grm_unresolvable_tag_v1", unresolvableTagEnabled ? "1" : "0"); } catch {}
   }, [unresolvableTagEnabled]);
+  // Condition Strategy (CA) toggle — gates FullModelPage's "Condition Strategy"
+  // section only. Deliberately does NOT touch the main fixture list/snapshot
+  // pipeline at all: when off, FullModelPage never fetches /api/ca-patterns;
+  // when on, it fetches once per FullModelPage open and matches client-side
+  // (same mechanism as SA's matchSAPatterns) — no added cost to the live list.
+  const [caModeEnabled, setCaModeEnabled] = useState(() => {
+    try { return localStorage.getItem("grm_ca_mode_v1") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("grm_ca_mode_v1", caModeEnabled ? "1" : "0"); } catch {}
+  }, [caModeEnabled]);
   const DRAFT_KEY = "grm_draft_legs";
   const [draftLegs, setDraftLegs] = useState(() => {
     try {
@@ -16471,6 +16532,47 @@ function GRMProInner() {
                 </button>
               </FilterSection>
 
+              {/* Condition Strategy (CA) — off by default. Only gates whether
+                  FullModelPage fetches /api/ca-patterns and shows its own
+                  "Condition Strategy" section; does not touch the main list,
+                  strategyTags, or any existing fixture-card badge. */}
+              <FilterSection title="Analysis" summary={`Condition Strategy ${caModeEnabled ? "on" : "off"}`} badge={caModeEnabled?1:0}>
+                <button onClick={() => setCaModeEnabled(v => !v)}
+                  style={{
+                    width:"100%", padding:"10px 14px",
+                    borderRadius:10, cursor:"pointer", fontFamily:C.font,
+                    background: caModeEnabled ? `${C.amber}12` : "transparent",
+                    border:`1px solid ${caModeEnabled ? C.amber : C.border}`,
+                    display:"flex", alignItems:"center", gap:10,
+                    transition:"all .15s",
+                  }}>
+                  <div style={{
+                    width:34, height:20, borderRadius:10, flexShrink:0,
+                    background: caModeEnabled ? C.amber : C.faint,
+                    border:`1px solid ${caModeEnabled ? C.amber : C.border}`,
+                    position:"relative", transition:"background .2s",
+                  }}>
+                    <div style={{
+                      position:"absolute", top:2,
+                      left: caModeEnabled ? 16 : 2,
+                      width:14, height:14, borderRadius:"50%",
+                      background: caModeEnabled ? C.accentText : C.muted,
+                      transition:"left .2s",
+                      boxShadow:"0 1px 3px rgba(0,0,0,.2)",
+                    }}/>
+                  </div>
+                  <div style={{ textAlign:"left", flex:1 }}>
+                    <div style={{ fontSize:10, fontWeight:800,
+                      color: caModeEnabled ? C.amber : C.text }}>
+                      Condition Strategy
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
+                      Show a fixture's holdout-tested condition matches in its Full Model page. Separate from the default Strategy tag — computed independently, may not always agree.
+                    </div>
+                  </div>
+                </button>
+              </FilterSection>
+
               {/* Admin controls */}
               {adminMode && (
                 <FilterSection title="Admin" summary="Refresh tools" defaultOpen>
@@ -17041,6 +17143,7 @@ function GRMProInner() {
         <FullModelPage
           f={mainFocusFixture}
           date={date}
+          caModeEnabled={caModeEnabled}
           onBack={() => {
             setMainFocusFixture(null);
             // Return to wherever user came from

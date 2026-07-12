@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://2ki83a-ip-105-118-31-47.tunnelmole.net"; // Update when tunnel changes
+export const SERVER = "https://yqahrb-ip-105-118-14-74.tunnelmole.net"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
