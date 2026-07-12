@@ -1212,16 +1212,16 @@ function fmtCACondition(cond) {
   const label = CA_FIELD_LABELS[cond.field] || cond.field;
   return `${label} ${cond.op} ${cond.value}`;
 }
-function CAComboRow({ c, isAvoid }) {
+function CAComboRow({ c, isAvoid, isEmerging }) {
   const marketLabel = (c.market || "").replace(/^TB:/, "");
-  const statusColor = c.status === "VALID" ? (isAvoid ? C.red : C.accent) : C.amber;
+  const statusColor = isEmerging ? C.muted : (isAvoid ? C.red : C.accent);
   return (
-    <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+    <div style={{ padding: isEmerging ? "8px 14px" : "10px 14px", borderBottom: `1px solid ${C.border}`, opacity: isEmerging ? 0.75 : 1 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-        <span style={{ fontSize: 10, fontWeight: 800, color: C.text }}>
-          {isAvoid ? "⚠ Avoid — " : "✓ "}{marketLabel}
+        <span style={{ fontSize: isEmerging ? 9 : 10, fontWeight: 800, color: isEmerging ? C.muted : C.text }}>
+          {isEmerging ? "◌ Emerging — " : isAvoid ? "⚠ Avoid — " : "✓ "}{marketLabel}
         </span>
-        <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} of top {c.rank <= 20 ? "20" : "N"} · {c.status}</span>
+        <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} · {c.status}</span>
       </div>
       <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>
         {c.conditions.map(fmtCACondition).join(" · ")}
@@ -1230,30 +1230,75 @@ function CAComboRow({ c, isAvoid }) {
         Holdout {c.holdoutHitRate}% (baseline {c.holdoutBaselineHR}%, {c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp)
       </div>
       <div style={{ fontSize: 8, color: C.muted, marginTop: 2 }}>
-        Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% (depth {c.depth}, n={c.holdoutSample})
+        Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% (depth {c.depth}, n={c.holdoutSample}{isEmerging ? " — small sample, unproven" : ""})
       </div>
     </div>
   );
 }
+const CA_MARKET_OPTIONS = [
+  "TB:Under 3.5", "TB:Under 4.5", "TB:Over 1.5", "TB:Over 2.5", "TB:BTTS",
+  "TB:Home Over 0.5", "TB:Away Over 0.5", "TB:Home Over 1.5", "TB:Away Over 1.5",
+  "TB:DC1X", "TB:DCX2", "TB:1X2-Home", "TB:1X2-Away", "TB:1X2-Draw",
+];
 function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
+  const [selectedMarket, setSelectedMarket] = useState("__top__");
   if (!caModeEnabled) return null;
   if (caError) return (
     <SectionPanel label="Condition Strategy">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{caError}</div>
     </SectionPanel>
   );
-  const { positive, avoid } = caMatches;
-  if (!positive.length && !avoid.length) return (
+  const { positive, avoid, emergingPositive, emergingAvoid } = caMatches;
+  if (!positive.length && !avoid.length && !emergingPositive.length && !emergingAvoid.length) return (
     <SectionPanel label="Condition Strategy">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>
         No holdout-validated condition matches this fixture right now.
       </div>
     </SectionPanel>
   );
+  // Default view: top 2 of each direction only, not every match — a fixture
+  // can legitimately satisfy a dozen near-identical Under 4.5 combos at
+  // slightly different thresholds; showing all of them reads as noise, not
+  // signal. Picking a market from the dropdown switches to showing every
+  // match for JUST that market, which is the actual use case for wanting
+  // more than 2 — "does this game have anything for BTTS specifically."
+  const showTop = selectedMarket === "__top__";
+  const shownPositive = showTop ? positive.slice(0, 2) : positive.filter(c => c.market === selectedMarket);
+  const shownAvoid    = showTop ? avoid.slice(0, 2)    : avoid.filter(c => c.market === selectedMarket);
+  // Emerging (low-test-n) — always capped at 2 each regardless of view, even
+  // when drilling into one market: these are demoted by design, not a second
+  // full list to browse. Never mixed into shownPositive/shownAvoid above.
+  const shownEmergingPositive = (showTop ? emergingPositive : emergingPositive.filter(c => c.market === selectedMarket)).slice(0, 2);
+  const shownEmergingAvoid    = (showTop ? emergingAvoid    : emergingAvoid.filter(c => c.market === selectedMarket)).slice(0, 2);
+  const hasAnyShown = shownPositive.length || shownAvoid.length || shownEmergingPositive.length || shownEmergingAvoid.length;
   return (
-    <SectionPanel label="Condition Strategy" labelRight="holdout-tested, separate from Strategy tag">
-      {positive.map((c, i) => <CAComboRow key={`p${i}`} c={c} isAvoid={false} />)}
-      {avoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
+    <SectionPanel label="Condition Strategy">
+      <div style={{ padding: "8px 14px", borderBottom: `1px solid ${C.border}` }}>
+        <select value={selectedMarket} onChange={e => setSelectedMarket(e.target.value)}
+          style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: C.bg, color: C.text,
+                   border: `1px solid ${C.border}`, fontSize: 10, fontFamily: C.font }}>
+          <option value="__top__">Top matches ({positive.length + avoid.length} total)</option>
+          {CA_MARKET_OPTIONS.map(m => {
+            const label = m.replace(/^TB:/, "");
+            const hasP = positive.some(c => c.market === m), hasA = avoid.some(c => c.market === m);
+            return <option key={m} value={m}>{label}{hasP ? " ✓" : ""}{hasA ? " ⚠" : ""}{!hasP && !hasA ? " —" : ""}</option>;
+          })}
+        </select>
+      </div>
+      {!hasAnyShown && (
+        <div style={{ padding: "12px 14px", fontSize: 9, color: C.muted }}>
+          No {selectedMarket.replace(/^TB:/, "")} match for this fixture.
+        </div>
+      )}
+      {shownPositive.map((c, i) => <CAComboRow key={`p${i}`} c={c} isAvoid={false} />)}
+      {shownAvoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
+      {(shownEmergingPositive.length > 0 || shownEmergingAvoid.length > 0) && (
+        <div style={{ padding: "6px 14px", fontSize: 8, fontWeight: 800, color: C.muted, letterSpacing: ".08em", textTransform: "uppercase" }}>
+          Emerging — small sample, unproven
+        </div>
+      )}
+      {shownEmergingPositive.map((c, i) => <CAComboRow key={`ep${i}`} c={c} isAvoid={false} isEmerging />)}
+      {shownEmergingAvoid.map((c, i) => <CAComboRow key={`ea${i}`} c={c} isAvoid={true} isEmerging />)}
     </SectionPanel>
   );
 }
@@ -1781,7 +1826,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       .catch(e => { if (!cancelled) setCaError(e.message); });
     return () => { cancelled = true; };
   }, [caModeEnabled]);
-  const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [] };
+  const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [] };
 
   // All explainers computed once
   const isBBSport = f._sport === "basketball";

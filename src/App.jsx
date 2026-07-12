@@ -729,18 +729,27 @@ function caConditionMatches(dims, cond) {
 // Returns { positive: [...matched combos, best holdout HR first], avoid: [...] },
 // flattened across all 14 markets — FullModelPage groups by combo.market itself.
 export function matchCAConditions(f, caPatterns) {
-  if (!caPatterns) return { positive: [], avoid: [] };
+  if (!caPatterns) return { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [] };
   const dims = caExtractDims(f);
-  const positive = [], avoid = [];
-  for (const combos of Object.values(caPatterns.byMarket || {})) {
-    for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) positive.push(c);
-  }
-  for (const combos of Object.values(caPatterns.byMarketAvoid || {})) {
-    for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) avoid.push(c);
-  }
+  const matchGroup = (byMarketObj) => {
+    const out = [];
+    for (const combos of Object.values(byMarketObj || {})) {
+      for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) out.push(c);
+    }
+    return out;
+  };
+  const positive = matchGroup(caPatterns.byMarket);
+  const avoid = matchGroup(caPatterns.byMarketAvoid);
+  // Emerging = low-test-n matches — kept fully separate from positive/avoid,
+  // never merged in, so a small-sample fluke can't be mistaken for a
+  // validated one just because it happened to also match.
+  const emergingPositive = matchGroup(caPatterns.byMarketEmerging);
+  const emergingAvoid = matchGroup(caPatterns.byMarketAvoidEmerging);
   positive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
   avoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
-  return { positive, avoid };
+  emergingPositive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
+  emergingAvoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
+  return { positive, avoid, emergingPositive, emergingAvoid };
 }
 
 // ── EXCLUDE SELECTION GROUPS ─────────────────────────────────────────────
