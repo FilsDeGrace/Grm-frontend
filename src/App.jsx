@@ -3509,6 +3509,24 @@ function BookNowButton({ fixture }) {
       try { data = JSON.parse(rawText); }
       catch { throw new Error(sanitizeBookmakerError(rawText, "SportyBet")); }
       if (!res.ok || data.error) throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, "SportyBet"));
+      // 40/45-FIX: /api/book-sportybet now responds with { jobId } and runs
+      // in the background — this route's contract changed for every caller,
+      // not just the ticket builder. Single-leg bookings resolve almost
+      // immediately either way, so this is mostly just staying compatible.
+      if (data.jobId) {
+        const pollStart = Date.now();
+        while (true) {
+          await new Promise(r => setTimeout(r, 1200));
+          let job;
+          try {
+            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`);
+            job = await jr.json();
+          } catch { continue; }
+          if (job.status === "done") { data = job.result; break; }
+          if (job.status === "error") throw new Error(sanitizeBookmakerError(job.error?.error || "Booking failed", "SportyBet"));
+          if (Date.now() - pollStart > 60000) throw new Error("Still working on SportyBet's end after a minute — check the app/site directly, don't retry.");
+        }
+      }
       setResult(data);
     } catch(e) {
       const msg = e.message || "";
@@ -6498,6 +6516,9 @@ function TicketBookNowButton({ legs }) {
   // errors are transient); set false specifically for "no match/no selections
   // resolved" style errors, which fail identically on every retry.
   const [retryable, setRetryable] = useState(true);
+  // 40/45-FIX: elapsed seconds while polling a booking job, shown in the UI
+  // instead of a plain spinner so a long booking doesn't look stuck/dead.
+  const [bookingElapsed, setBookingElapsed] = useState(0);
   // N27-FIX: auto-open if a persisted result exists from a previous mount
   useEffect(() => {
     try { const s = sessionStorage.getItem("grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80)); if (s) setOpen(true); } catch {}
@@ -6555,7 +6576,7 @@ function TicketBookNowButton({ legs }) {
   const book = async () => {
     const built = buildLegsWithOrigIndex();
     if (!built.length) { setError("No valid legs to book"); return; }
-    setBooking(true); setResult(null); setError(null); setRetryable(true);
+    setBooking(true); setResult(null); setError(null); setRetryable(true); setBookingElapsed(0);
     try {
       const res  = await fetch(`${SERVER}${selectedBookie.api}`, {
         method:"POST", headers:{"Content-Type":"application/json"},
@@ -6575,6 +6596,36 @@ function TicketBookNowButton({ legs }) {
         // has to happen here, not in the catch block below.
         if (data.retryable === false) setRetryable(false);
         throw new Error(sanitizeBookmakerError(data.error || `HTTP ${res.status}`, bmLabel));
+      }
+      // 40/45-FIX: SportyBet/Duel now respond with 202 + { jobId } almost
+      // immediately instead of holding the connection open for the whole
+      // booking — poll for the actual result instead of treating this as
+      // final. LuckyLedger doesn't have a jobId (untouched, discontinued),
+      // so it falls straight through to the old synchronous path below.
+      if (data.jobId) {
+        const pollStart = Date.now();
+        const POLL_MS = 1500, MAX_MS = 3 * 60 * 1000; // 3 min ceiling
+        while (true) {
+          await new Promise(r => setTimeout(r, POLL_MS));
+          setBookingElapsed(Math.round((Date.now() - pollStart) / 1000));
+          let job;
+          try {
+            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`);
+            job = await jr.json();
+          } catch {
+            continue; // transient poll failure — the job is still running server-side, just retry
+          }
+          if (job.status === "done") { data = job.result; break; }
+          if (job.status === "error") {
+            if (job.error?.retryable === false) setRetryable(false);
+            throw new Error(sanitizeBookmakerError(job.error?.error || "Booking failed", bmLabel));
+          }
+          if (Date.now() - pollStart > MAX_MS) {
+            setRetryable(false); // avoid a duplicate booking attempt while the first may still be running server-side
+            throw new Error(`Still working on ${bmLabel}'s end after 3 minutes. Don't retry — check the app/site directly for your ticket code, it likely already went through.`);
+          }
+          // status === "pending" — keep polling
+        }
       }
       setResult({ ...data, bookieId: bookie });
       // P-FIX: this is the one and only place correlation tracking gets fed —
@@ -6726,7 +6777,17 @@ function TicketBookNowButton({ legs }) {
                             animation:"spin .75s linear infinite" }}/>
               <div>
                 <div style={{ fontSize:11, fontWeight:800, color:C.text }}>Booking your ticket…</div>
-                <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>Takes 10–20 seconds. Keep this screen open.</div>
+                {/* 40/45-FIX: was a static "10-20 seconds" claim regardless of
+                    how long it actually took — misleading for a big ticket,
+                    and gave no signal that a long wait is still normal.
+                    bookingElapsed only starts counting once polling begins
+                    (i.e. the initial request already came back, so this is
+                    genuinely still running server-side, not stuck). */}
+                <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
+                  {bookingElapsed > 0
+                    ? `Still working — ${bookingElapsed}s so far. Longer tickets take longer, this is normal. Keep this screen open.`
+                    : "Sending to the bookmaker… keep this screen open."}
+                </div>
               </div>
             </div>
           ) : (
