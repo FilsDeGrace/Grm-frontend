@@ -550,6 +550,14 @@ const SA_TO_FAMILY_ID = {
   "TB:Away Over 0.5": "awayo05", "TB:Away Over 1.5": "awayo15",
 };
 
+// CA row market list — same 13 TB: market strings as SA (CA and SA mine the
+// identical 14-market scope, minus PE:Mix which is SA-specific), plus its
+// own "CA:Mix" virtual entry. Reuses SA_TO_FAMILY_ID's keys directly rather
+// than a second hardcoded list of the same 13 strings.
+const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Mix"].map(id => ({
+  id, label: id === "CA:Mix" ? "Mix" : id.replace(/^TB:/, ""),
+}));
+
 function saTheReadToTBMarket(anchor) {
   if (!anchor) return null;
   const mkt = anchor.market, dcV = anchor.dcVariant;
@@ -729,7 +737,7 @@ function caConditionMatches(dims, cond) {
 // Returns { positive: [...matched combos, best holdout HR first], avoid: [...] },
 // flattened across all 14 markets — FullModelPage groups by combo.market itself.
 export function matchCAConditions(f, caPatterns) {
-  if (!caPatterns) return { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [] };
+  if (!caPatterns) return { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [], traps: [], contradictoryMarkets: [] };
   const dims = caExtractDims(f);
   const matchGroup = (byMarketObj) => {
     const out = [];
@@ -745,11 +753,405 @@ export function matchCAConditions(f, caPatterns) {
   // validated one just because it happened to also match.
   const emergingPositive = matchGroup(caPatterns.byMarketEmerging);
   const emergingAvoid = matchGroup(caPatterns.byMarketAvoidEmerging);
+  // Same-market contradiction (dev journal, 2026-07-13): a market can carry
+  // one combo that's a VALID positive and a DIFFERENT combo that's a VALID
+  // avoid, both matching this fixture at once — never the same rule (traps
+  // come from OVERFIT/DEGRADED status; these are two separately-mined VALID
+  // combos that just happen to both fire here). Journal verdict: don't try
+  // to explain both sides on screen — flag the market as a conflicting signal and
+  // let display code suppress the individual cards for it.
+  const positiveMarkets = new Set(positive.map(c => c.market));
+  const avoidMarkets = new Set(avoid.map(c => c.market));
+  const contradictoryMarkets = [...positiveMarkets].filter(m => avoidMarkets.has(m));
+  // Traps (item #5) — combos that looked convincing on train but didn't hold
+  // up on holdout (or the mirror: looked bad on train, held up fine).
+  // ROOT CAUSE FIX (dev journal): only surfaced when the market has NO
+  // validated positive or avoid match at all (this also naturally excludes
+  // contradictory markets, since those are in both sets) — a market that
+  // already has a clean lean, or is already flagged conflicting-signal, doesn't
+  // need a trap caution stacked on top; the trap note only adds value when
+  // it's the only thing this market has.
+  const traps = matchGroup(caPatterns.byMarketTraps)
+    .filter(c => !positiveMarkets.has(c.market) && !avoidMarkets.has(c.market));
   positive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
   avoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
   emergingPositive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
   emergingAvoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
-  return { positive, avoid, emergingPositive, emergingAvoid };
+  traps.sort((a, b) => Math.abs(b.gap ?? 0) - Math.abs(a.gap ?? 0));
+  return { positive, avoid, emergingPositive, emergingAvoid, traps, contradictoryMarkets };
+}
+
+// ── CROSS-MARKET REASONING ENGINE (Phase 1, 2026-07-13) ─────────────────────
+// Item #2 from the original CA session. Two rule shapes, both gated to VALID
+// combos only (matchCAConditions's `positive`/`avoid` arrays are already
+// VALID-only — see server's groupByMarket status filter — so no extra
+// filtering needed here; an emerging or trap match can never feed a verdict).
+//
+// CA_SIDE_COMPONENTS is scaffolding, not output: it encodes which per-side
+// markets a total-goals market logically decomposes into (Over 1.5 needs
+// *a* goal from somewhere; Home O0.5 + Home O1.5 both flagged avoid on the
+// home side means that goal is almost certainly not coming from home). This
+// table is never surfaced as "Over 2.5 implies Over 1.5" — it only powers
+// the origin-caveat check below, which fires on a specific avoid pattern,
+// not on the implication itself.
+const CA_SIDE_COMPONENTS = {
+  "TB:Over 1.5": { home: ["TB:Home Over 0.5", "TB:Home Over 1.5"], away: ["TB:Away Over 0.5", "TB:Away Over 1.5"] },
+  "TB:Over 2.5": { home: ["TB:Home Over 0.5", "TB:Home Over 1.5"], away: ["TB:Away Over 0.5", "TB:Away Over 1.5"] },
+  "TB:BTTS":     { home: ["TB:Home Over 0.5"], away: ["TB:Away Over 0.5"] },
+};
+// Markets that can't both be true for the same fixture. Only pairs where a
+// VALID positive match on both sides is a genuine logical conflict — DC1X
+// and DCX2 both matching is NOT included here, since that's just a coherent
+// "leans toward a draw" read, not a contradiction.
+const CA_CONTRADICTION_PAIRS = [
+  ["TB:1X2-Home", "TB:1X2-Away"],
+  ["TB:1X2-Home", "TB:1X2-Draw"],
+  ["TB:1X2-Away", "TB:1X2-Draw"],
+  ["TB:1X2-Home", "TB:DCX2"],
+  ["TB:1X2-Away", "TB:DC1X"],
+];
+const CA_MARKET_SHORT = m => (m || "").replace(/^TB:/, "");
+
+// Pattern strength spectrum (dev journal, 2026-07-13: "not every positive or
+// negative pattern should carry the same weight... the system needs a way to
+// distinguish strong positives, weak positives, strong negatives, weak
+// negatives"). Bucketed off |holdoutLift| — journal's own examples anchor the
+// boundaries: +25pp and +21.8pp were called out as clearly strong, +14.1pp
+// and +12.7pp as real-but-more-modest edges. A weak pattern isn't wrong, just
+// lower-conviction — this is purely descriptive (badge/label), it doesn't
+// gate anything by itself; CA_MIN_HOLDOUT_HR below is the separate, explicit
+// gate for "bettable at all."
+export function caPatternStrength(lift) {
+  const abs = Math.abs(lift ?? 0);
+  if (abs >= 20) return "strong";
+  if (abs >= 10) return "moderate";
+  return "weak";
+}
+
+// Shared floor/ceiling for "this is a genuinely bettable signal, not just an
+// impressive lift number" (Sterling's call, 2026-07-13 — 60/40 as a
+// reasonable symmetric starting point, revisit if it excludes too much or too
+// little in practice). Used both by CA:Mix's best-market picker (CustomListView's
+// caRows) and by computeCAVerdicts' strongest-lean rule below, so the two
+// never disagree about what counts as strong enough to recommend.
+export const CA_MIN_HOLDOUT_HR = 60;
+export const CA_MAX_AVOID_HR = 40;
+// Second, separate floor gate (2026-07-13 plan): a combo can clear the
+// absolute-probability floor above and still be structurally trivial (e.g.
+// 96% holdout HR off a 95% baseline — bettable, but adds nothing). Mirrors
+// POOL_MIN_EMPIRICAL_RATE's role in the main engine's pool: a hard minimum
+// before something's even eligible to be ranked, separate from the ranking
+// formula itself.
+export const CA_MIN_ELIGIBLE_LIFT = 5; // pp
+// How close a different-family candidate's score must be to the top pick's
+// to also get a second verdict line (1 mandatory + 1 optional, per plan) —
+// otherwise every fixture would pad out to two leans whether or not the
+// second one actually adds anything.
+export const CA_SECOND_LEAN_CLOSENESS = 0.85;
+
+// ── Market families (2026-07-13 plan) ───────────────────────────────────────
+// Deliberately NOT the same shape as READ_RANK_WEIGHT_* in config.js — those
+// are static per-market handicaps Read needs because it ranks raw
+// probability with no baseline concept (a 92% Over 1.5 needs an artificial
+// penalty bolted on). CA already scores by lift (holdout − baseline), so an
+// obvious market like Home Over 0.5 naturally scores near zero without any
+// hardcoded weight — the problem Read solves by hand, CA solves structurally.
+// What families ARE for: several markets can be different expressions of the
+// same match story (three goal-markets agreeing isn't three independent
+// proofs, it's one goal-story with three windows into it) — corroboration
+// should count once, not three times. A market belongs to exactly one
+// family, in both directions — a positive Home Over 0.5 + a positive Away
+// Over 0.5 corroborate a goals story, and equally an avoid Home Over 0.5 +
+// an avoid Away Over 0.5 corroborate a "steer away from goals" story.
+export const CA_FAMILY_GOALS = new Set(["TB:Over 1.5", "TB:Over 2.5", "TB:BTTS", "TB:Home Over 0.5", "TB:Away Over 0.5"]);
+export const CA_FAMILY_UNDER = new Set(["TB:Under 3.5", "TB:Under 4.5"]);
+export const CA_FAMILY_RESULT = new Set(["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"]);
+export const CA_FAMILY_DOMINANCE = new Set(["TB:Home Over 1.5", "TB:Away Over 1.5"]);
+// KNOWN SIMPLIFICATION: DC1X/1X2-Home (and DCX2/1X2-Away) overlap heavily —
+// DC1X is literally Home-or-Draw, so a positive DC1X alongside a positive
+// 1X2-Home isn't fully independent evidence the way two different goal
+// markets are. Treating the whole result family as equal-weight corroborators
+// for now; a finer per-pair overlap discount (like GPT's 0.5/0.2 idea) is a
+// real refinement but needs real co-occurrence data to set honestly rather
+// than another guessed number — revisit once the fixture-log (below) has
+// enough rows to check.
+function caFamilyOf(market) {
+  if (CA_FAMILY_GOALS.has(market)) return "goals";
+  if (CA_FAMILY_UNDER.has(market)) return "under";
+  if (CA_FAMILY_RESULT.has(market)) return "result";
+  if (CA_FAMILY_DOMINANCE.has(market)) return "dominance";
+  return null;
+}
+
+// Sample-size shrinkage (2026-07-13 plan) — replaces the old composite
+// score's guessed ±5pp caps with an actual statistical technique (empirical
+// Bayes-style shrinkage): score = lift × n/(n+k). A combo with n=12 gets
+// discounted hard toward zero; n=400 is barely touched. Kills the "tiny-n
+// combo with a freak +20pp lift" problem without a hard sample-size cutoff.
+export const CA_SHRINK_K = 25;
+function caShrinkScore(lift, n) {
+  const nn = n ?? 0;
+  return Math.abs(lift ?? 0) * (nn / (nn + CA_SHRINK_K));
+}
+
+// Family corroboration bonus (2026-07-13 plan). Counts OTHER markets in the
+// same family that ALSO have a clean (non-conflicting), floor-gated signal in
+// the SAME direction as `market` — i.e. real, independently-mined support for
+// the same underlying story, not just noise. Capped at 3 corroborators so the
+// bonus stays bounded even for a 5-member family.
+export const CA_FAMILY_CORROB_BONUS = 0.15; // multiplicative, per corroborator
+export const CA_FAMILY_CORROB_CAP = 3;
+function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) {
+  const fam = caFamilyOf(market);
+  if (!fam) return 0;
+  const pool = isAvoid ? cleanAvoid : cleanPositive;
+  const floorOk = c => isAvoid ? (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR : (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR;
+  const members = new Set();
+  for (const c of pool) {
+    if (c.market === market) continue;
+    if (caFamilyOf(c.market) !== fam) continue;
+    if (Math.abs(c.holdoutLift ?? 0) < CA_MIN_ELIGIBLE_LIFT) continue;
+    if (!floorOk(c)) continue;
+    members.add(c.market);
+  }
+  return Math.min(members.size, CA_FAMILY_CORROB_CAP);
+}
+
+// "Safest lean" score (2026-07-13 plan) — shrunk lift, boosted by family
+// corroboration. This is the always-computable lean (no odds required).
+function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid) {
+  const shrink = caShrinkScore(c.holdoutLift, c.holdoutSample);
+  const corrob = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
+  return shrink * (1 + CA_FAMILY_CORROB_BONUS * corrob);
+}
+
+// Odds for a CA market — reuses SA_MARKETS' oddsKey (same lookup
+// computeSAFeatures already does for SA) rather than a second way of reading
+// fixture odds.
+function caOddsFor(f, market) {
+  const def = SA_MARKETS[market];
+  if (!def || def._isPEMix || !def.oddsKey) return null;
+  const o = f.odds?.[def.oddsKey];
+  return o > 1 ? o : null;
+}
+
+// "Best value" score (2026-07-13 plan) — ONLY for positive-direction combos
+// with real odds available. Reuses config.js's own POOL_SCORE_P_EXP formula
+// (score = empiricalRate^p × ln(o)/o) rather than inventing a third value
+// formula — that one is already live-calibrated in the main engine for
+// exactly this "blend probability with payout" problem. Requires a real edge
+// first (CA's own holdout HR must beat the market's implied probability) —
+// no edge, no value candidacy, regardless of how the formula would score it.
+// NOTE: p=2.0 is carried over as a starting assumption, not a proven
+// transfer — CA's holdoutHitRate is an empirical win-rate off a mined
+// pattern, not a fully-calibrated probability the way the main engine's
+// empiricalRate is (that one's already been through the deflation curves).
+// Worth validating against CA's own outcomes once there's enough logged data.
+export const CA_VALUE_P_EXP = 2.0; // == POOL_SCORE_P_EXP
+function caValueScore(c, f) {
+  const odds = caOddsFor(f, c.market);
+  if (!odds) return null;
+  const impliedP = (1 / odds) * 100;
+  const hr = c.holdoutHitRate ?? 0;
+  if (hr <= impliedP) return null; // no edge, not a value candidate at all
+  return Math.pow(hr / 100, CA_VALUE_P_EXP) * (Math.log(odds) / odds);
+}
+
+// caMatches: the return value of matchCAConditions above. Returns an array of
+// verdict objects, computed over the FULL positive/avoid lists (not whatever
+// the UI currently has capped/filtered for display) — the fixture-level
+// picture, independent of which market pill is selected.
+export function computeCAVerdicts(caMatches, f) {
+  const { positive = [], avoid = [], contradictoryMarkets = [] } = caMatches || {};
+  const verdicts = [];
+  // Rule 0 — same-market conflicting signal (dev journal, 2026-07-13). Checked
+  // before the `!positive.length` early-return below, since a market can be
+  // flagged conflicting-signal even on a fixture with zero clean positive
+  // matches left (all its positives got absorbed into a contradiction).
+  for (const m of contradictoryMarkets) {
+    verdicts.push({
+      type: "conflicting-signal", market: m,
+      text: `${CA_MARKET_SHORT(m)} has both a validated positive and a validated avoid pattern matching this fixture — treated as a conflicting signal, not a lean either way.`,
+    });
+  }
+  if (!positive.length) return verdicts;
+  const avoidMarkets = new Set(avoid.map(c => c.market));
+
+  // Rule 1 — origin caveat, ONE verdict per MARKET, not per matched combo.
+  // ROOT CAUSE FIX (2026-07-13): a single fixture routinely matches many
+  // overlapping VALID combos in the same market — e.g. totalXG>=3.0 and
+  // totalXG>=3.5 can both be true for one fixture at once, and the mining
+  // pass produces both as separate combos. The origin-caveat check below
+  // only ever depends on p.market + avoidMarkets, never on which specific
+  // combo p is, so looping over every matched positive combo emitted the
+  // identical sentence once per combo — confirmed live: "Over 1.5 matched,
+  // but away scoring is flagged avoid..." repeated 13x verbatim before this
+  // fix, one per matching Over-1.5 combo. Deduping to one representative
+  // combo per market removes the duplication without changing the rule's
+  // logic. `positive` is already sorted best-holdout-first (see
+  // matchCAConditions above), so the first combo seen per market is the
+  // strongest one — kept as the representative for holdoutHitRate display.
+  const bestPerMarket = new Map();
+  for (const p of positive) if (!bestPerMarket.has(p.market)) bestPerMarket.set(p.market, p);
+  for (const p of bestPerMarket.values()) {
+    const components = CA_SIDE_COMPONENTS[p.market];
+    if (!components) continue;
+    const homeFlagged = components.home.every(m => avoidMarkets.has(m));
+    const awayFlagged = components.away.every(m => avoidMarkets.has(m));
+    if (homeFlagged && awayFlagged) {
+      verdicts.push({
+        type: "unclear-origin", market: p.market, holdoutHitRate: p.holdoutHitRate,
+        text: `${CA_MARKET_SHORT(p.market)} matched, but both home and away scoring are flagged avoid on this fixture — the pattern held up on holdout, but neither side looks like the source. Worth a second look before trusting it.`,
+      });
+    } else if (homeFlagged || awayFlagged) {
+      const flaggedSide = homeFlagged ? "home" : "away";
+      const otherSide    = homeFlagged ? "away" : "home";
+      verdicts.push({
+        type: "origin-caveat", market: p.market, holdoutHitRate: p.holdoutHitRate,
+        text: `${CA_MARKET_SHORT(p.market)} matched, but ${flaggedSide} scoring is flagged avoid on both thresholds — likely ${otherSide}-side driven, not spread across both teams. Real signal, resting on one path.`,
+      });
+    }
+  }
+
+  // Rule 2 — contradiction flag.
+  const positiveMarkets = new Set(positive.map(c => c.market));
+  for (const [a, b] of CA_CONTRADICTION_PAIRS) {
+    if (positiveMarkets.has(a) && positiveMarkets.has(b)) {
+      verdicts.push({
+        type: "contradiction", market: a, market2: b,
+        text: `${CA_MARKET_SHORT(a)} and ${CA_MARKET_SHORT(b)} both matched as VALID positives, but they can't both be right — one of these patterns is misfiring on this fixture. Treat both with extra caution.`,
+      });
+    }
+  }
+
+  // Rule 3 — Safest lean + optional second + Best value (2026-07-13 full
+  // rewrite, replaces the old Holdout-HR-dominant composite score entirely).
+  // caSafestScore (shrunk |lift| × family corroboration) can now win in
+  // EITHER direction — a well-corroborated avoid signal can be the fixture's
+  // actual safest lean, not just a caveat sentence buried under a positive
+  // pick. Same exclusions as before: conflicting-signal markets (Rule 0) and
+  // unclear-origin markets (Rule 1's stronger flag) never candidate. Two
+  // floor gates apply: CA_MIN_HOLDOUT_HR/CA_MAX_AVOID_HR (genuinely
+  // bettable/avoidable in absolute terms) AND CA_MIN_ELIGIBLE_LIFT (not
+  // structurally trivial even if the absolute number looks fine — mirrors
+  // POOL_MIN_EMPIRICAL_RATE's role in the main engine's pool).
+  const unclearOriginMarkets = new Set(verdicts.filter(v => v.type === "unclear-origin").map(v => v.market));
+  const contradictorySet = new Set(contradictoryMarkets);
+  const eligible = c => !contradictorySet.has(c.market) && !unclearOriginMarkets.has(c.market) && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT;
+  const cleanPositive = positive.filter(c => eligible(c) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR);
+  const cleanAvoid = avoid.filter(c => eligible(c) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR);
+
+  const scored = [
+    ...cleanPositive.map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid) })),
+    ...cleanAvoid.map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid) })),
+  ];
+
+  if (scored.length) {
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored[0];
+    verdicts.push({
+      type: "strongest-lean", market: top.c.market, holdoutHitRate: top.c.holdoutHitRate,
+      text: top.isAvoid
+        ? `Steer away from ${CA_MARKET_SHORT(top.c.market)} — holdout only ${top.c.holdoutHitRate}% (${top.c.holdoutLift}pp vs baseline).`
+        : `${CA_MARKET_SHORT(top.c.market)} looks like the strongest clean lean here — holdout ${top.c.holdoutHitRate}% (+${top.c.holdoutLift}pp vs baseline).`,
+    });
+
+    // Optional second lean (1 mandatory + 1 optional, per plan) — only from a
+    // DIFFERENT family than the top pick (otherwise it's the same story
+    // twice) and only if close enough in score to be worth a second line,
+    // rather than padding every fixture out to two leans by default.
+    const topFamily = caFamilyOf(top.c.market);
+    const second = scored.slice(1).find(e => caFamilyOf(e.c.market) !== topFamily && e.score >= top.score * CA_SECOND_LEAN_CLOSENESS);
+    if (second) {
+      verdicts.push({
+        type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
+        text: second.isAvoid
+          ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
+          : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
+      });
+    }
+  }
+
+  // Best value — positive direction only (you stake something; "avoid" isn't
+  // itself a stakeable market). Requires real odds AND a real edge (CA's own
+  // holdout HR beats the market's implied probability) via caValueScore —
+  // never shown just because the formula would score it, only when there's
+  // an actual price to compare against.
+  if (f) {
+    const valueCandidates = cleanPositive.map(c => ({ c, score: caValueScore(c, f) })).filter(x => x.score != null);
+    if (valueCandidates.length) {
+      valueCandidates.sort((a, b) => b.score - a.score);
+      const bestValue = valueCandidates[0].c;
+      const odds = caOddsFor(f, bestValue.market);
+      verdicts.push({
+        type: "best-value", market: bestValue.market, holdoutHitRate: bestValue.holdoutHitRate,
+        text: `Best value: ${CA_MARKET_SHORT(bestValue.market)} at ${odds} — holdout ${bestValue.holdoutHitRate}% beats the market's own ${(+(100 / odds).toFixed(1))}% implied price.`,
+      });
+    }
+  }
+
+  return verdicts;
+}
+
+// ── CA Verdict Log row builder (2026-07-14) ─────────────────────────────────
+// Pure function, no network call — one row per (market, direction) the
+// verdict engine considered for this fixture, collapsed to the single best
+// combo per market/direction (arrays are already strongest-first out of
+// matchCAConditions) rather than every threshold variant, per the plan's
+// "collapse each market to one signal first" step. The caller (CustomListView's
+// log button) batches these across every fixture for a date and POSTs once to
+// /api/ca-verdict-log — see that endpoint's own comment for the full
+// leakage-guard rationale behind caSnapshotDate.
+export function buildCAVerdictLogRows(f, caPatterns) {
+  if (!caPatterns || !f) return [];
+  const caMatches = matchCAConditions(f, caPatterns);
+  const verdicts = computeCAVerdicts(caMatches, f);
+  const { positive, avoid, contradictoryMarkets = [] } = caMatches;
+  const contradictorySet = new Set(contradictoryMarkets);
+
+  const bestPerMarket = list => {
+    const seen = new Map();
+    for (const c of list) if (!seen.has(c.market)) seen.set(c.market, c);
+    return [...seen.values()];
+  };
+  const bestPositive = bestPerMarket(positive);
+  const bestAvoid = bestPerMarket(avoid);
+  const cleanPositive = positive.filter(c => !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT);
+  const cleanAvoid = avoid.filter(c => !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT);
+
+  const fixtureId = f.id ?? f.fixtureId ?? f.matchId ?? `${f.teams?.home}__${f.teams?.away}__${f.time || ""}`;
+  const topLean = verdicts.find(v => v.type === "strongest-lean");
+  const secondLean = verdicts.find(v => v.type === "second-lean");
+  const bestValueV = verdicts.find(v => v.type === "best-value");
+
+  const rowFor = (c, isAvoid) => {
+    const conflict = contradictorySet.has(c.market);
+    const clearsFloor = !conflict && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT &&
+      (isAvoid ? (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR : (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR);
+    const odds = !isAvoid ? caOddsFor(f, c.market) : null;
+    return {
+      fixtureId, date: f.date || null, league: f.league || null,
+      home: f.teams?.home || null, away: f.teams?.away || null,
+      market: c.market, direction: isAvoid ? "avoid" : "positive", family: caFamilyOf(c.market),
+      holdoutHitRate: c.holdoutHitRate ?? null, holdoutLift: c.holdoutLift ?? null,
+      holdoutBaselineHR: c.holdoutBaselineHR ?? null, holdoutSample: c.holdoutSample ?? null,
+      trainHitRate: c.trainHitRate ?? null, gap: c.gap ?? null,
+      conflictFlag: conflict, clearsFloor,
+      familyCorrobCount: clearsFloor ? caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid) : 0,
+      shrinkScore: caShrinkScore(c.holdoutLift, c.holdoutSample),
+      safestScore: clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid) : null,
+      odds, valueEdgePP: odds ? +((c.holdoutHitRate ?? 0) - (100 / odds)).toFixed(1) : null,
+      valueScore: !isAvoid ? caValueScore(c, f) : null,
+      isTopLean: !!topLean && topLean.market === c.market,
+      isSecondLean: !!secondLean && secondLean.market === c.market,
+      isBestValue: !!bestValueV && bestValueV.market === c.market,
+      caSnapshotDate: caPatterns.generatedAt || null,
+      loggedAt: new Date().toISOString(),
+      outcome: null, // filled in later by a separate join-with-results pass
+    };
+  };
+
+  return [...bestPositive.map(c => rowFor(c, false)), ...bestAvoid.map(c => rowFor(c, true))];
 }
 
 // ── EXCLUDE SELECTION GROUPS ─────────────────────────────────────────────
@@ -4334,6 +4736,52 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .finally(() => setSaMixLoading(false));
   }, [saMarket, date]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── CA ROW — mirrors SA's state shape above, deliberately simpler in one
+  // way: CA has no separate Mix-fetch effect. SA's PE:Mix needs its own
+  // server call because SA's tertile buckets are relative to that day's
+  // fixture pool. CA's conditions are absolute thresholds (fixed at mining
+  // time), so "best market across all 14 for this fixture" is just a client-
+  // side max over data we already have — no extra endpoint needed.
+  const [caExpanded,     setCaExpanded]     = useState(false);
+  const [caMarket,       setCaMarket]       = useState(null); // e.g. "TB:Over 1.5", "CA:Mix", or null = off
+  const [caPatternsRow,  setCaPatternsRow]  = useState(null); // raw /api/ca-patterns payload
+  const [caLoadingRow,   setCaLoadingRow]   = useState(false);
+  const [caErrorRow,     setCaErrorRow]     = useState(null);
+  // CA verdict log (2026-07-14) — batches one row per fixture per market/
+  // direction the verdict engine considered, POSTed once to
+  // /api/ca-verdict-log. Manual action, not auto-fired on every render/
+  // re-memo (search text, filters etc. would otherwise spam the server) —
+  // Sterling triggers it explicitly once he's happy with a date's data.
+  const [caLogStatus, setCaLogStatus] = useState(null); // null | "logging" | {ok,count,added} | {error}
+  const logCAVerdicts = async () => {
+    if (!caPatternsRow || !date || caLogStatus === "logging") return;
+    setCaLogStatus("logging");
+    try {
+      const rows = fixtures.flatMap(f => buildCAVerdictLogRows(f, caPatternsRow));
+      const res = await fetch(`${SERVER}/api/ca-verdict-log`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, rows }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d?.error || `HTTP ${res.status}`);
+      setCaLogStatus({ ok: true, count: d.rowCount, added: d.added });
+    } catch (e) {
+      setCaLogStatus({ error: e.message });
+    }
+  };
+  useEffect(() => {
+    if (!caExpanded) return;
+    if (caLoadingRow) return;
+    if (caPatternsRow) return; // already have it — payload can be several MB, fetch once
+    setCaLoadingRow(true);
+    setCaErrorRow(null);
+    fetch(`${SERVER}/api/ca-patterns`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (d?.byMarket) setCaPatternsRow(d); else setCaErrorRow(d?.error || "No condition data"); })
+      .catch(e => setCaErrorRow(e.message))
+      .finally(() => setCaLoadingRow(false));
+  }, [caExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
   const setActiveStrategy = v => { setActiveStrategyState(v); saveSS({ activeStrategy: v }); };
@@ -4962,7 +5410,143 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     return filtered;
   }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
 
-  const displayRows = saMarket ? saRows : rows;
+  // CA row — mirrors saRows' shape/filters above so the existing row JSX
+  // renders it unchanged. One real difference from SA beyond the matcher
+  // itself: CA:Mix doesn't need a separate fetched list the way saMixLegs
+  // does — "this fixture's single best market today" is picked by
+  // caSafestScore (see below, 2026-07-13 full rewrite) off matchCAConditions'
+  // positive/avoid arrays, computed from the same caPatternsRow every other
+  // CA market uses.
+  const caRows = useMemo(() => {
+    if (!caMarket || !caPatternsRow) return [];
+    const s = search.toLowerCase();
+    const hasLiveFilter      = statFilters.includes("live");
+    const hasScheduledFilter = statFilters.includes("scheduled");
+    const bothOrNeither      = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
+    const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
+    const isMix = caMarket === "CA:Mix";
+
+    const out = [];
+    for (const f of fixtures) {
+      if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+      if (!bothOrNeither) {
+        const st = (f.state||"").toLowerCase();
+        if (hasLiveFilter && !liveStates.has(st)) continue;
+        if (hasScheduledFilter && !isScheduledState(st)) continue;
+      }
+      if (statFilters.some(id => {
+        if (["live","scheduled"].includes(id)) return false;
+        const sf = STAT_FILTERS.find(x => x.id === id);
+        return sf ? !sf.fn(f) : false;
+      })) continue;
+
+      const { positive, avoid, contradictoryMarkets = [] } = matchCAConditions(f, caPatternsRow);
+      const contradictorySet = new Set(contradictoryMarkets);
+      // Two floor gates applied upfront (2026-07-13 full rewrite), same
+      // exclusions computeCAVerdicts' Rule 3 uses so Mix/single-market rows
+      // and the verdict block never disagree: conflicting-signal markets
+      // never candidate; CA_MIN_HOLDOUT_HR/CA_MAX_AVOID_HR for genuinely
+      // bettable/avoidable absolute probability; CA_MIN_ELIGIBLE_LIFT so a
+      // structurally trivial lift can't win just because n or HR looks fine.
+      const cleanPositive = positive.filter(c =>
+        !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT
+      );
+      const cleanAvoid = avoid.filter(c =>
+        !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT
+      );
+      // caSafestScore (2026-07-13 full rewrite, replaces caCompositeScore):
+      // shrunk |lift| (empirical-Bayes-style — kills the tiny-n-freak-lift
+      // problem) × family corroboration (goals/under/result/dominance —
+      // several markets agreeing IS real support, but only counted once per
+      // family, not once per market). See caSafestScore's own comment for
+      // the full breakdown, including why this replaced the old
+      // Holdout-HR-dominant composite entirely rather than tuning its caps.
+      const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid);
+      let bestPositive, bestAvoid, marketLabel, family;
+      if (isMix) {
+        // Floor gates already applied above — cleanPositive/cleanAvoid ARE
+        // the candidate pools here, just ranked by score. If nothing cleared
+        // either gate, that side contributes no candidate — Mix falls back
+        // to the other side, or skips the fixture if neither clears.
+        bestPositive = cleanPositive.length
+          ? cleanPositive.reduce((best, c) => scoreOf(c, false) > scoreOf(best, false) ? c : best)
+          : null;
+        bestAvoid = cleanAvoid.length
+          ? cleanAvoid.reduce((best, c) => scoreOf(c, true) > scoreOf(best, true) ? c : best)
+          : null;
+        if (!bestPositive && !bestAvoid) continue;
+        const winner = bestPositive || bestAvoid;
+        marketLabel = (winner.market || "").replace(/^TB:/, "");
+        family = SA_TO_FAMILY_ID[winner.market];
+      } else {
+        // A single market can still have more than one VALID combo matching
+        // this fixture at once (different thresholds) — score them too,
+        // rather than just taking the first one off the array's holdout-HR
+        // sort order (the same high-baseline-style bias, just at the
+        // within-market level).
+        const posMatches = cleanPositive.filter(c => c.market === caMarket);
+        const avoidMatches = cleanAvoid.filter(c => c.market === caMarket);
+        bestPositive = posMatches.length
+          ? posMatches.reduce((best, c) => scoreOf(c, false) > scoreOf(best, false) ? c : best)
+          : null;
+        bestAvoid = avoidMatches.length
+          ? avoidMatches.reduce((best, c) => scoreOf(c, true) > scoreOf(best, true) ? c : best)
+          : null;
+        if (!bestPositive && !bestAvoid) continue;
+        marketLabel = caMarket.replace(/^TB:/, "");
+        family = SA_TO_FAMILY_ID[caMarket];
+      }
+      const primaryPick = getCustomPick(f, family, C);
+      const flagged = !bestPositive;
+      const pick = primaryPick
+        ? { ...primaryPick, color: flagged ? C.red : C.green }
+        : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.green };
+      if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
+      if (probFilter && pick.prob != null) {
+        if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
+        if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
+      }
+      if (kickoffFilter && f.time) {
+        const [hh, mm] = f.time.split(":").map(Number);
+        const mins = hh * 60 + (mm || 0);
+        const filterMins = kickoffFilter.hour * 60;
+        if (kickoffFilter.mode === "before" && mins > filterMins) continue;
+        if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+      }
+      if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
+      if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
+      if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
+
+      out.push({
+        f, pick,
+        _caPositive: bestPositive ? [bestPositive] : [],
+        _caAvoid: bestAvoid ? [bestAvoid] : [],
+        _caFlagged: flagged,
+      });
+    }
+    out.sort((a, b) => {
+      if (bothOrNeither) {
+        const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+        const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+        if (aLive !== bLive) return aLive - bLive;
+      }
+      if (a._caFlagged !== b._caFlagged) return a._caFlagged ? 1 : -1;
+      return a._caFlagged
+        ? (a._caAvoid[0]?.holdoutHitRate ?? 101) - (b._caAvoid[0]?.holdoutHitRate ?? 101)
+        : (b._caPositive[0]?.holdoutHitRate ?? -1) - (a._caPositive[0]?.holdoutHitRate ?? -1);
+    });
+    if (sortActive.has("strong_first")) {
+      out.sort((a, b) => {
+        const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+        const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+        return aS - bS;
+      });
+    }
+    return out;
+  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+
+  const displayRows = saMarket ? saRows : (caMarket ? caRows : rows);
 
   const saveListToJSON = () => {
     const payload = {
@@ -5296,6 +5880,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
                     setSaMarket(turningOn ? mk.id : null);
+                    if (turningOn) setCaMarket(null); // mutually exclusive with the CA row below
                     if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
                       setFamily(SA_TO_FAMILY_ID[mk.id]);
                       setActiveStrategy(null);
@@ -5321,6 +5906,105 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing only fixtures matching a validated SA pattern for <strong>{saMarket.replace(/^TB:/,"")}</strong>.
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── CONDITION STRATEGY (CA) ROW — mirrors the SA panel above exactly ── */}
+      <div style={{ marginBottom:10 }}>
+        <button
+          onClick={() => { setCaExpanded(v => !v); if (caMarket && !caExpanded) setCaMarket(null); }}
+          style={{ width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
+                   background: caExpanded ? `${C.amber}10` : (caMarket ? `${C.amber}08` : C.surface),
+                   border:`1px solid ${caExpanded ? `${C.amber}40` : (caMarket ? `${C.amber}30` : C.border)}`,
+                   borderRadius: caExpanded ? "8px 8px 0 0" : 8,
+                   cursor:"pointer",padding:"9px 13px",transition:"all .15s" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+            <span style={{ fontSize:9,color: caMarket ? C.amber : C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>
+              Condition Strategy
+            </span>
+            {caMarket && (
+              <span style={{ fontSize:8,background:`${C.amber}20`,color:C.amber,border:`1px solid ${C.amber}40`,
+                             borderRadius:4,padding:"1px 6px",fontWeight:800 }}>
+                {caMarket === "CA:Mix" ? "Mix" : caMarket.replace(/^TB:/,"")}
+              </span>
+            )}
+            {caLoadingRow && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
+            {caErrorRow && <span style={{ fontSize:8,color:C.red }}>{caErrorRow}</span>}
+          </div>
+          <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{caExpanded ? "▲" : "▼"}</span>
+        </button>
+
+        {!caExpanded && (
+          <div style={{ fontSize:8,color:C.muted,padding:"5px 4px 0",lineHeight:1.5 }}>
+            Holdout-validated condition matches, mined separately from Strategy Analyst.
+          </div>
+        )}
+
+        {caExpanded && (
+          <div style={{ border:`1px solid ${C.amber}30`,borderTop:"none",borderRadius:"0 0 8px 8px",
+                        padding:"10px 12px 12px",background:`${C.amber}04` }}>
+            <div style={{ fontSize:8,color:C.text,opacity:.65,marginBottom:10,lineHeight:1.6 }}>
+              Filters fixtures by holdout-validated condition patterns for each market.
+              Avoid-flagged games (⚑) appear at the bottom.
+            </div>
+            <div className="cscroll" style={{ marginBottom:6 }}>
+              {caMarket && (
+                <button onClick={() => setCaMarket(null)} className="gb"
+                  style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                           background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
+                  ✕ Off
+                </button>
+              )}
+              {CA_MARKET_LABELS.map(mk => {
+                const isMix = mk.id === "CA:Mix";
+                const isOn  = caMarket === mk.id;
+                return (
+                  <button key={mk.id} onClick={() => {
+                    const turningOn = !isOn;
+                    setCaMarket(turningOn ? mk.id : null);
+                    if (turningOn) setSaMarket(null); // mutually exclusive with the SA row above
+                    if (turningOn && !isMix && SA_TO_FAMILY_ID[mk.id]) {
+                      setFamily(SA_TO_FAMILY_ID[mk.id]);
+                      setActiveStrategy(null);
+                    }
+                  }} className="gb"
+                    style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                             background:isOn ? (isMix ? C.amber : C.red) : "transparent",
+                             color:isOn ? "#fff" : isMix ? C.amber : C.muted,
+                             border:`1px solid ${isOn ? (isMix ? C.amber : C.red) : isMix ? `${C.amber}50` : C.faint}`,
+                             fontWeight: isMix ? 800 : undefined }}>
+                    {mk.label}
+                  </button>
+                );
+              })}
+            </div>
+            {caMarket === "CA:Mix" && (
+              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
+                CA Mix view — each fixture shown in whichever market has its single strongest holdout-validated signal today, ranked by shrunk lift + family corroboration (caSafestScore), not raw holdout hit rate.
+              </div>
+            )}
+            {caMarket && caMarket !== "CA:Mix" && (
+              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
+                Showing only fixtures matching a holdout-validated condition for <strong>{caMarket.replace(/^TB:/,"")}</strong>.
+                Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
+              </div>
+            )}
+            {adminMode && caPatternsRow && date && (
+              <div style={{ marginTop:8, display:"flex", alignItems:"center", gap:8 }}>
+                <button onClick={logCAVerdicts} disabled={caLogStatus === "logging"} className="gb"
+                  style={{ padding:"5px 12px", fontSize:9, fontWeight:700, textTransform:"none",
+                           background:"transparent", color:C.amber, border:`1px solid ${C.amber}40`,
+                           opacity: caLogStatus === "logging" ? .6 : 1 }}>
+                  {caLogStatus === "logging" ? "Logging…" : "Log CA Verdicts"}
+                </button>
+                {caLogStatus && caLogStatus !== "logging" && (
+                  <span style={{ fontSize:8, color: caLogStatus.error ? C.red : C.muted }}>
+                    {caLogStatus.error ? caLogStatus.error : `${caLogStatus.added} rows logged for ${date} (${caLogStatus.count} total on file)`}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -5657,7 +6341,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           and a separate Clear action, instead of vanishing once any item is selected. */}
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap" }}>
         <div style={{ display:"flex",alignItems:"center",gap:12,flexWrap:"wrap" }}>
-          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket ? (saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`) : ""}</span>
+          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket ? (saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`) : caMarket ? ` (${caMarket === "CA:Mix" ? "CA Mix" : "CA " + caMarket.replace(/^TB:/,"")})` : ""}</span>
           {(() => {
             const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
             const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
@@ -5764,7 +6448,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Rows */}
       <div style={{ display:"flex",flexDirection:"column",gap:2,paddingBottom:selectedIds.size > 0 ? 60 : 0 }}>
-        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged }) => {
+        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged }) => {
           const probColor = pick.prob >= 75 ? C.green : pick.prob >= 60 ? C.gold : C.muted;
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
@@ -5816,6 +6500,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       style={{ marginLeft:5,fontSize:7,color:C.green,background:`${C.green}15`,
                                border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
                       ✓ SA +{_saPositive[0].lift}pp
+                    </span>
+                  )}
+                  {_caFlagged && (
+                    <span title={`Avoid: ${_caAvoid?.[0]?.key||""} (holdout ${_caAvoid?.[0]?.holdoutHitRate}%)`}
+                      style={{ marginLeft:5,fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ CA avoid
+                    </span>
+                  )}
+                  {!_caFlagged && _caPositive?.length > 0 && (
+                    <span title={`${_caPositive[0].key} — holdout ${_caPositive[0].holdoutHitRate}% (${_caPositive[0].holdoutLift > 0 ? "+" : ""}${_caPositive[0].holdoutLift}pp)`}
+                      style={{ marginLeft:5,fontSize:7,color:C.amber,background:`${C.amber}15`,
+                               border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ CA {_caPositive[0].holdoutHitRate}%
                     </span>
                   )}
                 </div>
@@ -5875,6 +6573,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       ✓ SA +{_saPositive[0].lift}pp
                     </span>
                   )}
+                  {_caFlagged && (
+                    <span title={`Avoid: ${_caAvoid?.[0]?.key||""} (holdout ${_caAvoid?.[0]?.holdoutHitRate}%)`}
+                      style={{ fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ CA avoid
+                    </span>
+                  )}
+                  {!_caFlagged && _caPositive?.length > 0 && (
+                    <span title={`${_caPositive[0].key} — holdout ${_caPositive[0].holdoutHitRate}% (${_caPositive[0].holdoutLift > 0 ? "+" : ""}${_caPositive[0].holdoutLift}pp)`}
+                      style={{ fontSize:7,color:C.amber,background:`${C.amber}15`,
+                               border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ CA {_caPositive[0].holdoutHitRate}%
+                    </span>
+                  )}
                 </div>
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
@@ -5890,7 +6602,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         })}
         {displayRows.length === 0 && (
           <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
-            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : "No matches"}
+            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : caMarket ? "No fixtures match a Condition Strategy pattern for this market" : "No matches"}
           </div>
         )}
       </div>
@@ -16576,7 +17288,7 @@ function GRMProInner() {
                       Condition Strategy
                     </div>
                     <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
-                      Show a fixture's holdout-tested condition matches in its Full Model page. Separate from the default Strategy tag — computed independently, may not always agree.
+                      Show a fixture's holdout-tested condition matches — positive, avoid, emerging, and trap patterns — in its Full Model page.
                     </div>
                   </div>
                 </button>

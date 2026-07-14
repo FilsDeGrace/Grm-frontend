@@ -33,6 +33,8 @@ import {
   AskJarvis,
   copyToClipboard,
   matchCAConditions,
+  computeCAVerdicts,
+  caPatternStrength,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
@@ -1199,9 +1201,12 @@ const _inFlightExpiry  = 38000;
 // ─────────────────────────────────────────────────────────────────────────────
 // CONDITION STRATEGY (CA) SECTION
 // Deliberately its own labeled section, not merged into or replacing the
-// default Strategy tag elsewhere on the fixture card — see App.jsx's toggle
-// copy: these are two independently-computed systems and are allowed to
-// disagree (hand-tuned live heuristic vs. holdout-validated mined pattern).
+// default Strategy tag elsewhere on the fixture card. Built entirely from
+// the app's existing C token system — no new colors/fonts introduced, since
+// a section that looks like a different product is worse than one that
+// looks plain. The one deliberate signature choice: a small SVG confidence
+// bar per combo (holdout fill against a baseline tick) so the lift reads as
+// a shape, not just a pair of numbers you have to subtract yourself.
 // ─────────────────────────────────────────────────────────────────────────────
 const CA_FIELD_LABELS = {
   totalXG: "Total xG", homeXG: "Home xG", awayXG: "Away xG",
@@ -1212,86 +1217,517 @@ function fmtCACondition(cond) {
   const label = CA_FIELD_LABELS[cond.field] || cond.field;
   return `${label} ${cond.op} ${cond.value}`;
 }
+// Second-tier page size for groupCAOverflow's non-collapsible "rest" list
+// (depth-2+ combos) — see ConditionStrategySection for why this needs its
+// own cap separate from the top-level CA_MARKET_PAGE_SIZE.
+const CA_COMPACT_PAGE_SIZE = 15;
+
+// Inline SVG icon set — 13px, currentColor via explicit color prop, no
+// external asset/library. One shape per state: ring+check (positive),
+// triangle+bang (avoid), flask (emerging/unproven), open ring+dash (none).
+function CAIconCheck({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <circle cx="8" cy="8" r="6.7" stroke={color} strokeWidth="1.4" />
+      <path d="M5.1 8.3l1.9 1.9L11 6" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function CAIconAvoid({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <path d="M8 1.8l6.4 11.4H1.6L8 1.8z" stroke={color} strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M8 6.3v3.1" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="11.3" r="0.85" fill={color} />
+    </svg>
+  );
+}
+function CAIconEmerging({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <path d="M6.4 1.8h3.2M6.9 1.8v3.5L3.7 12a1.3 1.3 0 001.2 1.9h6.2a1.3 1.3 0 001.2-1.9L9.1 5.3V1.8"
+        stroke={color} strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5.3 9.8h5.4" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+// Deliberately not a check, triangle, or flask — a trap is neither a bet
+// signal nor a validated avoid, it's a caution flag, and needs its own shape
+// so it can't be skimmed as one of the other three states.
+function CAIconTrap({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <rect x="1.8" y="1.8" width="12.4" height="12.4" rx="2.2" stroke={color} strokeWidth="1.3" strokeDasharray="2.2 1.6" />
+      <path d="M7.4 4.6L5.4 8.7h2.2l-1 2.7 3.4-4.4H7.9l1.1-2.4z" fill={color} />
+    </svg>
+  );
+}
+function CAIconNone({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <circle cx="8" cy="8" r="6.7" stroke={color} strokeWidth="1.2" opacity="0.55" />
+      <path d="M5.4 8h5.2" stroke={color} strokeWidth="1.3" strokeLinecap="round" opacity="0.75" />
+    </svg>
+  );
+}
+// The signature element: holdout fill (solid) against a baseline tick (thin
+// vertical mark). The gap between the tick and the fill's edge IS the lift —
+// readable as a shape before it's read as two numbers.
+function CAConfidenceBar({ holdout, baseline, color, width = 96, height = 6 }) {
+  const clamp = v => Math.max(0, Math.min(100, v ?? 0));
+  const fillW = (clamp(holdout) / 100) * width;
+  const tickX = (clamp(baseline) / 100) * width;
+  return (
+    <svg width={width} height={height + 6} viewBox={`0 0 ${width} ${height + 6}`} style={{ display: "block" }}>
+      <rect x="0" y="3" width={width} height={height} rx={height / 2} fill={color} opacity="0.14" />
+      <rect x="0" y="3" width={fillW} height={height} rx={height / 2} fill={color} />
+      <rect x={Math.max(0, tickX - 0.75)} y="0" width="1.5" height={height + 6} fill={color} opacity="0.6" />
+    </svg>
+  );
+}
+
+const CA_STRENGTH_LABEL = { weak: "Weak", moderate: "Moderate", strong: "Strong" };
+
 function CAComboRow({ c, isAvoid, isEmerging }) {
   const marketLabel = (c.market || "").replace(/^TB:/, "");
-  const statusColor = isEmerging ? C.muted : (isAvoid ? C.red : C.accent);
+  const color = isEmerging ? C.muted : (isAvoid ? C.red : C.accent);
+  const Icon = isEmerging ? CAIconEmerging : (isAvoid ? CAIconAvoid : CAIconCheck);
   return (
-    <div style={{ padding: isEmerging ? "8px 14px" : "10px 14px", borderBottom: `1px solid ${C.border}`, opacity: isEmerging ? 0.75 : 1 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-        <span style={{ fontSize: isEmerging ? 9 : 10, fontWeight: 800, color: isEmerging ? C.muted : C.text }}>
-          {isEmerging ? "◌ Emerging — " : isAvoid ? "⚠ Avoid — " : "✓ "}{marketLabel}
-        </span>
-        <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} · {c.status}</span>
+    <div style={{
+      padding: isEmerging ? "9px 14px" : "11px 14px",
+      borderBottom: `1px solid ${C.border}`,
+      borderLeft: `2px solid ${isEmerging ? "transparent" : color}`,
+      opacity: isEmerging ? 0.8 : 1,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <Icon color={color} />
+          <span style={{ fontSize: isEmerging ? 9.5 : 10.5, fontWeight: 800, color: isEmerging ? C.muted : C.text, whiteSpace: "nowrap" }}>
+            {isAvoid ? "Avoid — " : ""}{marketLabel}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          {c.topReason && (
+            <span style={{
+              fontSize: 7, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em",
+              color, background: `${color}18`, border: `1px solid ${color}40`, borderRadius: 4, padding: "1px 5px",
+            }}>
+              {c.topReason === "hitrate" ? "Best Rate" : "Best Lift"}
+            </span>
+          )}
+          <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} · {c.status}</span>
+        </div>
       </div>
-      <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>
+      <div style={{ fontSize: 9, color: C.muted, marginTop: 3, lineHeight: 1.5 }}>
         {c.conditions.map(fmtCACondition).join(" · ")}
       </div>
-      <div style={{ fontSize: 9, color: statusColor, marginTop: 4, fontWeight: 700 }}>
-        Holdout {c.holdoutHitRate}% (baseline {c.holdoutBaselineHR}%, {c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp)
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 7 }}>
+        <CAConfidenceBar holdout={c.holdoutHitRate} baseline={c.holdoutBaselineHR} color={color} />
+        <span style={{ fontSize: 10, fontWeight: 800, color }}>
+          {c.holdoutHitRate}%
+        </span>
+        <span style={{ fontSize: 8, color: C.muted }}>
+          vs {c.holdoutBaselineHR}% base · {c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp ({CA_STRENGTH_LABEL[caPatternStrength(c.holdoutLift)]})
+        </span>
       </div>
-      <div style={{ fontSize: 8, color: C.muted, marginTop: 2 }}>
+      <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>
         Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% (depth {c.depth}, n={c.holdoutSample}{isEmerging ? " — small sample, unproven" : ""})
       </div>
     </div>
   );
 }
+
+// trapType is set by conditions-analyst.mjs:
+//   'looked-good-failed' — mined as a positive pattern (train said bet it),
+//     holdout didn't back that up.
+//   'looked-bad-held-up' — mined as a negative/avoid pattern (train said
+//     avoid it), holdout says it's actually fine — a false avoid signal.
+const TRAP_TYPE_LABEL = {
+  "looked-good-failed": "Looked good on train, failed on holdout",
+  "looked-bad-held-up": "Looked bad on train, held up on holdout",
+};
+function CATrapRow({ c }) {
+  const color = C.amber;
+  const label = TRAP_TYPE_LABEL[c.trapType] || "Train/holdout mismatch";
+  return (
+    <div style={{
+      padding: "9px 14px",
+      borderBottom: `1px solid ${C.border}`,
+      borderLeft: `2px solid ${color}`,
+      opacity: 0.9,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <CAIconTrap color={color} />
+          <span style={{ fontSize: 9.5, fontWeight: 800, color: C.text, whiteSpace: "nowrap" }}>
+            {(c.market || "").replace(/^TB:/, "")}
+          </span>
+        </div>
+        <span style={{ fontSize: 8, color: C.muted, flexShrink: 0 }}>{c.status}</span>
+      </div>
+      <div style={{ fontSize: 9, color: C.muted, marginTop: 3, lineHeight: 1.5 }}>
+        {c.conditions.map(fmtCACondition).join(" · ")}
+      </div>
+      <div style={{ fontSize: 9, fontWeight: 700, color, marginTop: 6 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>
+        Train {c.trainHitRate}% → Holdout {c.holdoutHitRate ?? "n/a"}% (gap {c.gap > 0 ? "+" : ""}{c.gap ?? "n/a"}pp, n={c.holdoutSample})
+      </div>
+    </div>
+  );
+}
+
+// Cross-market reasoning engine output (item #2, Phase 1) — deliberately its
+// own shape, not reused from check/avoid/flask/trap: this isn't a market
+// state, it's a note about how two-or-more shown states relate to each other.
+function CAIconVerdict({ size = 13, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <path d="M2.5 4.5h4.2l1.6 2M13.5 4.5H9.3l-1.6 2M2.5 11.5h4.2l1.6-2M13.5 11.5H9.3l-1.6-2"
+        stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="1.2" fill={color} />
+    </svg>
+  );
+}
+// Mirrors ConsensusBlock's data/verdict split in ExternalPredictions below —
+// same faint box, same uppercase label pattern. Renders nothing when there's
+// nothing to say (no "all clear" filler line — silence is the null state).
+function CAVerdictBlock({ verdicts }) {
+  if (!verdicts || !verdicts.length) return null;
+  return (
+    <div style={{
+      background: C.faint, borderRadius: 8, padding: "12px 14px",
+      margin: "12px 14px", display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
+        textTransform: "uppercase", color: C.muted, marginBottom: 2,
+      }}>
+        Verdict
+      </div>
+      {verdicts.map((v, i) => {
+        const isLean = v.type === "strongest-lean";
+        const isSecond = v.type === "second-lean";
+        const isValue = v.type === "best-value";
+        const color = (v.type === "contradiction" || v.type === "conflicting-signal") ? C.red
+          : isValue ? C.gold
+          : (isLean || isSecond) ? C.accent
+          : C.amber;
+        const Icon = (isLean || isSecond || isValue) ? CAIconCheck : CAIconVerdict;
+        return (
+          <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <Icon size={12} color={color} />
+            <span style={{ fontSize: 10, color: C.text, lineHeight: 1.6, fontWeight: (isLean || isValue) ? 700 : 400 }}>{v.text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const CA_MARKET_OPTIONS = [
   "TB:Under 3.5", "TB:Under 4.5", "TB:Over 1.5", "TB:Over 2.5", "TB:BTTS",
   "TB:Home Over 0.5", "TB:Away Over 0.5", "TB:Home Over 1.5", "TB:Away Over 1.5",
   "TB:DC1X", "TB:DCX2", "TB:1X2-Home", "TB:1X2-Away", "TB:1X2-Draw",
 ];
+
+// One pill per market, icon encodes state at a glance:
+//  ring+check  = has a VALID positive match     triangle = has a VALID avoid match
+//  flask       = no VALID match, but emerging (low-sample) data exists — worth a look
+//  open ring   = genuinely nothing at all for this fixture/market
+function CAMarketPill({ label, isOn, hasPositive, hasAvoid, hasEmerging, hasMixed, onClick }) {
+  const state = hasMixed ? "mixed" : hasPositive ? "positive" : hasAvoid ? "avoid" : hasEmerging ? "emerging" : "none";
+  const color = state === "positive" ? C.accent : (state === "avoid" || state === "mixed") ? C.red : state === "emerging" ? C.amber : C.muted;
+  const Icon = state === "positive" ? CAIconCheck : state === "avoid" ? CAIconAvoid : state === "mixed" ? CAIconVerdict : state === "emerging" ? CAIconEmerging : CAIconNone;
+  return (
+    <button onClick={onClick} className="gb"
+      style={{
+        flexShrink: 0, display: "flex", alignItems: "center", gap: 5,
+        padding: "6px 11px", fontSize: 10, textTransform: "none", fontFamily: C.font,
+        background: isOn ? `${color}18` : "transparent",
+        color: isOn ? color : C.muted,
+        border: `1px solid ${isOn ? `${color}55` : C.faint}`,
+        fontWeight: isOn ? 800 : 600,
+      }}>
+      <Icon size={11} color={isOn ? color : C.muted} />
+      {label}
+    </button>
+  );
+}
+
+// ── OVERFLOW GROUPING (Option C, 2026-07-13) ────────────────────────────────
+// When "+N more" is expanded within a single market, don't just dump every
+// remaining combo as full cards — that's the exact bug this session fixed.
+// Depth-1 combos (one condition, e.g. totalXG>=3.15) collapse into a single
+// range row per field+op: "Total xG >= 3.0-3.69 (14 thresholds, holdout
+// 58-65%)" — there's only one axis being swept, so a range is a faithful
+// summary of what was actually tested.
+// Depth-2+ combos are NOT collapsed into per-field ranges: doing so would
+// imply every value in field A's range was tested against every value in
+// field B's range, when actually each surviving combo is one specific PAIR
+// (e.g. awayCS>=44.6 was only ever tested paired with awayXG>=2.63, not with
+// every other awayXG cutoff in the range). Collapsing them independently
+// would silently misrepresent which thresholds were actually validated
+// together — so depth-2+ combos are listed individually instead, just as a
+// dense one-line row (condition string + holdout %) instead of the full
+// CAComboRow card, so 190 of them is still scrollable rather than unusable.
+function groupCAOverflow(combos) {
+  const byKey = new Map(); // `${field}${op}` -> accumulator
+  const rest = [];
+  for (const c of combos) {
+    if (c.depth === 1 && c.conditions?.length === 1) {
+      const cond = c.conditions[0];
+      const key = `${cond.field}${cond.op}`;
+      if (!byKey.has(key)) byKey.set(key, { field: cond.field, op: cond.op, values: [], hrs: [] });
+      const g = byKey.get(key);
+      g.values.push(cond.value);
+      if (typeof c.holdoutHitRate === "number") g.hrs.push(c.holdoutHitRate);
+    } else {
+      rest.push(c);
+    }
+  }
+  const ranges = [...byKey.values()].map(g => ({
+    field: g.field, op: g.op,
+    min: Math.min(...g.values), max: Math.max(...g.values),
+    hrMin: g.hrs.length ? Math.min(...g.hrs) : null,
+    hrMax: g.hrs.length ? Math.max(...g.hrs) : null,
+    count: g.values.length,
+  }));
+  return { ranges, rest };
+}
+function CARangeRow({ r, isAvoid }) {
+  const color = isAvoid ? C.red : C.accent;
+  const fieldLabel = CA_FIELD_LABELS[r.field] || r.field;
+  const spanText = r.min === r.max ? `${r.min}` : `${r.min}\u2013${r.max}`;
+  const hrText = r.hrMin == null ? "n/a" : (r.hrMin === r.hrMax ? `${r.hrMin}%` : `${r.hrMin}\u2013${r.hrMax}%`);
+  return (
+    <div style={{ padding: "8px 14px", borderBottom: `1px solid ${C.border}`, borderLeft: `2px solid ${color}`, opacity: 0.9 }}>
+      <div style={{ fontSize: 9.5, fontWeight: 700, color: C.text }}>
+        {fieldLabel} {r.op} {spanText}
+        <span style={{ color: C.muted, fontWeight: 500 }}> ({r.count} threshold{r.count === 1 ? "" : "s"})</span>
+      </div>
+      <div style={{ fontSize: 8, color: C.muted, marginTop: 3 }}>holdout {hrText}</div>
+    </div>
+  );
+}
+function CACompactRow({ c, isAvoid }) {
+  const color = isAvoid ? C.red : C.accent;
+  return (
+    <div style={{
+      padding: "6px 14px", borderBottom: `1px solid ${C.border}`, borderLeft: `2px solid ${color}`,
+      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
+    }}>
+      <span style={{ fontSize: 9, color: C.muted, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {c.conditions.map(fmtCACondition).join(" \u00b7 ")}
+      </span>
+      <span style={{ fontSize: 9, fontWeight: 700, color, flexShrink: 0 }}>
+        {c.holdoutHitRate == null ? "n/a" : `${c.holdoutHitRate}%`}
+      </span>
+    </div>
+  );
+}
+function CAShowMoreButton({ count, onClick }) {
+  return (
+    <button onClick={onClick} className="gb" style={{
+      display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+      width: "calc(100% - 28px)", margin: "8px 14px",
+      padding: "9px 10px", fontSize: 9.5, fontWeight: 800, textTransform: "none", fontFamily: C.font,
+      background: `${C.accent}12`, color: C.accent, border: `1px solid ${C.accent}35`, borderRadius: 8,
+    }}>
+      <span>{`+${count} more \u2014 tap to expand`}</span>
+      <span style={{ fontSize: 8 }}>{"\u25be"}</span>
+    </button>
+  );
+}
+
+// Top view fix (item #2, agent-B session — high-baseline markets like Home
+// Over 0.5 at 78.5% baseline were dominating the top slots over a smaller-%
+// but bigger-lift market like Over 2.5 at +14.1pp off a 59.5% baseline, since
+// the old slice(0,2) was pure holdoutHitRate ordering). Deliberately NOT a
+// blended composite score — this app shows the reasoning everywhere else
+// (Jarvis, verdicts), a hidden blend would be the odd one out. Instead: up to
+// 2 slots for the best raw hit rate, up to 2 for the best lift, each tagged
+// via topReason so CAComboRow can label *why* a card made the cut. `rank` is
+// deliberately NOT a sort input here — it's a within-market position by the
+// same raw holdout HR, so folding it in would just reintroduce the same
+// high-baseline bias this fix exists to remove.
+function pickCATopSlots(list, isAvoid) {
+  if (!list.length) return [];
+  if (list.length <= 4) return list.map(c => ({ ...c, topReason: null }));
+  const byHitRate = [...list].sort((a, b) => isAvoid
+    ? (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101)
+    : (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
+  const byLift = [...list].sort((a, b) => isAvoid
+    ? (a.holdoutLift ?? Infinity) - (b.holdoutLift ?? Infinity)
+    : (b.holdoutLift ?? -Infinity) - (a.holdoutLift ?? -Infinity));
+  const keyOf = c => c.key || `${c.market}|${c.rank}|${JSON.stringify(c.conditions)}`;
+  const picked = [];
+  const used = new Set();
+  for (const c of byHitRate) {
+    if (picked.length >= 2) break;
+    const k = keyOf(c);
+    if (used.has(k)) continue;
+    used.add(k);
+    picked.push({ ...c, topReason: "hitrate" });
+  }
+  const beforeLift = picked.length;
+  for (const c of byLift) {
+    if (picked.length >= beforeLift + 2) break;
+    const k = keyOf(c);
+    if (used.has(k)) continue;
+    used.add(k);
+    picked.push({ ...c, topReason: "lift" });
+  }
+  return picked;
+}
+
 function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
   const [selectedMarket, setSelectedMarket] = useState("__top__");
+  const [showMorePositive, setShowMorePositive] = useState(false);
+  const [showMoreAvoid, setShowMoreAvoid] = useState(false);
+  // Second-tier caps: groupCAOverflow's "rest" (depth-2+ combos) isn't range-
+  // collapsible, so it can still be large on its own — Under 4.5's avoid
+  // overflow is mostly depth-2 (awayCS+awayXG style), confirmed live at 190+
+  // combos past the first 5. Compact rows are far cheaper than the full
+  // CAComboRow cards this session started with, but 190 of anything at once
+  // is still an unbounded render on a phone, so "rest" gets its own
+  // top-N-then-expand instead of dumping in one shot the moment the first
+  // "+N more" is tapped.
+  const [showAllPositiveRest, setShowAllPositiveRest] = useState(false);
+  const [showAllAvoidRest, setShowAllAvoidRest] = useState(false);
+  // Selecting a market resets every expand toggle — otherwise "show more"
+  // left open on Under 4.5 would carry over (still expanded, now filtered to
+  // a totally different market's overflow) when you tap into Over 1.5 next.
+  const selectMarket = (m) => {
+    setSelectedMarket(m);
+    setShowMorePositive(false); setShowMoreAvoid(false);
+    setShowAllPositiveRest(false); setShowAllAvoidRest(false);
+  };
   if (!caModeEnabled) return null;
   if (caError) return (
     <SectionPanel label="Condition Strategy">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{caError}</div>
     </SectionPanel>
   );
-  const { positive, avoid, emergingPositive, emergingAvoid } = caMatches;
-  if (!positive.length && !avoid.length && !emergingPositive.length && !emergingAvoid.length) return (
+  const { positive, avoid, emergingPositive, emergingAvoid, traps, contradictoryMarkets = [] } = caMatches;
+  const contradictorySet = new Set(contradictoryMarkets);
+  // Cards for a conflicting-signal market are suppressed here — per dev journal:
+  // "don't explain the patterns at all, mark the market as having
+  // contradictory patterns instead." CAVerdictBlock below still surfaces the
+  // one-line conflicting-signal note for it (computeCAVerdicts runs off the FULL
+  // caMatches, so it fires fixture-wide regardless of the selected pill).
+  const cleanPositive = positive.filter(c => !contradictorySet.has(c.market));
+  const cleanAvoid = avoid.filter(c => !contradictorySet.has(c.market));
+  // Top-level always — the fixture's whole picture, not scoped to whichever
+  // market pill happens to be selected. Computed off the full lists, not the
+  // display-capped shownX ones below, so a caveat can fire even when its
+  // triggering avoid-pattern isn't one of the 2 rows currently on screen.
+  const verdicts = computeCAVerdicts(caMatches, f);
+  // contradictoryMarkets counted here too: a fixture whose ONLY match is a
+  // same-market contradiction would otherwise hit this early return and
+  // silently drop the conflicting-signal verdict along with everything else.
+  if (!cleanPositive.length && !cleanAvoid.length && !emergingPositive.length && !emergingAvoid.length && !traps.length && !contradictoryMarkets.length) return (
     <SectionPanel label="Condition Strategy">
-      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>
+      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
+        <CAIconNone color={C.muted} />
         No holdout-validated condition matches this fixture right now.
       </div>
     </SectionPanel>
   );
-  // Default view: top 2 of each direction only, not every match — a fixture
-  // can legitimately satisfy a dozen near-identical Under 4.5 combos at
-  // slightly different thresholds; showing all of them reads as noise, not
-  // signal. Picking a market from the dropdown switches to showing every
-  // match for JUST that market, which is the actual use case for wanting
-  // more than 2 — "does this game have anything for BTTS specifically."
+  // Default view: 2x2 split (2 best by hit rate, 2 best by lift — see
+  // pickCATopSlots) instead of every match — a fixture can legitimately
+  // satisfy a dozen near-identical Under 4.5 combos at slightly different
+  // thresholds; showing all of them reads as noise, not signal. Picking a
+  // market switches to showing every match for JUST that market — the actual
+  // use case for wanting more than a handful. Top view never shows a "+N
+  // more" affordance.
   const showTop = selectedMarket === "__top__";
-  const shownPositive = showTop ? positive.slice(0, 2) : positive.filter(c => c.market === selectedMarket);
-  const shownAvoid    = showTop ? avoid.slice(0, 2)    : avoid.filter(c => c.market === selectedMarket);
+  const isSelectedMixed = !showTop && contradictorySet.has(selectedMarket);
+  const positiveForMarket = showTop ? pickCATopSlots(cleanPositive, false) : cleanPositive.filter(c => c.market === selectedMarket);
+  const avoidForMarket    = showTop ? pickCATopSlots(cleanAvoid, true)     : cleanAvoid.filter(c => c.market === selectedMarket);
+  // ROOT CAUSE FIX (2026-07-13): drilling into one market previously rendered
+  // EVERY VALID combo for it uncapped — a market can carry hundreds of
+  // overlapping threshold variants (confirmed live: 2158 total across all
+  // markets, one market alone dumping 200+ rows), unreadable on a phone and
+  // a real render-cost/scroll-jank risk. Top 5 (pre-sorted by holdout hit
+  // rate in matchCAConditions, so slice(0, N) keeps the strongest) render as
+  // full cards, same as before. Anything past 5 is hidden behind a tap-to-
+  // expand button — see groupCAOverflow for how the expanded view avoids
+  // just dumping the rest unchanged.
+  const CA_MARKET_PAGE_SIZE = 5;
+  const shownPositive = showTop ? positiveForMarket : positiveForMarket.slice(0, CA_MARKET_PAGE_SIZE);
+  const shownAvoid    = showTop ? avoidForMarket    : avoidForMarket.slice(0, CA_MARKET_PAGE_SIZE);
+  const overflowPositive = showTop ? [] : positiveForMarket.slice(CA_MARKET_PAGE_SIZE);
+  const overflowAvoid    = showTop ? [] : avoidForMarket.slice(CA_MARKET_PAGE_SIZE);
+  const groupedPositive = showMorePositive && overflowPositive.length ? groupCAOverflow(overflowPositive) : null;
+  const groupedAvoid    = showMoreAvoid    && overflowAvoid.length    ? groupCAOverflow(overflowAvoid)    : null;
   // Emerging (low-test-n) — always capped at 2 each regardless of view, even
-  // when drilling into one market: these are demoted by design, not a second
-  // full list to browse. Never mixed into shownPositive/shownAvoid above.
+  // when drilling into one market: demoted by design, not a second full list.
   const shownEmergingPositive = (showTop ? emergingPositive : emergingPositive.filter(c => c.market === selectedMarket)).slice(0, 2);
   const shownEmergingAvoid    = (showTop ? emergingAvoid    : emergingAvoid.filter(c => c.market === selectedMarket)).slice(0, 2);
-  const hasAnyShown = shownPositive.length || shownAvoid.length || shownEmergingPositive.length || shownEmergingAvoid.length;
+  // Traps — same capped-at-2 treatment as emerging: a caution note, not a
+  // primary list to scroll through.
+  const shownTraps = (showTop ? traps : traps.filter(c => c.market === selectedMarket)).slice(0, 2);
+  const hasAnyShown = shownPositive.length || shownAvoid.length || shownEmergingPositive.length || shownEmergingAvoid.length || shownTraps.length;
   return (
     <SectionPanel label="Condition Strategy">
-      <div style={{ padding: "8px 14px", borderBottom: `1px solid ${C.border}` }}>
-        <select value={selectedMarket} onChange={e => setSelectedMarket(e.target.value)}
-          style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: C.bg, color: C.text,
-                   border: `1px solid ${C.border}`, fontSize: 10, fontFamily: C.font }}>
-          <option value="__top__">Top matches ({positive.length + avoid.length} total)</option>
-          {CA_MARKET_OPTIONS.map(m => {
-            const label = m.replace(/^TB:/, "");
-            const hasP = positive.some(c => c.market === m), hasA = avoid.some(c => c.market === m);
-            return <option key={m} value={m}>{label}{hasP ? " ✓" : ""}{hasA ? " ⚠" : ""}{!hasP && !hasA ? " —" : ""}</option>;
-          })}
-        </select>
+      <div className="cscroll" style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 6 }}>
+        <CAMarketPill label={`Top (${cleanPositive.length + cleanAvoid.length})`}
+          isOn={selectedMarket === "__top__"} hasPositive={cleanPositive.length > 0} hasAvoid={!cleanPositive.length && cleanAvoid.length > 0}
+          hasEmerging={false} onClick={() => selectMarket("__top__")} />
+        {CA_MARKET_OPTIONS.map(m => {
+          const label = m.replace(/^TB:/, "");
+          const isMixed = contradictorySet.has(m);
+          const hasP = !isMixed && positive.some(c => c.market === m);
+          const hasA = !isMixed && avoid.some(c => c.market === m);
+          const hasE = !isMixed && !hasP && !hasA && (emergingPositive.some(c => c.market === m) || emergingAvoid.some(c => c.market === m));
+          return (
+            <CAMarketPill key={m} label={label} isOn={selectedMarket === m}
+              hasPositive={hasP} hasAvoid={hasA} hasEmerging={hasE} hasMixed={isMixed}
+              onClick={() => selectMarket(m)} />
+          );
+        })}
       </div>
-      {!hasAnyShown && (
+      {!hasAnyShown && !isSelectedMixed && (
         <div style={{ padding: "12px 14px", fontSize: 9, color: C.muted }}>
-          No {selectedMarket.replace(/^TB:/, "")} match for this fixture.
+          No {selectedMarket === "__top__" ? "" : selectedMarket.replace(/^TB:/, "") + " "}match for this fixture.
+        </div>
+      )}
+      {!hasAnyShown && isSelectedMixed && (
+        <div style={{ padding: "12px 14px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
+          <CAIconVerdict size={12} color={C.red} />
+          {selectedMarket.replace(/^TB:/, "")} has conflicting validated patterns on this fixture — see the note below instead of individual cards.
         </div>
       )}
       {shownPositive.map((c, i) => <CAComboRow key={`p${i}`} c={c} isAvoid={false} />)}
+      {overflowPositive.length > 0 && !showMorePositive && (
+        <CAShowMoreButton count={overflowPositive.length} onClick={() => setShowMorePositive(true)} />
+      )}
+      {groupedPositive && (
+        <>
+          {groupedPositive.ranges.map((r, i) => <CARangeRow key={`pr${i}`} r={r} isAvoid={false} />)}
+          {groupedPositive.rest.slice(0, CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`pc${i}`} c={c} isAvoid={false} />)}
+          {groupedPositive.rest.length > CA_COMPACT_PAGE_SIZE && !showAllPositiveRest && (
+            <CAShowMoreButton count={groupedPositive.rest.length - CA_COMPACT_PAGE_SIZE} onClick={() => setShowAllPositiveRest(true)} />
+          )}
+          {showAllPositiveRest && groupedPositive.rest.slice(CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`pcx${i}`} c={c} isAvoid={false} />)}
+        </>
+      )}
       {shownAvoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
+      {overflowAvoid.length > 0 && !showMoreAvoid && (
+        <CAShowMoreButton count={overflowAvoid.length} onClick={() => setShowMoreAvoid(true)} />
+      )}
+      {groupedAvoid && (
+        <>
+          {groupedAvoid.ranges.map((r, i) => <CARangeRow key={`ar${i}`} r={r} isAvoid={true} />)}
+          {groupedAvoid.rest.slice(0, CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`ac${i}`} c={c} isAvoid={true} />)}
+          {groupedAvoid.rest.length > CA_COMPACT_PAGE_SIZE && !showAllAvoidRest && (
+            <CAShowMoreButton count={groupedAvoid.rest.length - CA_COMPACT_PAGE_SIZE} onClick={() => setShowAllAvoidRest(true)} />
+          )}
+          {showAllAvoidRest && groupedAvoid.rest.slice(CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`acx${i}`} c={c} isAvoid={true} />)}
+        </>
+      )}
       {(shownEmergingPositive.length > 0 || shownEmergingAvoid.length > 0) && (
         <div style={{ padding: "6px 14px", fontSize: 8, fontWeight: 800, color: C.muted, letterSpacing: ".08em", textTransform: "uppercase" }}>
           Emerging — small sample, unproven
@@ -1299,6 +1735,13 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
       )}
       {shownEmergingPositive.map((c, i) => <CAComboRow key={`ep${i}`} c={c} isAvoid={false} isEmerging />)}
       {shownEmergingAvoid.map((c, i) => <CAComboRow key={`ea${i}`} c={c} isAvoid={true} isEmerging />)}
+      {shownTraps.length > 0 && (
+        <div style={{ padding: "6px 14px", fontSize: 8, fontWeight: 800, color: C.amber, letterSpacing: ".08em", textTransform: "uppercase" }}>
+          Traps — matched a pattern that fooled itself before
+        </div>
+      )}
+      {shownTraps.map((c, i) => <CATrapRow key={`t${i}`} c={c} />)}
+      <CAVerdictBlock verdicts={verdicts} />
     </SectionPanel>
   );
 }
@@ -1801,6 +2244,44 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
     };
   }, [f.id, f.date, date]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // FMP-FIX (2026-07-13, item #4): trap the phone/browser back button so it
+  // closes the Full Model page instead of leaving the app entirely. One
+  // history entry is pushed the first time this page mounts (pushedHistoryRef
+  // guards against React 18 StrictMode's dev-mode double-invoke re-pushing a
+  // second entry on the same mount). onBackRef always holds the latest onBack
+  // without re-subscribing the listener on every parent re-render (App.jsx
+  // passes a fresh inline onBack function each render).
+  // Both exits now go through the SAME path: the in-app Back button below
+  // calls history.back() (see handleBackButton) instead of onBack directly,
+  // which fires this popstate listener, which is the only thing that calls
+  // the real onBack(). That keeps the pushed entry and the two ways of
+  // leaving (gesture vs button) from drifting out of sync with each other.
+  const onBackRef = useRef(onBack);
+  useEffect(() => { onBackRef.current = onBack; }, [onBack]);
+  const pushedHistoryRef = useRef(false);
+  useEffect(() => {
+    if (!pushedHistoryRef.current) {
+      try {
+        window.history.pushState({ grmFmp: true }, "", window.location.href);
+        pushedHistoryRef.current = true;
+      } catch {}
+    }
+    const handlePopState = () => { onBackRef.current(); };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleBackButton = useCallback(() => {
+    // Route through history.back() whenever we actually have the pushed
+    // entry to pop — this is what triggers popstate above, which calls the
+    // real onBack(). Falls back to calling onBack() directly only if the
+    // pushState in the effect above failed (e.g. sandboxed iframe throwing
+    // on history mutation) so the button never silently does nothing.
+    if (pushedHistoryRef.current) {
+      try { window.history.back(); return; } catch {}
+    }
+    onBack();
+  }, [onBack]);
+
   const draftLeg     = Array.isArray(draftLegs) ? draftLegs.find(l => l.fixtureId === f.id) : null;
   const inDraft      = !!draftLeg;
   const readAnchor   = f.theRead?.anchor;
@@ -1826,7 +2307,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       .catch(e => { if (!cancelled) setCaError(e.message); });
     return () => { cancelled = true; };
   }, [caModeEnabled]);
-  const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [] };
+  const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [], traps: [] };
 
   // All explainers computed once
   const isBBSport = f._sport === "basketball";
@@ -1867,7 +2348,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       {/* ── Sticky header ── */}
       <div className="grm-page-header">
         <button
-          onClick={onBack}
+          onClick={handleBackButton}
           className="gb-ghost"
           style={{ padding: "7px 14px", fontSize: 11, display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
