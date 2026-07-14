@@ -794,10 +794,17 @@ export function matchCAConditions(f, caPatterns) {
 // table is never surfaced as "Over 2.5 implies Over 1.5" — it only powers
 // the origin-caveat check below, which fires on a specific avoid pattern,
 // not on the implication itself.
+// requiresBoth (2026-07-14, Annan/Dundee case): Over 1.5/2.5 can be hit
+// entirely by ONE side scoring — home flagged avoid doesn't stop away alone
+// covering it. BTTS structurally CANNOT hit without both sides scoring — a
+// home-flagged-avoid BTTS pick isn't "resting on one path" the same soft way,
+// it's riding entirely on the flagged side coming through. Same underlying
+// avoid pattern, different real fragility, so it needs different treatment
+// below rather than identical origin-caveat text for both.
 const CA_SIDE_COMPONENTS = {
   "TB:Over 1.5": { home: ["TB:Home Over 0.5", "TB:Home Over 1.5"], away: ["TB:Away Over 0.5", "TB:Away Over 1.5"] },
   "TB:Over 2.5": { home: ["TB:Home Over 0.5", "TB:Home Over 1.5"], away: ["TB:Away Over 0.5", "TB:Away Over 1.5"] },
-  "TB:BTTS":     { home: ["TB:Home Over 0.5"], away: ["TB:Away Over 0.5"] },
+  "TB:BTTS":     { home: ["TB:Home Over 0.5"], away: ["TB:Away Over 0.5"], requiresBoth: true },
 };
 // Markets that can't both be true for the same fixture. Only pairs where a
 // VALID positive match on both sides is a genuine logical conflict — DC1X
@@ -917,12 +924,51 @@ function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) 
   return Math.min(members.size, CA_FAMILY_CORROB_CAP);
 }
 
-// "Safest lean" score (2026-07-13 plan) — shrunk lift, boosted by family
-// corroboration. This is the always-computable lean (no odds required).
-function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid) {
+// Model agreement (2026-07-14 — reintroduces model probability, which
+// caSafestScore had NO access to at all after the 2026-07-13 rewrite dropped
+// it). The verdict-analyst logistic-regression pass (2026-07-14) found
+// modelProb's learned weight (+0.222) landed in the same tier as CA's own
+// bestPosLift/bestNegLift (+0.232/+0.196) — a real, independent signal, not
+// noise, sitting well above familyCorrob's near-zero weight in that same run.
+// Treated like family corroboration: a capped multiplicative nudge, kept as
+// its own visible term rather than folded into the shrink score.
+// Centered at 50 — reward when the model's own read AGREES with CA's lean
+// (high modelProb backing a positive, low modelProb backing an avoid),
+// PENALIZE when it disagrees. That penalty is deliberate, not just "no
+// bonus" — disagreement is itself informative. This is exactly the gap the
+// Annan/Dundee case exposed: CA's BTTS lean rested on a home-scoring leg the
+// main model itself didn't rate highly (21% home win, well below what a
+// blank-slate reading of Annan's own xG implied), while Over 2.5 didn't need
+// that leg at all and the model agreed with it strongly (79% via its own Read
+// output). Model agreement now pulls the safest score toward Over 2.5 and
+// away from BTTS in a case shaped like that one, instead of treating both as
+// equally solid.
+export const CA_MODEL_AGREEMENT_BONUS = 0.20;
+function caModelProbFor(f, market) {
+  const def = SA_MARKETS[market];
+  if (!def || def._isPEMix) return null;
+  const m = f.markets || {};
+  const p = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
+  return Number.isFinite(p) && p > 0 ? p : null;
+}
+function caModelAgreementFactor(c, isAvoid, f) {
+  const mp = caModelProbFor(f, c.market);
+  if (mp == null) return 0; // no model prob available — neutral, no bonus or penalty
+  const agreement = isAvoid ? (50 - mp) : (mp - 50); // positive = model agrees with this direction
+  return Math.max(-1, Math.min(1, agreement / 50)); // -1..+1
+}
+
+// "Safest lean" score (2026-07-13 plan, +model agreement 2026-07-14) — shrunk
+// lift, boosted by family corroboration, nudged by whether the main model's
+// own probability agrees with this lean. This is the always-computable lean
+// (no odds required) — `f` is optional so existing callers that can't supply
+// a fixture (there currently are none, but kept defensive) degrade to no
+// model-agreement term rather than throwing.
+function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
   const shrink = caShrinkScore(c.holdoutLift, c.holdoutSample);
   const corrob = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
-  return shrink * (1 + CA_FAMILY_CORROB_BONUS * corrob);
+  const modelAgreement = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
+  return shrink * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
 }
 
 // Odds for a CA market — reuses SA_MARKETS' oddsKey (same lookup
@@ -1006,10 +1052,22 @@ export function computeCAVerdicts(caMatches, f) {
     } else if (homeFlagged || awayFlagged) {
       const flaggedSide = homeFlagged ? "home" : "away";
       const otherSide    = homeFlagged ? "away" : "home";
-      verdicts.push({
-        type: "origin-caveat", market: p.market, holdoutHitRate: p.holdoutHitRate,
-        text: `${CA_MARKET_SHORT(p.market)} matched, but ${flaggedSide} scoring is flagged avoid on both thresholds — likely ${otherSide}-side driven, not spread across both teams. Real signal, resting on one path.`,
-      });
+      if (components.requiresBoth) {
+        // Fragile origin (2026-07-14, Annan/Dundee case): this market can't
+        // hit AT ALL without the flagged side scoring — not a caveat on an
+        // otherwise-fine pick, the pick's entire outcome rides on the side
+        // CA itself flagged avoid. Distinct type so Rule 3 can exclude it
+        // from lean/value candidacy the same way unclear-origin already is.
+        verdicts.push({
+          type: "fragile-origin", market: p.market, holdoutHitRate: p.holdoutHitRate,
+          text: `${CA_MARKET_SHORT(p.market)} matched, but it needs BOTH sides to score and ${flaggedSide} scoring is flagged avoid — this pick rides entirely on the flagged side coming through, not a soft caveat.`,
+        });
+      } else {
+        verdicts.push({
+          type: "origin-caveat", market: p.market, holdoutHitRate: p.holdoutHitRate,
+          text: `${CA_MARKET_SHORT(p.market)} matched, but ${flaggedSide} scoring is flagged avoid on both thresholds — likely ${otherSide}-side driven, not spread across both teams. Real signal, resting on one path.`,
+        });
+      }
     }
   }
 
@@ -1026,7 +1084,7 @@ export function computeCAVerdicts(caMatches, f) {
 
   // Rule 3 — Safest lean + optional second + Best value (2026-07-13 full
   // rewrite, replaces the old Holdout-HR-dominant composite score entirely).
-  // caSafestScore (shrunk |lift| × family corroboration) can now win in
+  // caSafestScore (shrunk |lift| × family corroboration × model agreement) can now win in
   // EITHER direction — a well-corroborated avoid signal can be the fixture's
   // actual safest lean, not just a caveat sentence buried under a positive
   // pick. Same exclusions as before: conflicting-signal markets (Rule 0) and
@@ -1035,15 +1093,17 @@ export function computeCAVerdicts(caMatches, f) {
   // bettable/avoidable in absolute terms) AND CA_MIN_ELIGIBLE_LIFT (not
   // structurally trivial even if the absolute number looks fine — mirrors
   // POOL_MIN_EMPIRICAL_RATE's role in the main engine's pool).
-  const unclearOriginMarkets = new Set(verdicts.filter(v => v.type === "unclear-origin").map(v => v.market));
+  const unclearOriginMarkets = new Set(
+    verdicts.filter(v => v.type === "unclear-origin" || v.type === "fragile-origin").map(v => v.market)
+  );
   const contradictorySet = new Set(contradictoryMarkets);
   const eligible = c => !contradictorySet.has(c.market) && !unclearOriginMarkets.has(c.market) && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT;
   const cleanPositive = positive.filter(c => eligible(c) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR);
   const cleanAvoid = avoid.filter(c => eligible(c) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR);
 
   const scored = [
-    ...cleanPositive.map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid) })),
-    ...cleanAvoid.map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid) })),
+    ...cleanPositive.map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
+    ...cleanAvoid.map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
   ];
 
   if (scored.length) {
@@ -1139,7 +1199,9 @@ export function buildCAVerdictLogRows(f, caPatterns) {
       conflictFlag: conflict, clearsFloor,
       familyCorrobCount: clearsFloor ? caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid) : 0,
       shrinkScore: caShrinkScore(c.holdoutLift, c.holdoutSample),
-      safestScore: clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid) : null,
+      modelProb: caModelProbFor(f, c.market),
+      modelAgreement: clearsFloor ? caModelAgreementFactor(c, isAvoid, f) : null,
+      safestScore: clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) : null,
       odds, valueEdgePP: odds ? +((c.holdoutHitRate ?? 0) - (100 / odds)).toFixed(1) : null,
       valueScore: !isAvoid ? caValueScore(c, f) : null,
       isTopLean: !!topLean && topLean.market === c.market,
@@ -5455,14 +5517,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       const cleanAvoid = avoid.filter(c =>
         !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT
       );
-      // caSafestScore (2026-07-13 full rewrite, replaces caCompositeScore):
-      // shrunk |lift| (empirical-Bayes-style — kills the tiny-n-freak-lift
-      // problem) × family corroboration (goals/under/result/dominance —
-      // several markets agreeing IS real support, but only counted once per
-      // family, not once per market). See caSafestScore's own comment for
+      // caSafestScore (2026-07-13 full rewrite, replaces caCompositeScore;
+      // +model agreement 2026-07-14): shrunk |lift| (empirical-Bayes-style —
+      // kills the tiny-n-freak-lift problem) × family corroboration
+      // (goals/under/result/dominance — several markets agreeing IS real
+      // support, but only counted once per family, not once per market) ×
+      // model agreement (does the main Dixon-Coles model's own probability
+      // back this lean, or fight it). See caSafestScore's own comment for
       // the full breakdown, including why this replaced the old
       // Holdout-HR-dominant composite entirely rather than tuning its caps.
-      const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid);
+      const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f);
       let bestPositive, bestAvoid, marketLabel, family;
       if (isMix) {
         // Floor gates already applied above — cleanPositive/cleanAvoid ARE
@@ -5983,7 +6047,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </div>
             {caMarket === "CA:Mix" && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
-                CA Mix view — each fixture shown in whichever market has its single strongest holdout-validated signal today, ranked by shrunk lift + family corroboration (caSafestScore), not raw holdout hit rate.
+                CA Mix view — each fixture shown in whichever market has its single strongest holdout-validated signal today, ranked by shrunk lift + family corroboration + model agreement (caSafestScore), not raw holdout hit rate.
               </div>
             )}
             {caMarket && caMarket !== "CA:Mix" && (
