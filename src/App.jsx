@@ -7972,13 +7972,15 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
     // Floor implied odds at 1.02 so the ticket math doesn't break
     if (odds && odds < 1.02) odds = 1.02;
 
-    // Only block if we have no prob AND no odds at all (completely unknown market)
+    // Custom Pick is user-discretion by design — never refuse to book it.
+    // If we truly have no model data, warn (matches handleAddAnchor's
+    // "adding anyway" convention) but still add the pick.
     if (!prob && !odds) {
-      setErrMsg("⚠ No model data for this pick — market not available for this fixture");
+      setErrMsg("⚠ No model data for this pick — adding anyway");
       setTimeout(() => setErrMsg(""), 2500);
-      return;
+    } else {
+      setErrMsg("");
     }
-    setErrMsg("");
     // handleAddAnchor expects single pick obj — fixture as first arg caused ×1.00
     onAddToParlay({
       pick,

@@ -1527,17 +1527,18 @@ function CACompactRow({ c, isAvoid }) {
     </div>
   );
 }
-function CAShowMoreButton({ count, onClick }) {
+function CAMoreInsightBadge({ count, isAvoid }) {
+  const color = isAvoid ? C.red : C.accent;
   return (
-    <button onClick={onClick} className="gb" style={{
-      display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-      width: "calc(100% - 28px)", margin: "8px 14px",
-      padding: "9px 10px", fontSize: 9.5, fontWeight: 800, textTransform: "none", fontFamily: C.font,
-      background: `${C.accent}12`, color: C.accent, border: `1px solid ${C.accent}35`, borderRadius: 8,
+    <div style={{
+      padding: "6px 14px", fontSize: 8.5, color, opacity: 0.85,
+      display: "flex", alignItems: "center", gap: 5,
     }}>
-      <span>{`+${count} more \u2014 tap to expand`}</span>
-      <span style={{ fontSize: 8 }}>{"\u25be"}</span>
-    </button>
+      <span style={{ fontWeight: 800 }}>{`+${count} more`}</span>
+      <span style={{ color: C.muted, fontWeight: 500 }}>
+        matching pattern{count === 1 ? "" : "s"} clear the sample floor — {isAvoid ? "consistently weak" : "a strong, well-corroborated"} signal here
+      </span>
+    </div>
   );
 }
 
@@ -1552,7 +1553,12 @@ function CAShowMoreButton({ count, onClick }) {
 // deliberately NOT a sort input here — it's a within-market position by the
 // same raw holdout HR, so folding it in would just reintroduce the same
 // high-baseline bias this fix exists to remove.
+// Good-sample-size floor for a pattern to be eligible for a top slot at all
+// (Sterling, 2026-07-15: "n >= 15"). Applied before the hit-rate/lift ranking
+// below so a small-n pattern can never win a slot purely on an extreme rate.
+const CA_MIN_SAMPLE_N = 15;
 function pickCATopSlots(list, isAvoid) {
+  list = list.filter(c => (c.holdoutSample ?? 0) >= CA_MIN_SAMPLE_N);
   if (!list.length) return [];
   if (list.length <= 4) return list.map(c => ({ ...c, topReason: null }));
   const byHitRate = [...list].sort((a, b) => isAvoid
@@ -1584,26 +1590,7 @@ function pickCATopSlots(list, isAvoid) {
 
 function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
   const [selectedMarket, setSelectedMarket] = useState("__top__");
-  const [showMorePositive, setShowMorePositive] = useState(false);
-  const [showMoreAvoid, setShowMoreAvoid] = useState(false);
-  // Second-tier caps: groupCAOverflow's "rest" (depth-2+ combos) isn't range-
-  // collapsible, so it can still be large on its own — Under 4.5's avoid
-  // overflow is mostly depth-2 (awayCS+awayXG style), confirmed live at 190+
-  // combos past the first 5. Compact rows are far cheaper than the full
-  // CAComboRow cards this session started with, but 190 of anything at once
-  // is still an unbounded render on a phone, so "rest" gets its own
-  // top-N-then-expand instead of dumping in one shot the moment the first
-  // "+N more" is tapped.
-  const [showAllPositiveRest, setShowAllPositiveRest] = useState(false);
-  const [showAllAvoidRest, setShowAllAvoidRest] = useState(false);
-  // Selecting a market resets every expand toggle — otherwise "show more"
-  // left open on Under 4.5 would carry over (still expanded, now filtered to
-  // a totally different market's overflow) when you tap into Over 1.5 next.
-  const selectMarket = (m) => {
-    setSelectedMarket(m);
-    setShowMorePositive(false); setShowMoreAvoid(false);
-    setShowAllPositiveRest(false); setShowAllAvoidRest(false);
-  };
+  const selectMarket = (m) => setSelectedMarket(m);
   if (!caModeEnabled) return null;
   if (caError) return (
     <SectionPanel label="Condition Strategy">
@@ -1644,24 +1631,24 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
   // more" affordance.
   const showTop = selectedMarket === "__top__";
   const isSelectedMixed = !showTop && contradictorySet.has(selectedMarket);
-  const positiveForMarket = showTop ? pickCATopSlots(cleanPositive, false) : cleanPositive.filter(c => c.market === selectedMarket);
-  const avoidForMarket    = showTop ? pickCATopSlots(cleanAvoid, true)     : cleanAvoid.filter(c => c.market === selectedMarket);
-  // ROOT CAUSE FIX (2026-07-13): drilling into one market previously rendered
-  // EVERY VALID combo for it uncapped — a market can carry hundreds of
-  // overlapping threshold variants (confirmed live: 2158 total across all
-  // markets, one market alone dumping 200+ rows), unreadable on a phone and
-  // a real render-cost/scroll-jank risk. Top 5 (pre-sorted by holdout hit
-  // rate in matchCAConditions, so slice(0, N) keeps the strongest) render as
-  // full cards, same as before. Anything past 5 is hidden behind a tap-to-
-  // expand button — see groupCAOverflow for how the expanded view avoids
-  // just dumping the rest unchanged.
-  const CA_MARKET_PAGE_SIZE = 5;
-  const shownPositive = showTop ? positiveForMarket : positiveForMarket.slice(0, CA_MARKET_PAGE_SIZE);
-  const shownAvoid    = showTop ? avoidForMarket    : avoidForMarket.slice(0, CA_MARKET_PAGE_SIZE);
-  const overflowPositive = showTop ? [] : positiveForMarket.slice(CA_MARKET_PAGE_SIZE);
-  const overflowAvoid    = showTop ? [] : avoidForMarket.slice(CA_MARKET_PAGE_SIZE);
-  const groupedPositive = showMorePositive && overflowPositive.length ? groupCAOverflow(overflowPositive) : null;
-  const groupedAvoid    = showMoreAvoid    && overflowAvoid.length    ? groupCAOverflow(overflowAvoid)    : null;
+  // Market drill-down (2026-07-15): show the same best-hit-rate + best-lift
+  // top slots as Top view, scoped to just this market, instead of every VALID
+  // match — a market can legitimately carry a dozen near-identical combos at
+  // slightly different thresholds, and that reads as noise, not signal.
+  const positiveEligible = cleanPositive.filter(c => (showTop || c.market === selectedMarket) && (c.holdoutSample ?? 0) >= CA_MIN_SAMPLE_N);
+  const avoidEligible    = cleanAvoid.filter(c => (showTop || c.market === selectedMarket) && (c.holdoutSample ?? 0) >= CA_MIN_SAMPLE_N);
+  const positiveForMarket = pickCATopSlots(positiveEligible, false);
+  const avoidForMarket    = pickCATopSlots(avoidEligible, true);
+  // pickCATopSlots always returns <=4 (2 best hit-rate + 2 best lift) — no
+  // per-card overflow rendering needed. But how many MORE eligible patterns
+  // exist beyond those top slots is itself a signal worth surfacing (a strong
+  // match on a fixture often means dozens of overlapping combos clear the
+  // sample floor, not just the 4 shown) — so keep a count-only "+N more",
+  // no expand, no card dump.
+  const morePositiveCount = Math.max(0, positiveEligible.length - positiveForMarket.length);
+  const moreAvoidCount    = Math.max(0, avoidEligible.length - avoidForMarket.length);
+  const shownPositive = positiveForMarket;
+  const shownAvoid    = avoidForMarket;
   // Emerging (low-test-n) — always capped at 2 each regardless of view, even
   // when drilling into one market: demoted by design, not a second full list.
   const shownEmergingPositive = (showTop ? emergingPositive : emergingPositive.filter(c => c.market === selectedMarket)).slice(0, 2);
@@ -1701,33 +1688,7 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
         </div>
       )}
       {shownPositive.map((c, i) => <CAComboRow key={`p${i}`} c={c} isAvoid={false} />)}
-      {overflowPositive.length > 0 && !showMorePositive && (
-        <CAShowMoreButton count={overflowPositive.length} onClick={() => setShowMorePositive(true)} />
-      )}
-      {groupedPositive && (
-        <>
-          {groupedPositive.ranges.map((r, i) => <CARangeRow key={`pr${i}`} r={r} isAvoid={false} />)}
-          {groupedPositive.rest.slice(0, CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`pc${i}`} c={c} isAvoid={false} />)}
-          {groupedPositive.rest.length > CA_COMPACT_PAGE_SIZE && !showAllPositiveRest && (
-            <CAShowMoreButton count={groupedPositive.rest.length - CA_COMPACT_PAGE_SIZE} onClick={() => setShowAllPositiveRest(true)} />
-          )}
-          {showAllPositiveRest && groupedPositive.rest.slice(CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`pcx${i}`} c={c} isAvoid={false} />)}
-        </>
-      )}
-      {shownAvoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
-      {overflowAvoid.length > 0 && !showMoreAvoid && (
-        <CAShowMoreButton count={overflowAvoid.length} onClick={() => setShowMoreAvoid(true)} />
-      )}
-      {groupedAvoid && (
-        <>
-          {groupedAvoid.ranges.map((r, i) => <CARangeRow key={`ar${i}`} r={r} isAvoid={true} />)}
-          {groupedAvoid.rest.slice(0, CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`ac${i}`} c={c} isAvoid={true} />)}
-          {groupedAvoid.rest.length > CA_COMPACT_PAGE_SIZE && !showAllAvoidRest && (
-            <CAShowMoreButton count={groupedAvoid.rest.length - CA_COMPACT_PAGE_SIZE} onClick={() => setShowAllAvoidRest(true)} />
-          )}
-          {showAllAvoidRest && groupedAvoid.rest.slice(CA_COMPACT_PAGE_SIZE).map((c, i) => <CACompactRow key={`acx${i}`} c={c} isAvoid={true} />)}
-        </>
-      )}
+      {morePositiveCount > 0 && <CAMoreInsightBadge count={morePositiveCount} isAvoid={false} />}
       {(shownEmergingPositive.length > 0 || shownEmergingAvoid.length > 0) && (
         <div style={{ padding: "6px 14px", fontSize: 8, fontWeight: 800, color: C.muted, letterSpacing: ".08em", textTransform: "uppercase" }}>
           Emerging — small sample, unproven
@@ -1741,6 +1702,16 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
         </div>
       )}
       {shownTraps.map((c, i) => <CATrapRow key={`t${i}`} c={c} />)}
+      {/* Avoid patterns live here, grouped with the Verdict, not mixed into
+          the positive list above — they're a caution note, not a pick, so
+          they get no CTA and no separate "footnote" section of their own. */}
+      {shownAvoid.length > 0 && (
+        <div style={{ padding: "6px 14px 0", fontSize: 8, fontWeight: 800, color: C.red, letterSpacing: ".08em", textTransform: "uppercase" }}>
+          Avoid
+        </div>
+      )}
+      {shownAvoid.map((c, i) => <CAComboRow key={`a${i}`} c={c} isAvoid={true} />)}
+      {moreAvoidCount > 0 && <CAMoreInsightBadge count={moreAvoidCount} isAvoid={true} />}
       <CAVerdictBlock verdicts={verdicts} />
     </SectionPanel>
   );
