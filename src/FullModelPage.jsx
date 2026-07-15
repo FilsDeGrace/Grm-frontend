@@ -1294,10 +1294,12 @@ function CAComboRow({ c, isAvoid, isEmerging }) {
   const Icon = isEmerging ? CAIconEmerging : (isAvoid ? CAIconAvoid : CAIconCheck);
   return (
     <div style={{
+      background: C.faint,
+      borderRadius: 10,
       padding: isEmerging ? "9px 14px" : "11px 14px",
-      borderBottom: `1px solid ${C.border}`,
-      borderLeft: `2px solid ${isEmerging ? "transparent" : color}`,
-      opacity: isEmerging ? 0.8 : 1,
+      margin: "0 14px 8px",
+      borderLeft: `3px solid ${isEmerging ? "transparent" : color}`,
+      opacity: isEmerging ? 0.85 : 1,
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
@@ -1351,9 +1353,11 @@ function CATrapRow({ c }) {
   const label = TRAP_TYPE_LABEL[c.trapType] || "Train/holdout mismatch";
   return (
     <div style={{
+      background: C.faint,
+      borderRadius: 10,
       padding: "9px 14px",
-      borderBottom: `1px solid ${C.border}`,
-      borderLeft: `2px solid ${color}`,
+      margin: "0 14px 8px",
+      borderLeft: `3px solid ${color}`,
       opacity: 0.9,
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
@@ -1393,35 +1397,71 @@ function CAIconVerdict({ size = 13, color }) {
 // Mirrors ConsensusBlock's data/verdict split in ExternalPredictions below —
 // same faint box, same uppercase label pattern. Renders nothing when there's
 // nothing to say (no "all clear" filler line — silence is the null state).
+// 2026-07-15 redesign: the strongest-lean verdict is pulled out as a headline
+// with a real CTA — scrolls to the existing Custom Pick panel (#grm-custom-
+// pick-anchor) so "give one direction with a CTA" has somewhere real to go.
+// No CTA when that lean is avoid-direction (Sterling: avoid gets no CTA,
+// there's nothing to book). Everything else — second lean, contradictions,
+// origin caveats, best-value — stays as smaller supporting notes underneath,
+// same as before.
 function CAVerdictBlock({ verdicts }) {
   if (!verdicts || !verdicts.length) return null;
+  const headline = verdicts.find(v => v.type === "strongest-lean");
+  const rest = verdicts.filter(v => v !== headline);
+  const scrollToCustomPick = () => {
+    document.getElementById("grm-custom-pick-anchor")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   return (
     <div style={{
-      background: C.faint, borderRadius: 8, padding: "12px 14px",
-      margin: "12px 14px", display: "flex", flexDirection: "column", gap: 10,
+      background: C.faint, borderRadius: 12, padding: "14px 14px",
+      margin: "12px 14px", display: "flex", flexDirection: "column", gap: 12,
     }}>
       <div style={{
         fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
-        textTransform: "uppercase", color: C.muted, marginBottom: 2,
+        textTransform: "uppercase", color: C.muted,
       }}>
         Verdict
       </div>
-      {verdicts.map((v, i) => {
-        const isLean = v.type === "strongest-lean";
-        const isSecond = v.type === "second-lean";
-        const isValue = v.type === "best-value";
-        const color = (v.type === "contradiction" || v.type === "conflicting-signal") ? C.red
-          : isValue ? C.gold
-          : (isLean || isSecond) ? C.accent
-          : C.amber;
-        const Icon = (isLean || isSecond || isValue) ? CAIconCheck : CAIconVerdict;
+      {headline && (() => {
+        const isAvoidLean = headline.direction === "avoid";
+        const color = isAvoidLean ? C.red : C.accent;
         return (
-          <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-            <Icon size={12} color={color} />
-            <span style={{ fontSize: 10, color: C.text, lineHeight: 1.6, fontWeight: (isLean || isValue) ? 700 : 400 }}>{v.text}</span>
+          <div>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+              <CAIconCheck size={14} color={color} />
+              <span style={{ fontSize: 13, fontWeight: 800, color: C.text, lineHeight: 1.4 }}>{headline.text}</span>
+            </div>
+            {!isAvoidLean && (
+              <button onClick={scrollToCustomPick} className="gb" style={{
+                marginTop: 10, width: "100%", padding: "9px 0", fontSize: 10, fontWeight: 800,
+                letterSpacing: ".04em", textTransform: "none", fontFamily: C.font,
+                background: `${C.accent}18`, color: C.accent, border: `1px solid ${C.accent}45`, borderRadius: 8,
+              }}>
+                Use Custom Pick
+              </button>
+            )}
           </div>
         );
-      })}
+      })()}
+      {rest.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: headline ? 4 : 0, borderTop: headline ? `1px solid ${C.border}` : "none" }}>
+          {rest.map((v, i) => {
+            const isSecond = v.type === "second-lean";
+            const isValue = v.type === "best-value";
+            const color = (v.type === "contradiction" || v.type === "conflicting-signal") ? C.red
+              : isValue ? C.gold
+              : isSecond ? C.accent
+              : C.amber;
+            const Icon = (isSecond || isValue) ? CAIconCheck : CAIconVerdict;
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <Icon size={11} color={color} />
+                <span style={{ fontSize: 9.5, color: C.muted, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1588,10 +1628,17 @@ function pickCATopSlots(list, isAvoid) {
   return picked;
 }
 
-function ConditionStrategySection({ f, caMatches, caError, caModeEnabled }) {
+function ConditionStrategySection({ f, caMatches, caError, caModeEnabled, caLoading }) {
   const [selectedMarket, setSelectedMarket] = useState("__top__");
   const selectMarket = (m) => setSelectedMarket(m);
   if (!caModeEnabled) return null;
+  if (caLoading) return (
+    <SectionPanel label="Condition Strategy">
+      <div style={{ padding: "12px 16px", fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+        <span className="pu">Computing CA patterns…</span>
+      </div>
+    </SectionPanel>
+  );
   if (caError) return (
     <SectionPanel label="Condition Strategy">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{caError}</div>
@@ -2269,13 +2316,16 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
   // off, none of this fires — zero added cost to opening a Full Model page.
   const [caPatterns, setCaPatterns] = useState(null);
   const [caError, setCaError] = useState(null);
+  const [caLoading, setCaLoading] = useState(false);
   useEffect(() => {
-    if (!caModeEnabled) { setCaPatterns(null); setCaError(null); return; }
+    if (!caModeEnabled) { setCaPatterns(null); setCaError(null); setCaLoading(false); return; }
     let cancelled = false;
+    setCaLoading(true);
     fetch(`${SERVER}/api/ca-patterns`)
       .then(r => r.json())
       .then(d => { if (!cancelled) { if (d?.byMarket) setCaPatterns(d); else setCaError(d?.error || "No condition data"); } })
-      .catch(e => { if (!cancelled) setCaError(e.message); });
+      .catch(e => { if (!cancelled) setCaError(e.message); })
+      .finally(() => { if (!cancelled) setCaLoading(false); });
     return () => { cancelled = true; };
   }, [caModeEnabled]);
   const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [], traps: [] };
@@ -3383,7 +3433,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
         {/* Condition Strategy (CA) — just above External Predictions, per plan.
             Self-gates on caModeEnabled and renders nothing at all when off or
             when there are no matches, so it never adds empty visual clutter. */}
-        <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} />
+        <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} caLoading={caLoading} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (

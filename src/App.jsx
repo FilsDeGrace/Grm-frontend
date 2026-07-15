@@ -1111,6 +1111,7 @@ export function computeCAVerdicts(caMatches, f) {
     const top = scored[0];
     verdicts.push({
       type: "strongest-lean", market: top.c.market, holdoutHitRate: top.c.holdoutHitRate,
+      direction: top.isAvoid ? "avoid" : "positive",
       text: top.isAvoid
         ? `Steer away from ${CA_MARKET_SHORT(top.c.market)} — holdout only ${top.c.holdoutHitRate}% (${top.c.holdoutLift}pp vs baseline).`
         : `${CA_MARKET_SHORT(top.c.market)} looks like the strongest clean lean here — holdout ${top.c.holdoutHitRate}% (+${top.c.holdoutLift}pp vs baseline).`,
@@ -1125,6 +1126,7 @@ export function computeCAVerdicts(caMatches, f) {
     if (second) {
       verdicts.push({
         type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
+        direction: second.isAvoid ? "avoid" : "positive",
         text: second.isAvoid
           ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
           : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
