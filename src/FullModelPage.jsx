@@ -1317,10 +1317,10 @@ function CAComboRow({ c, isAvoid, isEmerging }) {
               {c.topReason === "hitrate" ? "Best Rate" : "Best Lift"}
             </span>
           )}
-          <span style={{ fontSize: 8, color: C.muted }}>#{c.rank} · {c.status}</span>
+          <span style={{ fontSize: 8, color: C.text, opacity: 0.55 }}>#{c.rank} · {c.status}</span>
         </div>
       </div>
-      <div style={{ fontSize: 9, color: C.muted, marginTop: 3, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 9, color: C.text, opacity: 0.62, marginTop: 3, lineHeight: 1.5 }}>
         {c.conditions.map(fmtCACondition).join(" · ")}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 7 }}>
@@ -1328,11 +1328,11 @@ function CAComboRow({ c, isAvoid, isEmerging }) {
         <span style={{ fontSize: 10, fontWeight: 800, color }}>
           {c.holdoutHitRate}%
         </span>
-        <span style={{ fontSize: 8, color: C.muted }}>
+        <span style={{ fontSize: 8, color: C.text, opacity: 0.62 }}>
           vs {c.holdoutBaselineHR}% base · {c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp ({CA_STRENGTH_LABEL[caPatternStrength(c.holdoutLift)]})
         </span>
       </div>
-      <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>
+      <div style={{ fontSize: 8, color: C.text, opacity: 0.62, marginTop: 4 }}>
         Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% (depth {c.depth}, n={c.holdoutSample}{isEmerging ? " — small sample, unproven" : ""})
       </div>
     </div>
@@ -1367,15 +1367,15 @@ function CATrapRow({ c }) {
             {(c.market || "").replace(/^TB:/, "")}
           </span>
         </div>
-        <span style={{ fontSize: 8, color: C.muted, flexShrink: 0 }}>{c.status}</span>
+        <span style={{ fontSize: 8, color: C.text, opacity: 0.55, flexShrink: 0 }}>{c.status}</span>
       </div>
-      <div style={{ fontSize: 9, color: C.muted, marginTop: 3, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 9, color: C.text, opacity: 0.62, marginTop: 3, lineHeight: 1.5 }}>
         {c.conditions.map(fmtCACondition).join(" · ")}
       </div>
       <div style={{ fontSize: 9, fontWeight: 700, color, marginTop: 6 }}>
         {label}
       </div>
-      <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>
+      <div style={{ fontSize: 8, color: C.text, opacity: 0.62, marginTop: 4 }}>
         Train {c.trainHitRate}% → Holdout {c.holdoutHitRate ?? "n/a"}% (gap {c.gap > 0 ? "+" : ""}{c.gap ?? "n/a"}pp, n={c.holdoutSample})
       </div>
     </div>
@@ -1406,8 +1406,18 @@ function CAIconVerdict({ size = 13, color }) {
 // same as before.
 function CAVerdictBlock({ verdicts }) {
   if (!verdicts || !verdicts.length) return null;
-  const headline = verdicts.find(v => v.type === "strongest-lean");
-  const rest = verdicts.filter(v => v !== headline);
+  const top = verdicts.find(v => v.type === "strongest-lean");
+  // Sterling, 2026-07-15: avoid shouldn't occupy the main verdict spot when
+  // there's a positive lean to show instead — it becomes a smaller insight
+  // note (its own red color, not the headline), and the positive lean takes
+  // the headline + CTA in its place.
+  let headline = top;
+  let demotedAvoid = null;
+  if (top && top.direction === "avoid") {
+    const promoted = verdicts.find(v => v !== top && (v.direction === "positive" || v.type === "best-value"));
+    if (promoted) { headline = promoted; demotedAvoid = top; }
+  }
+  const rest = verdicts.filter(v => v !== headline && v !== demotedAvoid);
   const scrollToCustomPick = () => {
     document.getElementById("grm-custom-pick-anchor")?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
@@ -1418,7 +1428,7 @@ function CAVerdictBlock({ verdicts }) {
     }}>
       <div style={{
         fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
-        textTransform: "uppercase", color: C.muted,
+        textTransform: "uppercase", color: C.text, opacity: 0.7,
       }}>
         Verdict
       </div>
@@ -1443,8 +1453,14 @@ function CAVerdictBlock({ verdicts }) {
           </div>
         );
       })()}
+      {demotedAvoid && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
+          <CAIconAvoid size={11} color={C.red} />
+          <span style={{ fontSize: 9.5, color: C.red, opacity: 0.85, lineHeight: 1.6, fontWeight: 400 }}>{demotedAvoid.text}</span>
+        </div>
+      )}
       {rest.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: headline ? 4 : 0, borderTop: headline ? `1px solid ${C.border}` : "none" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: (headline || demotedAvoid) ? 4 : 0, borderTop: (headline && !demotedAvoid) ? `1px solid ${C.border}` : "none" }}>
           {rest.map((v, i) => {
             const isSecond = v.type === "second-lean";
             const isValue = v.type === "best-value";
@@ -1456,7 +1472,7 @@ function CAVerdictBlock({ verdicts }) {
             return (
               <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                 <Icon size={11} color={color} />
-                <span style={{ fontSize: 9.5, color: C.muted, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
+                <span style={{ fontSize: 9.5, color: C.text, opacity: 0.72, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
               </div>
             );
           })}
@@ -1575,7 +1591,7 @@ function CAMoreInsightBadge({ count, isAvoid }) {
       display: "flex", alignItems: "center", gap: 5,
     }}>
       <span style={{ fontWeight: 800 }}>{`+${count} more`}</span>
-      <span style={{ color: C.muted, fontWeight: 500 }}>
+      <span style={{ color: C.text, opacity: 0.6, fontWeight: 500 }}>
         matching pattern{count === 1 ? "" : "s"} clear the sample floor — {isAvoid ? "consistently weak" : "a strong, well-corroborated"} signal here
       </span>
     </div>

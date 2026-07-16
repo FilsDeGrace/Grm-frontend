@@ -7,7 +7,7 @@
 
 export const THEME_DARK = {
   id: "dark", name: "Dark Mode", emoji: "🌙",
-  desc: "Original — deep space, gold accents",
+  desc: "Deep space, gold accents, desaturated jewel tones",
 
   bg:         "#050508",
   surface:    "rgba(255,255,255,0.025)",
@@ -35,26 +35,26 @@ export const THEME_DARK = {
   goldDim:     "rgba(232,194,122,0.10)",
   goldBorder:  "rgba(232,194,122,0.24)",
 
-  green:       "#34D399",
-  greenDim:    "rgba(52,211,153,0.10)",
-  blue:        "#60A5FA",
-  blueDim:     "rgba(96,165,250,0.10)",
-  purple:      "#A78BFA",
-  purpleDim:   "rgba(167,139,250,0.10)",
-  orange:      "#FB923C",
-  orangeDim:   "rgba(251,146,60,0.10)",
-  radar:       "#2DD4BF",
-  radarDim:    "rgba(45,212,191,0.10)",
-  radarBorder: "rgba(45,212,191,0.28)",
-  edge:        "#818CF8",
-  edgeDim:     "rgba(129,140,248,0.12)",
-  edgeBorder:  "rgba(129,140,248,0.28)",
-  red:         "#F87171",
-  redDim:      "rgba(248,113,113,0.10)",
-  amber:       "#FBBF24",
-  amberDim:    "rgba(251,191,36,0.10)",
-  dc:          "#F472B6",
-  dcDim:       "rgba(244,114,182,0.10)",
+  green:       "#2FAE7A",
+  greenDim:    "rgba(47,174,122,0.10)",
+  blue:        "#5B8DC7",
+  blueDim:     "rgba(91,141,199,0.10)",
+  purple:      "#9683C9",
+  purpleDim:   "rgba(150,131,201,0.10)",
+  orange:      "#C97A45",
+  orangeDim:   "rgba(201,122,69,0.10)",
+  radar:       "#3D9E90",
+  radarDim:    "rgba(61,158,144,0.10)",
+  radarBorder: "rgba(61,158,144,0.28)",
+  edge:        "#7C86B0",
+  edgeDim:     "rgba(124,134,176,0.12)",
+  edgeBorder:  "rgba(124,134,176,0.28)",
+  red:         "#CC5F5A",
+  redDim:      "rgba(204,95,90,0.10)",
+  amber:       "#C7A052",
+  amberDim:    "rgba(199,160,82,0.10)",
+  dc:          "#BD6E92",
+  dcDim:       "rgba(189,110,146,0.10)",
   silver:      "#94A3B8",
   silverDim:   "rgba(148,163,184,0.07)",
 
@@ -137,7 +137,7 @@ export const THEME_CLAUDE = {
 
 export const THEME_GRM = {
   id: "grm", name: "GRM Pitch", emoji: "⚽",
-  desc: "Stadium black, turf green, violet accent — built for the model",
+  desc: "Stadium black, deep turf green, violet accent — refined, built for the model",
 
   bg:         "#0d1117",
   surface:    "#161b22",
@@ -165,26 +165,26 @@ export const THEME_GRM = {
   goldDim:     "rgba(167,139,250,0.12)",
   goldBorder:  "rgba(167,139,250,0.30)",
 
-  green:       "#22c55e",
-  greenDim:    "rgba(34,197,94,0.12)",
-  blue:        "#38bdf8",
-  blueDim:     "rgba(56,189,248,0.10)",
-  purple:      "#fb923c",
-  purpleDim:   "rgba(251,146,60,0.10)",
-  radar:       "#22d3ee",
-  radarDim:    "rgba(34,211,238,0.10)",
-  radarBorder: "rgba(34,211,238,0.28)",
-  edge:        "#f59e0b",
-  edgeDim:     "rgba(245,158,11,0.10)",
-  edgeBorder:  "rgba(245,158,11,0.28)",
-  red:         "#f87171",
-  redDim:      "rgba(248,113,113,0.10)",
-  amber:       "#f59e0b",
-  amberDim:    "rgba(245,158,11,0.10)",
-  orange:      "#fb923c",
-  orangeDim:   "rgba(251,146,60,0.10)",
-  dc:          "#f472b6",
-  dcDim:       "rgba(244,114,182,0.09)",
+  green:       "#3C8F5C",
+  greenDim:    "rgba(60,143,92,0.12)",
+  blue:        "#4E86AD",
+  blueDim:     "rgba(78,134,173,0.10)",
+  purple:      "#7C5C9E",
+  purpleDim:   "rgba(124,92,158,0.10)",
+  radar:       "#3D8F94",
+  radarDim:    "rgba(61,143,148,0.10)",
+  radarBorder: "rgba(61,143,148,0.28)",
+  edge:        "#B0894A",
+  edgeDim:     "rgba(176,137,74,0.10)",
+  edgeBorder:  "rgba(176,137,74,0.28)",
+  red:         "#BD5B5B",
+  redDim:      "rgba(189,91,91,0.10)",
+  amber:       "#B0894A",
+  amberDim:    "rgba(176,137,74,0.10)",
+  orange:      "#B87540",
+  orangeDim:   "rgba(184,117,64,0.10)",
+  dc:          "#A96888",
+  dcDim:       "rgba(169,104,136,0.09)",
   silver:      "#7d8590",
   silverDim:   "rgba(125,133,144,0.08)",
 
@@ -217,7 +217,7 @@ export const THEME_MONO = {
   surfaceHi:  "#E6E6E0",          // pressed / hovered surface
   cardBg:     "#EEEEE8",
   modalBg:    "#F5F4EF",
-  inputBg:    "#EBEBЕ4",          // very slightly off-surface
+  inputBg:    "#EBEBE4",          // very slightly off-surface
 
   headerBg:   "rgba(245,244,239,0.97)",
   headerBorder:"rgba(0,0,0,0.08)",
@@ -365,8 +365,11 @@ export const THEME_MAP = {
 const LS_KEY = "grm_theme_v1";
 
 export function loadSavedTheme() {
-  try { return THEME_MAP[localStorage.getItem(LS_KEY)] || THEME_GRM; }
-  catch { return THEME_GRM; }
+  // DEFAULT-THEME-FIX: Ash is now the default for first-time / no-localStorage
+  // sessions. Anyone with an existing grm_theme_v1 value keeps their saved
+  // choice — this only changes the fallback, not stored preferences.
+  try { return THEME_MAP[localStorage.getItem(LS_KEY)] || THEME_ASH; }
+  catch { return THEME_ASH; }
 }
 
 export function saveTheme(id) {
