@@ -850,6 +850,16 @@ export const CA_MAX_AVOID_HR = 40;
 // before something's even eligible to be ranked, separate from the ranking
 // formula itself.
 export const CA_MIN_ELIGIBLE_LIFT = 5; // pp
+// AVOID-ONLY stricter floor (2026-07-16, fresh-window replay finding): a
+// strength-bucket breakdown of the July 11-16 out-of-sample replay showed
+// avoid-direction lift magnitude actually DOES track real accuracy (weak
+// <10pp lift -> 58.2% actual hit rate, barely better than a coin flip;
+// strong >=20pp -> 40.2%, genuinely good). The SAME breakdown on the
+// positive side showed no such pattern (moderate lift was the WORST
+// bucket, not the middle of a trend) — so only avoid gets a stricter
+// floor here; positive keeps CA_MIN_ELIGIBLE_LIFT=5 since there's no
+// evidence a higher bar would help there.
+export const CA_MIN_ELIGIBLE_LIFT_AVOID = 15; // pp, avoid-direction only
 // How close a different-family candidate's score must be to the top pick's
 // to also get a second verdict line (1 mandatory + 1 optional, per plan) —
 // otherwise every fixture would pad out to two leans whether or not the
@@ -890,11 +900,55 @@ function caFamilyOf(market) {
   return null;
 }
 
+// ── Recalibration layer (2026-07-16, root-cause fix) ────────────────────────
+// WHY THIS EXISTS: replaying computeCAVerdicts against the July 11-16
+// out-of-sample window (486 fresh fixtures, genuinely unseen by CA's own
+// April-July10 mining/holdout split) showed claimed holdoutHitRate is
+// systematically wrong in BOTH directions — positive combos overclaim by
+// ~10-17pp across every bucket (claimed 90-99% -> actual 82.4%, n=347;
+// claimed 60-69% -> actual 52.5%, n=629), negative/avoid combos underclaim
+// by a similar margin the other way (claimed avoid-rate 0-9% -> actual
+// 19.5%, n=200; claimed 40-49% -> actual 55.4%, n=505). Both regress toward
+// baseline on truly fresh data — the fingerprint of the mining/threshold
+// process having been iteratively hand-tuned against the same April-July10
+// holdout window rather than a clean one-time split (Sterling's own
+// suspicion, confirmed by this data).
+// This ALSO turned out to be the real explanation for something that first
+// looked like a sample-size problem: result/dominance-family markets
+// (1X2-Home, 1X2-Away, DCX2, Away Over 1.5) collapsed hard at high n
+// (e.g. 1X2-Home positive: 82.4% at n=17 vs 47.1% at n=240) while
+// goals-family markets didn't. Making CA_SHRINK_K family-specific to fix
+// that doesn't actually work — n/(n+k) is monotonic in n regardless of k,
+// so raising k to punish large-n result-family combos would ALSO punish the
+// small-n ones that are genuinely good. The real driver wasn't sample size,
+// it was that claimed rates were wrong upstream — correcting that here
+// means an inflated large-n combo gets pulled back down BEFORE shrinkage
+// ever sees it, rather than trying to hack the shrink curve into doing a
+// calibration curve's job.
+// Fitted as a simple linear regression through the 8 claimed-rate bucket
+// midpoints from that replay (see verdict-report-aggregate.mjs output,
+// 2026-07-16). POOLED across all 14 markets, not yet per-family/per-market —
+// coarse but directionally solid off 486 fixtures/6 days. Needs refreshing
+// (and ideally splitting per family) as buildCAVerdictLogRows accumulates
+// more genuinely-fresh outcomes over time — treat these two constants as a
+// v1, not a permanent fixture.
+const CA_RECAL_POS_SLOPE = 1.057, CA_RECAL_POS_INTERCEPT = -17.8;
+const CA_RECAL_AVOID_SLOPE = 0.867, CA_RECAL_AVOID_INTERCEPT = 16.1;
+function caRecalibratedHR(rawHR, isAvoid) {
+  if (rawHR == null) return null;
+  const v = isAvoid ? (CA_RECAL_AVOID_SLOPE * rawHR + CA_RECAL_AVOID_INTERCEPT)
+                     : (CA_RECAL_POS_SLOPE * rawHR + CA_RECAL_POS_INTERCEPT);
+  return Math.max(0, Math.min(100, v));
+}
+
 // Sample-size shrinkage (2026-07-13 plan) — replaces the old composite
 // score's guessed ±5pp caps with an actual statistical technique (empirical
 // Bayes-style shrinkage): score = lift × n/(n+k). A combo with n=12 gets
 // discounted hard toward zero; n=400 is barely touched. Kills the "tiny-n
 // combo with a freak +20pp lift" problem without a hard sample-size cutoff.
+// NOTE (2026-07-16): kept as ONE global k, deliberately not made family-
+// specific — see the recalibration comment above for why that doesn't
+// actually fix the result-family collapse and the recalibration layer does.
 export const CA_SHRINK_K = 25;
 function caShrinkScore(lift, n) {
   const nn = n ?? 0;
@@ -912,12 +966,21 @@ function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) 
   const fam = caFamilyOf(market);
   if (!fam) return 0;
   const pool = isAvoid ? cleanAvoid : cleanPositive;
-  const floorOk = c => isAvoid ? (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR : (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR;
+  // 2026-07-16: floor check now runs on the RECALIBRATED rate, not the raw
+  // claimed one — see the recalibration layer above for why.
+  const floorOk = c => {
+    const recal = caRecalibratedHR(c.holdoutHitRate, isAvoid);
+    return isAvoid ? recal <= CA_MAX_AVOID_HR : recal >= CA_MIN_HOLDOUT_HR;
+  };
   const members = new Set();
   for (const c of pool) {
     if (c.market === market) continue;
     if (caFamilyOf(c.market) !== fam) continue;
-    if (Math.abs(c.holdoutLift ?? 0) < CA_MIN_ELIGIBLE_LIFT) continue;
+    // 2026-07-16: mirrors the avoid-only stricter floor used in the main
+    // eligibility filter below — a combo that wouldn't itself qualify as a
+    // candidate shouldn't count as a corroborator either.
+    const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
+    if (Math.abs(c.holdoutLift ?? 0) < liftFloor) continue;
     if (!floorOk(c)) continue;
     members.add(c.market);
   }
@@ -965,7 +1028,14 @@ function caModelAgreementFactor(c, isAvoid, f) {
 // a fixture (there currently are none, but kept defensive) degrade to no
 // model-agreement term rather than throwing.
 function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
-  const shrink = caShrinkScore(c.holdoutLift, c.holdoutSample);
+  // 2026-07-16: shrink now runs on RECALIBRATED lift (recalibrated HR minus
+  // the same mined baseline), not the raw claimed lift — this is the actual
+  // fix for the result/dominance-family collapse (see recalibration layer
+  // comment above): an inflated large-n combo gets pulled back toward its
+  // real fresh-data performance before shrinkage/ranking ever sees it.
+  const recalHR = caRecalibratedHR(c.holdoutHitRate, isAvoid);
+  const recalLift = recalHR != null && c.holdoutBaselineHR != null ? (recalHR - c.holdoutBaselineHR) : c.holdoutLift;
+  const shrink = caShrinkScore(recalLift, c.holdoutSample);
   const corrob = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
   const modelAgreement = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
   return shrink * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
@@ -994,13 +1064,65 @@ function caOddsFor(f, market) {
 // empiricalRate is (that one's already been through the deflation curves).
 // Worth validating against CA's own outcomes once there's enough logged data.
 export const CA_VALUE_P_EXP = 2.0; // == POOL_SCORE_P_EXP
+// Own quality floor for best-value (2026-07-17, sweep finding): the edge-
+// over-odds check in caValueScore alone isn't a strong enough filter —
+// fully decoupled from the lean floor, best-value came back at 50.7% win
+// rate (n=227), a coinflip. Swept a recalibrated-HR floor from 0 to 85
+// against the fresh replay: 60->66.0%(n=100), 65->67.8%(n=90),
+// 70->72.7%(n=77), 75->75.0%(n=48), 80->77.8%(n=27, getting noisy),
+// 85->87.5%(n=8, one game either way swings this ~12pp — not a stable
+// estimate). 70 is where the gain over 60 is still clearly real (confidence
+// bands don't overlap) while keeping meaningful coverage (~1 in 6 fresh
+// fixtures) — 75 is a defensible alternative if coverage matters less than
+// squeezing out a few more accuracy points. Not swept per-family yet
+// (same caveat as the recalibration curve itself — coarse v1, refine as
+// more fresh-log data accumulates).
+export const CA_MIN_VALUE_HR = 70;
 function caValueScore(c, f) {
   const odds = caOddsFor(f, c.market);
   if (!odds) return null;
   const impliedP = (1 / odds) * 100;
-  const hr = c.holdoutHitRate ?? 0;
+  // 2026-07-16: recalibrated, not raw — an inflated claimed HR could
+  // otherwise look like it beats the market's implied probability when the
+  // real (recalibrated) rate wouldn't, which is exactly the false-edge
+  // scenario this floor exists to prevent.
+  const hr = caRecalibratedHR(c.holdoutHitRate, false) ?? 0;
   if (hr <= impliedP) return null; // no edge, not a value candidate at all
+  if (hr < CA_MIN_VALUE_HR) return null; // 2026-07-17: own quality floor, see constant's comment
   return Math.pow(hr / 100, CA_VALUE_P_EXP) * (Math.log(odds) / odds);
+}
+
+// Rule 1's origin-caveat classification, extracted (2026-07-17) so callers
+// that only need "which markets are origin-excluded" — buildCAVerdictLogRows
+// pulls it from computeCAVerdicts' own verdicts since it already calls that
+// anyway; the Mix block below does NOT already call computeCAVerdicts, so it
+// uses this directly — don't run the full computeCAVerdicts (Rule 3 scoring,
+// best-value, etc.) just to get this, especially in a per-fixture render
+// loop. Single source of truth either way; computeCAVerdicts's Rule 1 below
+// just adds the display text on top of this.
+function caOriginClassifications(positive, avoid) {
+  const avoidMarkets = new Set(avoid.map(c => c.market));
+  const bestPerMarket = new Map();
+  for (const p of positive) if (!bestPerMarket.has(p.market)) bestPerMarket.set(p.market, p);
+  const out = [];
+  for (const p of bestPerMarket.values()) {
+    const components = CA_SIDE_COMPONENTS[p.market];
+    if (!components) continue;
+    const homeFlagged = components.home.every(m => avoidMarkets.has(m));
+    const awayFlagged = components.away.every(m => avoidMarkets.has(m));
+    if (homeFlagged && awayFlagged) {
+      out.push({ market: p.market, holdoutHitRate: p.holdoutHitRate, type: "unclear-origin", flaggedSide: null, otherSide: null });
+    } else if (homeFlagged || awayFlagged) {
+      const flaggedSide = homeFlagged ? "home" : "away";
+      const otherSide = homeFlagged ? "away" : "home";
+      out.push({
+        market: p.market, holdoutHitRate: p.holdoutHitRate,
+        type: components.requiresBoth ? "fragile-origin" : "origin-caveat",
+        flaggedSide, otherSide,
+      });
+    }
+  }
+  return out;
 }
 
 // caMatches: the return value of matchCAConditions above. Returns an array of
@@ -1021,7 +1143,6 @@ export function computeCAVerdicts(caMatches, f) {
     });
   }
   if (!positive.length) return verdicts;
-  const avoidMarkets = new Set(avoid.map(c => c.market));
 
   // Rule 1 — origin caveat, ONE verdict per MARKET, not per matched combo.
   // ROOT CAUSE FIX (2026-07-13): a single fixture routinely matches many
@@ -1037,37 +1158,27 @@ export function computeCAVerdicts(caMatches, f) {
   // logic. `positive` is already sorted best-holdout-first (see
   // matchCAConditions above), so the first combo seen per market is the
   // strongest one — kept as the representative for holdoutHitRate display.
-  const bestPerMarket = new Map();
-  for (const p of positive) if (!bestPerMarket.has(p.market)) bestPerMarket.set(p.market, p);
-  for (const p of bestPerMarket.values()) {
-    const components = CA_SIDE_COMPONENTS[p.market];
-    if (!components) continue;
-    const homeFlagged = components.home.every(m => avoidMarkets.has(m));
-    const awayFlagged = components.away.every(m => avoidMarkets.has(m));
-    if (homeFlagged && awayFlagged) {
+  for (const oc of caOriginClassifications(positive, avoid)) {
+    if (oc.type === "unclear-origin") {
       verdicts.push({
-        type: "unclear-origin", market: p.market, holdoutHitRate: p.holdoutHitRate,
-        text: `${CA_MARKET_SHORT(p.market)} matched, but both home and away scoring are flagged avoid on this fixture — the pattern held up on holdout, but neither side looks like the source. Worth a second look before trusting it.`,
+        type: "unclear-origin", market: oc.market, holdoutHitRate: oc.holdoutHitRate,
+        text: `${CA_MARKET_SHORT(oc.market)} matched, but both home and away scoring are flagged avoid on this fixture — the pattern held up on holdout, but neither side looks like the source. Worth a second look before trusting it.`,
       });
-    } else if (homeFlagged || awayFlagged) {
-      const flaggedSide = homeFlagged ? "home" : "away";
-      const otherSide    = homeFlagged ? "away" : "home";
-      if (components.requiresBoth) {
-        // Fragile origin (2026-07-14, Annan/Dundee case): this market can't
-        // hit AT ALL without the flagged side scoring — not a caveat on an
-        // otherwise-fine pick, the pick's entire outcome rides on the side
-        // CA itself flagged avoid. Distinct type so Rule 3 can exclude it
-        // from lean/value candidacy the same way unclear-origin already is.
-        verdicts.push({
-          type: "fragile-origin", market: p.market, holdoutHitRate: p.holdoutHitRate,
-          text: `${CA_MARKET_SHORT(p.market)} matched, but it needs BOTH sides to score and ${flaggedSide} scoring is flagged avoid — this pick rides entirely on the flagged side coming through, not a soft caveat.`,
-        });
-      } else {
-        verdicts.push({
-          type: "origin-caveat", market: p.market, holdoutHitRate: p.holdoutHitRate,
-          text: `${CA_MARKET_SHORT(p.market)} matched, but ${flaggedSide} scoring is flagged avoid on both thresholds — likely ${otherSide}-side driven, not spread across both teams. Real signal, resting on one path.`,
-        });
-      }
+    } else if (oc.type === "fragile-origin") {
+      // Fragile origin (2026-07-14, Annan/Dundee case): this market can't
+      // hit AT ALL without the flagged side scoring — not a caveat on an
+      // otherwise-fine pick, the pick's entire outcome rides on the side
+      // CA itself flagged avoid. Distinct type so Rule 3 can exclude it
+      // from lean/value candidacy the same way unclear-origin already is.
+      verdicts.push({
+        type: "fragile-origin", market: oc.market, holdoutHitRate: oc.holdoutHitRate,
+        text: `${CA_MARKET_SHORT(oc.market)} matched, but it needs BOTH sides to score and ${oc.flaggedSide} scoring is flagged avoid — this pick rides entirely on the flagged side coming through, not a soft caveat.`,
+      });
+    } else {
+      verdicts.push({
+        type: "origin-caveat", market: oc.market, holdoutHitRate: oc.holdoutHitRate,
+        text: `${CA_MARKET_SHORT(oc.market)} matched, but ${oc.flaggedSide} scoring is flagged avoid on both thresholds — likely ${oc.otherSide}-side driven, not spread across both teams. Real signal, resting on one path.`,
+      });
     }
   }
 
@@ -1097,9 +1208,19 @@ export function computeCAVerdicts(caMatches, f) {
     verdicts.filter(v => v.type === "unclear-origin" || v.type === "fragile-origin").map(v => v.market)
   );
   const contradictorySet = new Set(contradictoryMarkets);
-  const eligible = c => !contradictorySet.has(c.market) && !unclearOriginMarkets.has(c.market) && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT;
-  const cleanPositive = positive.filter(c => eligible(c) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR);
-  const cleanAvoid = avoid.filter(c => eligible(c) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR);
+  // 2026-07-16: lift floor and HR floor both now check the RECALIBRATED
+  // rate — a claimed 96% that's really ~82% shouldn't sail through
+  // CA_MIN_HOLDOUT_HR just because the raw number looked fine. Avoid
+  // direction also gets the stricter CA_MIN_ELIGIBLE_LIFT_AVOID floor (see
+  // that constant's comment — weak avoid lift doesn't discriminate real
+  // outcomes the way weak positive lift's absence of a pattern suggested).
+  const eligible = (c, isAvoid) => {
+    if (contradictorySet.has(c.market) || unclearOriginMarkets.has(c.market)) return false;
+    const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
+    return Math.abs(c.holdoutLift ?? 0) >= liftFloor;
+  };
+  const cleanPositive = positive.filter(c => eligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
+  const cleanAvoid = avoid.filter(c => eligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
 
   const scored = [
     ...cleanPositive.map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
@@ -1136,11 +1257,22 @@ export function computeCAVerdicts(caMatches, f) {
 
   // Best value — positive direction only (you stake something; "avoid" isn't
   // itself a stakeable market). Requires real odds AND a real edge (CA's own
-  // holdout HR beats the market's implied probability) via caValueScore —
-  // never shown just because the formula would score it, only when there's
-  // an actual price to compare against.
+  // recalibrated holdout HR beats the market's implied probability, AND
+  // clears CA_MIN_VALUE_HR) via caValueScore — never shown just because the
+  // formula would score it, only when there's an actual price to compare
+  // against.
+  // DECOUPLED from cleanPositive/CA_MIN_HOLDOUT_HR (2026-07-17): it used to
+  // draw only from cleanPositive, meaning a combo had to clear the LEAN
+  // floor to even be considered for value — but a value pick's job is
+  // "beats the price," not "is a confident enough lean," and those aren't
+  // the same question. Coupling them cut best-value's count 405->100 for
+  // almost no accuracy gain when this was first tested. Still excludes
+  // same-market contradictions and unclear/fragile-origin (those aren't
+  // floor-related — they mean the signal's own direction is ambiguous,
+  // which is a real reason to exclude regardless of value vs lean).
   if (f) {
-    const valueCandidates = cleanPositive.map(c => ({ c, score: caValueScore(c, f) })).filter(x => x.score != null);
+    const valueEligible = positive.filter(c => !contradictorySet.has(c.market) && !unclearOriginMarkets.has(c.market));
+    const valueCandidates = valueEligible.map(c => ({ c, score: caValueScore(c, f) })).filter(x => x.score != null);
     if (valueCandidates.length) {
       valueCandidates.sort((a, b) => b.score - a.score);
       const bestValue = valueCandidates[0].c;
@@ -1178,8 +1310,31 @@ export function buildCAVerdictLogRows(f, caPatterns) {
   };
   const bestPositive = bestPerMarket(positive);
   const bestAvoid = bestPerMarket(avoid);
-  const cleanPositive = positive.filter(c => !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT);
-  const cleanAvoid = avoid.filter(c => !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT);
+  // 2026-07-17: same recalibration + avoid-only lift floor fix as
+  // computeCAVerdicts' Rule 3 (see that function's `eligible`/cleanPositive/
+  // cleanAvoid for the full rationale) — this function computes its own
+  // independent copy of the same filter rather than calling into
+  // computeCAVerdicts' internals, so it has to be kept in sync by hand.
+  // Missed this the first time the recalibration patch went in; caught on
+  // review — the log's clearsFloor/familyCorrobCount/safestScore columns
+  // would otherwise have silently disagreed with what topLean/secondLean
+  // above actually reflect.
+  // 2026-07-17 (follow-up): also excludes unclear/fragile-origin markets now
+  // — this function never did, only computeCAVerdicts' Rule 3 did, so a
+  // market whose positive signal came entirely from one goal-less side
+  // could still show clearsFloor=true here while never actually being
+  // eligible for a lean. Pulled straight from `verdicts` (already computed
+  // above) instead of re-deriving Rule 1 a third time.
+  const unclearOriginMarkets = new Set(
+    verdicts.filter(v => v.type === "unclear-origin" || v.type === "fragile-origin").map(v => v.market)
+  );
+  const eligibleLog = (c, isAvoid) => {
+    if (contradictorySet.has(c.market) || unclearOriginMarkets.has(c.market)) return false;
+    const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
+    return Math.abs(c.holdoutLift ?? 0) >= liftFloor;
+  };
+  const cleanPositive = positive.filter(c => eligibleLog(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
+  const cleanAvoid = avoid.filter(c => eligibleLog(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
 
   const fixtureId = f.id ?? f.fixtureId ?? f.matchId ?? `${f.teams?.home}__${f.teams?.away}__${f.time || ""}`;
   const topLean = verdicts.find(v => v.type === "strongest-lean");
@@ -1188,8 +1343,8 @@ export function buildCAVerdictLogRows(f, caPatterns) {
 
   const rowFor = (c, isAvoid) => {
     const conflict = contradictorySet.has(c.market);
-    const clearsFloor = !conflict && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT &&
-      (isAvoid ? (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR : (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR);
+    const clearsFloor = eligibleLog(c, isAvoid) &&
+      (isAvoid ? caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR : caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
     const odds = !isAvoid ? caOddsFor(f, c.market) : null;
     return {
       fixtureId, date: f.date || null, league: f.league || null,
@@ -1204,7 +1359,7 @@ export function buildCAVerdictLogRows(f, caPatterns) {
       modelProb: caModelProbFor(f, c.market),
       modelAgreement: clearsFloor ? caModelAgreementFactor(c, isAvoid, f) : null,
       safestScore: clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) : null,
-      odds, valueEdgePP: odds ? +((c.holdoutHitRate ?? 0) - (100 / odds)).toFixed(1) : null,
+      odds, valueEdgePP: odds ? +((caRecalibratedHR(c.holdoutHitRate, false) ?? 0) - (100 / odds)).toFixed(1) : null, // 2026-07-17: recalibrated, was raw
       valueScore: !isAvoid ? caValueScore(c, f) : null,
       isTopLean: !!topLean && topLean.market === c.market,
       isSecondLean: !!secondLean && secondLean.market === c.market,
@@ -5513,12 +5668,28 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // never candidate; CA_MIN_HOLDOUT_HR/CA_MAX_AVOID_HR for genuinely
       // bettable/avoidable absolute probability; CA_MIN_ELIGIBLE_LIFT so a
       // structurally trivial lift can't win just because n or HR looks fine.
-      const cleanPositive = positive.filter(c =>
-        !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 0) >= CA_MIN_HOLDOUT_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT
+      // 2026-07-17: recalibrated + avoid-only stricter lift floor, same fix
+      // as computeCAVerdicts' Rule 3 and buildCAVerdictLogRows — this block
+      // computes its own independent copy rather than calling into either,
+      // so (same as the log-row builder) it has to be kept in sync by hand.
+      // Caught on review, same recalibration patch pass.
+      // 2026-07-17 (follow-up): also excludes unclear/fragile-origin markets
+      // now, same gap buildCAVerdictLogRows had — uses the lightweight
+      // caOriginClassifications helper (just Rule 1's logic) rather than
+      // calling the full computeCAVerdicts, which would also run Rule 3's
+      // scoring/best-value for no reason in what's a per-fixture render path.
+      const mixUnclearOriginMarkets = new Set(
+        caOriginClassifications(positive, avoid)
+          .filter(oc => oc.type === "unclear-origin" || oc.type === "fragile-origin")
+          .map(oc => oc.market)
       );
-      const cleanAvoid = avoid.filter(c =>
-        !contradictorySet.has(c.market) && (c.holdoutHitRate ?? 100) <= CA_MAX_AVOID_HR && Math.abs(c.holdoutLift ?? 0) >= CA_MIN_ELIGIBLE_LIFT
-      );
+      const mixEligible = (c, isAvoid) => {
+        if (contradictorySet.has(c.market) || mixUnclearOriginMarkets.has(c.market)) return false;
+        const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
+        return Math.abs(c.holdoutLift ?? 0) >= liftFloor;
+      };
+      const cleanPositive = positive.filter(c => mixEligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
+      const cleanAvoid = avoid.filter(c => mixEligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
       // caSafestScore (2026-07-13 full rewrite, replaces caCompositeScore;
       // +model agreement 2026-07-14): shrunk |lift| (empirical-Bayes-style —
       // kills the tiny-n-freak-lift problem) × family corroboration
