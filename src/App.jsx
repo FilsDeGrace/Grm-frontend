@@ -835,6 +835,48 @@ export function caPatternStrength(lift) {
   return "weak";
 }
 
+// ── CA "STRONG PATTERN" CLASSIFICATION (Custom List View mode, 2026-07-18) ──
+// Deliberately NOT caPatternStrength() above — that's a single-metric,
+// lift-only descriptive label a per-combo card shows (a combo with a big
+// lift reads "strong" there regardless of its actual hit rate). This is a
+// genuinely different, composite gate for the Custom List "Strong Patterns"
+// filter mode: absolute hit rate (train AND holdout) AND lift vs that
+// market's own baseline (train AND holdout) all have to clear their own bar
+// independently — a combo can't pass on lift alone.
+// NO sample-size floor here (Alden's call, 2026-07-18) — unlike the mining
+// engine's own VALID/low-test-n split (which already exists upstream, see
+// byMarketEmerging), this filter is judged purely on how strong the rate/
+// lift numbers themselves are, not on how many legs back them.
+// Positive and avoid are true mirrors, not "not positive": avoid asks for a
+// LOW hit rate (train and holdout) plus a negative lift of the same
+// magnitude — the opposite shape, not just the absence of the positive one.
+export const CA_STRONG_MIN_TRAIN_HR         = 75;  // positive: train hit-rate floor
+export const CA_STRONG_MIN_HOLDOUT_HR       = 70;  // positive: holdout hit-rate floor
+export const CA_STRONG_MAX_TRAIN_HR_AVOID   = 20;  // avoid: train hit-rate ceiling
+export const CA_STRONG_MAX_HOLDOUT_HR_AVOID = 20;  // avoid: holdout hit-rate ceiling
+export const CA_STRONG_MIN_LIFT             = 20;  // pp, train AND holdout, vs that market's own baseline
+export function isStrongCA(c, isAvoid) {
+  if (!c) return false;
+  // Missing-data defaults land on the FAILING side of the check (100 for
+  // avoid's hit-rate floors, 0 for positive's) rather than null passing
+  // through comparisons silently — an incomplete combo should never read as
+  // "strong" by accident.
+  const trainHR   = c.trainHitRate   ?? (isAvoid ? 100 : 0);
+  const holdHR    = c.holdoutHitRate ?? (isAvoid ? 100 : 0);
+  const trainLift = c.trainLift   ?? 0;
+  const holdLift  = c.holdoutLift ?? 0;
+  if (!isAvoid) {
+    return trainHR >= CA_STRONG_MIN_TRAIN_HR
+        && holdHR  >= CA_STRONG_MIN_HOLDOUT_HR
+        && trainLift >= CA_STRONG_MIN_LIFT
+        && holdLift  >= CA_STRONG_MIN_LIFT;
+  }
+  return trainHR <= CA_STRONG_MAX_TRAIN_HR_AVOID
+      && holdHR  <= CA_STRONG_MAX_HOLDOUT_HR_AVOID
+      && trainLift <= -CA_STRONG_MIN_LIFT
+      && holdLift  <= -CA_STRONG_MIN_LIFT;
+}
+
 // Shared floor/ceiling for "this is a genuinely bettable signal, not just an
 // impressive lift number" (Sterling's call, 2026-07-13 — 60/40 as a
 // reasonable symmetric starting point, revisit if it excludes too much or too
@@ -4966,6 +5008,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [caPatternsRow,  setCaPatternsRow]  = useState(null); // raw /api/ca-patterns payload
   const [caLoadingRow,   setCaLoadingRow]   = useState(false);
   const [caErrorRow,     setCaErrorRow]     = useState(null);
+  // Pattern-quality mode (2026-07-18) — mutually exclusive, one list at a
+  // time (not stacked): "standard" is the pre-existing VALID-only behavior
+  // (default, unchanged), "strong" swaps in isStrongCA's composite gate,
+  // "emerging" swaps to the server's low-test-n arrays gated by the
+  // user-picked min-hit-rate threshold below. caDirection narrows any mode
+  // to Positive-only/Avoid-only/Both — "both" is a no-op so standard mode's
+  // existing behavior is byte-identical unless a user explicitly narrows it.
+  const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging"
+  const [caDirection,     setCaDirection]     = useState("both");     // "positive" | "avoid" | "both"
+  const [caEmergingMinHR, setCaEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — holdout HR floor (positive) / ceiling mirror (avoid)
   // CA verdict log (2026-07-14) — batches one row per fixture per market/
   // direction the verdict engine considered, POSTed once to
   // /api/ca-verdict-log. Manual action, not auto-fired on every render/
@@ -5660,7 +5712,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return sf ? !sf.fn(f) : false;
       })) continue;
 
-      const { positive, avoid, contradictoryMarkets = [] } = matchCAConditions(f, caPatternsRow);
+      const { positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets = [] } = matchCAConditions(f, caPatternsRow);
       const contradictorySet = new Set(contradictoryMarkets);
       // Two floor gates applied upfront (2026-07-13 full rewrite), same
       // exclusions computeCAVerdicts' Rule 3 uses so Mix/single-market rows
@@ -5683,13 +5735,42 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           .filter(oc => oc.type === "unclear-origin" || oc.type === "fragile-origin")
           .map(oc => oc.market)
       );
+      // Base exclusion shared by every mode: conflicting-signal + unclear/
+      // fragile-origin markets never candidate, regardless of which quality
+      // tier is selected — an origin problem doesn't go away just because a
+      // combo also happens to be "strong" or "emerging".
+      const originClean = c => !contradictorySet.has(c.market) && !mixUnclearOriginMarkets.has(c.market);
       const mixEligible = (c, isAvoid) => {
-        if (contradictorySet.has(c.market) || mixUnclearOriginMarkets.has(c.market)) return false;
+        if (!originClean(c)) return false;
         const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
         return Math.abs(c.holdoutLift ?? 0) >= liftFloor;
       };
-      const cleanPositive = positive.filter(c => mixEligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
-      const cleanAvoid = avoid.filter(c => mixEligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
+      // ── PATTERN-QUALITY MODE (2026-07-18) — Standard / Strong / Emerging
+      // are mutually exclusive: caMode picks exactly ONE candidate pool, they
+      // never stack. "standard" reproduces the pre-existing behavior exactly
+      // (byte-identical when caDirection is "both", the default). "strong"
+      // swaps in isStrongCA's composite hit-rate+lift gate in place of the
+      // standard floor gates. "emerging" swaps to the server's own
+      // low-test-n arrays (byMarketEmerging/byMarketAvoidEmerging — already
+      // kept fully separate from VALID upstream) gated by the user-picked
+      // min-holdout-HR threshold; avoid mirrors it as a ceiling at
+      // (100 - threshold), same mirrored shape as isStrongCA.
+      let cleanPositive, cleanAvoid;
+      if (caMode === "strong") {
+        cleanPositive = positive.filter(c => mixEligible(c, false) && isStrongCA(c, false));
+        cleanAvoid    = avoid.filter(c => mixEligible(c, true) && isStrongCA(c, true));
+      } else if (caMode === "emerging") {
+        const avoidCeiling = 100 - caEmergingMinHR;
+        cleanPositive = emergingPositive.filter(c => originClean(c) && (c.holdoutHitRate ?? 0) >= caEmergingMinHR);
+        cleanAvoid    = emergingAvoid.filter(c => originClean(c) && (c.holdoutHitRate ?? 100) <= avoidCeiling);
+      } else {
+        cleanPositive = positive.filter(c => mixEligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
+        cleanAvoid    = avoid.filter(c => mixEligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
+      }
+      // Direction filter (Positive-only / Avoid-only / Both) — applies on
+      // top of whichever mode's pool was just built. "both" is a no-op.
+      if (caDirection === "positive") cleanAvoid = [];
+      if (caDirection === "avoid")    cleanPositive = [];
       // caSafestScore (2026-07-13 full rewrite, replaces caCompositeScore;
       // +model agreement 2026-07-14): shrunk |lift| (empirical-Bayes-style —
       // kills the tiny-n-freak-lift problem) × family corroboration
@@ -5781,7 +5862,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR]);
 
   const displayRows = saMarket ? saRows : (caMarket ? caRows : rows);
 
@@ -6229,6 +6310,88 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
               </div>
             )}
+
+            {/* ── PATTERN QUALITY MODE (2026-07-18) — Standard / Strong / Emerging
+                 are mutually exclusive: only one populates the list at a time. ── */}
+            {caMarket && (
+              <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.amber}20` }}>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Pattern Quality
+                </div>
+                <div className="cscroll" style={{ marginBottom:6 }}>
+                  {[
+                    { id:"standard", label:"Standard" },
+                    { id:"strong",   label:"Strong" },
+                    { id:"emerging", label:"Emerging" },
+                  ].map(m => {
+                    const isOn = caMode === m.id;
+                    return (
+                      <button key={m.id} onClick={() => setCaMode(m.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? C.amber : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? C.amber : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {caMode === "strong" && (
+                  <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:6,lineHeight:1.5 }}>
+                    Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline (avoid mirrors this — low train/holdout hit rate, strongly negative lift).
+                  </div>
+                )}
+                {caMode === "emerging" && (
+                  <>
+                    <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:6,lineHeight:1.5 }}>
+                      Small-sample, unproven patterns (below the holdout test-size floor) — filtered by minimum holdout hit rate.
+                    </div>
+                    <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                      Min Hit Rate
+                    </div>
+                    <div className="cscroll" style={{ marginBottom:6 }}>
+                      {[100, 99, 95, 90].map(pct => {
+                        const isOn = caEmergingMinHR === pct;
+                        return (
+                          <button key={pct} onClick={() => setCaEmergingMinHR(pct)} className="gb"
+                            style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                     background:isOn ? C.amber : "transparent",
+                                     color:isOn ? "#fff" : C.muted,
+                                     border:`1px solid ${isOn ? C.amber : C.faint}`,
+                                     fontWeight:isOn ? 800 : undefined }}>
+                            {pct}%
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Direction
+                </div>
+                <div className="cscroll">
+                  {[
+                    { id:"both",     label:"Both" },
+                    { id:"positive", label:"Positive" },
+                    { id:"avoid",    label:"Avoid" },
+                  ].map(d => {
+                    const isOn = caDirection === d.id;
+                    return (
+                      <button key={d.id} onClick={() => setCaDirection(d.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.amber) : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.amber) : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {d.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {adminMode && caPatternsRow && date && (
               <div style={{ marginTop:8, display:"flex", alignItems:"center", gap:8 }}>
                 <button onClick={logCAVerdicts} disabled={caLogStatus === "logging"} className="gb"
