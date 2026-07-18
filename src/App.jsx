@@ -843,20 +843,43 @@ export function caPatternStrength(lift) {
 // filter mode: absolute hit rate (train AND holdout) AND lift vs that
 // market's own baseline (train AND holdout) all have to clear their own bar
 // independently — a combo can't pass on lift alone.
-// NO sample-size floor here (Alden's call, 2026-07-18) — unlike the mining
-// engine's own VALID/low-test-n split (which already exists upstream, see
-// byMarketEmerging), this filter is judged purely on how strong the rate/
-// lift numbers themselves are, not on how many legs back them.
 // Positive and avoid are true mirrors, not "not positive": avoid asks for a
 // LOW hit rate (train and holdout) plus a negative lift of the same
 // magnitude — the opposite shape, not just the absence of the positive one.
+// Avoid's hit-rate ceilings mirror the positive floors around 100 (100 -
+// value) — same mirrored-around-100 shape the Emerging min-hit-rate filter
+// already uses, so the two "Pattern Quality" modes read the same way.
+//
+// CONFIGURABLE (2026-07-18, Alden's request): trainHR/holdoutHR/lift/
+// minSample used to be hardcoded. They're now a `thresholds` param with the
+// original hardcoded numbers as defaults — the Custom List panel exposes
+// editable inputs for these (defaulting to the numbers below), same pattern
+// as the app's other Advanced Filter numeric inputs. minSample defaults to
+// 0 (off) — Alden's 2026-07-18 call was that sample size shouldn't gate
+// Strong by default, but he can still opt into a floor (>=10, >=15, etc.)
+// via the same input rather than it being unavailable entirely.
 export const CA_STRONG_MIN_TRAIN_HR         = 75;  // positive: train hit-rate floor
 export const CA_STRONG_MIN_HOLDOUT_HR       = 70;  // positive: holdout hit-rate floor
 export const CA_STRONG_MAX_TRAIN_HR_AVOID   = 20;  // avoid: train hit-rate ceiling
 export const CA_STRONG_MAX_HOLDOUT_HR_AVOID = 20;  // avoid: holdout hit-rate ceiling
 export const CA_STRONG_MIN_LIFT             = 20;  // pp, train AND holdout, vs that market's own baseline
-export function isStrongCA(c, isAvoid) {
+export const CA_STRONG_MIN_SAMPLE           = 0;   // train AND holdout leg count floor — 0 = off (default)
+// Single source of truth for the panel's default input values — keeps the
+// UI defaults and the classifier's own fallback defaults from drifting
+// apart if either is edited later.
+export const CA_STRONG_DEFAULTS = {
+  trainHR: CA_STRONG_MIN_TRAIN_HR,
+  holdoutHR: CA_STRONG_MIN_HOLDOUT_HR,
+  lift: CA_STRONG_MIN_LIFT,
+  minSample: CA_STRONG_MIN_SAMPLE,
+};
+export function isStrongCA(c, isAvoid, thresholds) {
   if (!c) return false;
+  const t = thresholds || CA_STRONG_DEFAULTS;
+  const trainHRBar   = t.trainHR   ?? CA_STRONG_MIN_TRAIN_HR;
+  const holdoutHRBar = t.holdoutHR ?? CA_STRONG_MIN_HOLDOUT_HR;
+  const liftBar      = t.lift      ?? CA_STRONG_MIN_LIFT;
+  const sampleBar    = t.minSample ?? CA_STRONG_MIN_SAMPLE;
   // Missing-data defaults land on the FAILING side of the check (100 for
   // avoid's hit-rate floors, 0 for positive's) rather than null passing
   // through comparisons silently — an incomplete combo should never read as
@@ -865,17 +888,22 @@ export function isStrongCA(c, isAvoid) {
   const holdHR    = c.holdoutHitRate ?? (isAvoid ? 100 : 0);
   const trainLift = c.trainLift   ?? 0;
   const holdLift  = c.holdoutLift ?? 0;
-  if (!isAvoid) {
-    return trainHR >= CA_STRONG_MIN_TRAIN_HR
-        && holdHR  >= CA_STRONG_MIN_HOLDOUT_HR
-        && trainLift >= CA_STRONG_MIN_LIFT
-        && holdLift  >= CA_STRONG_MIN_LIFT;
+  if (sampleBar > 0) {
+    const trainN = c.trainSample ?? 0, holdN = c.holdoutSample ?? 0;
+    if (trainN < sampleBar || holdN < sampleBar) return false;
   }
-  return trainHR <= CA_STRONG_MAX_TRAIN_HR_AVOID
-      && holdHR  <= CA_STRONG_MAX_HOLDOUT_HR_AVOID
-      && trainLift <= -CA_STRONG_MIN_LIFT
-      && holdLift  <= -CA_STRONG_MIN_LIFT;
+  if (!isAvoid) {
+    return trainHR >= trainHRBar
+        && holdHR  >= holdoutHRBar
+        && trainLift >= liftBar
+        && holdLift  >= liftBar;
+  }
+  return trainHR <= (100 - trainHRBar)
+      && holdHR  <= (100 - holdoutHRBar)
+      && trainLift <= -liftBar
+      && holdLift  <= -liftBar;
 }
+
 
 // Shared floor/ceiling for "this is a genuinely bettable signal, not just an
 // impressive lift number" (Sterling's call, 2026-07-13 — 60/40 as a
@@ -5018,6 +5046,38 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging"
   const [caDirection,     setCaDirection]     = useState("both");     // "positive" | "avoid" | "both"
   const [caEmergingMinHR, setCaEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — holdout HR floor (positive) / ceiling mirror (avoid)
+  // Strong-mode thresholds (2026-07-18, Alden's request) — editable, same
+  // "hardcoded default, user can override" shape as the app's other Advanced
+  // Filter numeric inputs. Stored as strings (raw input value) so an
+  // in-progress edit (e.g. typing "7" on the way to "75") doesn't get
+  // clobbered by a parsed-number round-trip; parsed to numbers with the
+  // CA_STRONG_DEFAULTS fallback at the point of use in caRows below.
+  const [caStrongInputs, setCaStrongInputs] = useState({
+    trainHR: String(CA_STRONG_DEFAULTS.trainHR),
+    holdoutHR: String(CA_STRONG_DEFAULTS.holdoutHR),
+    lift: String(CA_STRONG_DEFAULTS.lift),
+    minSample: String(CA_STRONG_DEFAULTS.minSample),
+  });
+  const resetCaStrongInputs = () => setCaStrongInputs({
+    trainHR: String(CA_STRONG_DEFAULTS.trainHR),
+    holdoutHR: String(CA_STRONG_DEFAULTS.holdoutHR),
+    lift: String(CA_STRONG_DEFAULTS.lift),
+    minSample: String(CA_STRONG_DEFAULTS.minSample),
+  });
+  // Parsed, gap-safe version consumed by caRows — a blank/invalid field
+  // falls back to its own default rather than becoming NaN and silently
+  // failing every comparison (which would look like "Strong mode is empty"
+  // with no visible reason).
+  const caStrongThresholds = useMemo(() => {
+    const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
+    return {
+      trainHR: num(caStrongInputs.trainHR, CA_STRONG_DEFAULTS.trainHR),
+      holdoutHR: num(caStrongInputs.holdoutHR, CA_STRONG_DEFAULTS.holdoutHR),
+      lift: num(caStrongInputs.lift, CA_STRONG_DEFAULTS.lift),
+      minSample: num(caStrongInputs.minSample, CA_STRONG_DEFAULTS.minSample),
+    };
+  }, [caStrongInputs]);
+
   // CA verdict log (2026-07-14) — batches one row per fixture per market/
   // direction the verdict engine considered, POSTed once to
   // /api/ca-verdict-log. Manual action, not auto-fired on every render/
@@ -5757,8 +5817,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // (100 - threshold), same mirrored shape as isStrongCA.
       let cleanPositive, cleanAvoid;
       if (caMode === "strong") {
-        cleanPositive = positive.filter(c => mixEligible(c, false) && isStrongCA(c, false));
-        cleanAvoid    = avoid.filter(c => mixEligible(c, true) && isStrongCA(c, true));
+        cleanPositive = positive.filter(c => mixEligible(c, false) && isStrongCA(c, false, caStrongThresholds));
+        cleanAvoid    = avoid.filter(c => mixEligible(c, true) && isStrongCA(c, true, caStrongThresholds));
       } else if (caMode === "emerging") {
         const avoidCeiling = 100 - caEmergingMinHR;
         cleanPositive = emergingPositive.filter(c => originClean(c) && (c.holdoutHitRate ?? 0) >= caEmergingMinHR);
@@ -5862,7 +5922,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR]);
+  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds]);
 
   const displayRows = saMarket ? saRows : (caMarket ? caRows : rows);
 
@@ -6338,9 +6398,36 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   })}
                 </div>
                 {caMode === "strong" && (
-                  <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:6,lineHeight:1.5 }}>
-                    Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline (avoid mirrors this — low train/holdout hit rate, strongly negative lift).
-                  </div>
+                  <>
+                    <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                      Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline (avoid mirrors this — low train/holdout hit rate, strongly negative lift, ceilings mirrored around 100%).
+                    </div>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5 }}>
+                      <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,opacity:.75 }}>
+                        Thresholds
+                      </div>
+                      <button onClick={resetCaStrongInputs} className="gb-ghost"
+                        style={{ padding:"2px 8px",fontSize:8,textTransform:"none",color:C.muted,border:`1px solid ${C.faint}` }}>
+                        Reset to defaults
+                      </button>
+                    </div>
+                    <div style={{ display:"flex",gap:6,marginBottom:8,flexWrap:"wrap" }}>
+                      {[
+                        { key:"trainHR",   label:"Min Train HR %",   placeholder:String(CA_STRONG_DEFAULTS.trainHR) },
+                        { key:"holdoutHR", label:"Min Holdout HR %", placeholder:String(CA_STRONG_DEFAULTS.holdoutHR) },
+                        { key:"lift",      label:"Min Lift (pp)",    placeholder:String(CA_STRONG_DEFAULTS.lift) },
+                        { key:"minSample", label:"Min Sample (n)",   placeholder:String(CA_STRONG_DEFAULTS.minSample) },
+                      ].map(fld => (
+                        <div key={fld.key} style={{ flex:"1 1 100px",minWidth:100 }}>
+                          <div style={{ fontSize:7,color:C.muted,marginBottom:3 }}>{fld.label}</div>
+                          <input type="number" value={caStrongInputs[fld.key]}
+                            onChange={e => setCaStrongInputs(prev => ({ ...prev, [fld.key]: e.target.value }))}
+                            placeholder={fld.placeholder} className="gb-ghost"
+                            style={{ width:"100%",padding:"6px 8px",fontSize:11,color:C.text,background:C.faint,borderColor:C.border }} />
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 )}
                 {caMode === "emerging" && (
                   <>
