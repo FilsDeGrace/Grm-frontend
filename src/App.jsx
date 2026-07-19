@@ -549,6 +549,44 @@ const SA_TO_FAMILY_ID = {
   "TB:Home Over 0.5": "homeo05", "TB:Home Over 1.5": "homeo15",
   "TB:Away Over 0.5": "awayo05", "TB:Away Over 1.5": "awayo15",
 };
+// ── CA_FAMILY_ALTERNATES (2026-07-19, Alden's report) ───────────────────────
+// The "Pick Market" row (family/setFamily) auto-syncs to a CA market's own
+// default family the moment you click that CA market button — but caRows
+// then recomputed `family` fresh from the CA market on every render after
+// that, never looking at the Pick Market row again. Switching Pick Market
+// from "BTTS Yes" to "BTTS No" while browsing CA:BTTS visibly did nothing —
+// same for every other market, not BTTS-specific.
+// Fix: caRows now respects a manual Pick Market choice, but ONLY when it's
+// an actual probability-complement of the CA market being shown (same
+// underlying line, opposite side) — not an arbitrary unrelated market. Each
+// CA market maps to the family ids that are valid for it; the CA market's
+// own default is always included first so "haven't touched Pick Market"
+// behaves exactly as before.
+const CA_FAMILY_ALTERNATES = {
+  "TB:Over 1.5":     ["over15", "under15"],
+  "TB:Over 2.5":     ["over25", "under25"],
+  "TB:Under 3.5":    ["under35", "over35"],
+  "TB:Under 4.5":    ["under45", "over45"],
+  "TB:BTTS":         ["bttsyes", "bttsno"],
+  "TB:DC1X":         ["dc1x", "awaywin"],   // DC1X (Home-or-Draw) complements Away Win exactly
+  "TB:DCX2":         ["dc2x", "homewin"],   // DCX2 (Away-or-Draw) complements Home Win exactly
+  "TB:1X2-Home":     ["homewin", "dc2x"],
+  "TB:1X2-Draw":     ["draw"],
+  "TB:1X2-Away":     ["awaywin", "dc1x"],
+  "TB:Home Over 0.5": ["homeo05"],
+  "TB:Home Over 1.5": ["homeo15"],
+  "TB:Away Over 0.5": ["awayo05"],
+  "TB:Away Over 1.5": ["awayo15"],
+};
+// Given the CA market just matched and whatever the Pick Market row is
+// currently set to, return the family id caRows should actually display —
+// the manual choice if it's a valid complement for this CA market, else the
+// CA market's own default (index 0 of its alternates list).
+function caResolveFamily(caMarketId, pickMarketFamily) {
+  const alts = CA_FAMILY_ALTERNATES[caMarketId];
+  if (!alts) return SA_TO_FAMILY_ID[caMarketId];
+  return alts.includes(pickMarketFamily) ? pickMarketFamily : alts[0];
+}
 
 // CA row market list — same 13 TB: market strings as SA (CA and SA mine the
 // identical 14-market scope, minus PE:Mix which is SA-specific), plus its
@@ -873,6 +911,20 @@ export const CA_STRONG_DEFAULTS = {
   lift: CA_STRONG_MIN_LIFT,
   minSample: CA_STRONG_MIN_SAMPLE,
 };
+// Avoid's OWN defaults for when Avoid is filtered on its own (direction =
+// "avoid") — these are the direct ceilings/floor, not derived by mirroring
+// the positive numbers around 100. Matches the original hardcoded avoid
+// ceiling this feature shipped with before thresholds became editable.
+// Used directly (Alden's 2026-07-18 follow-up: 8 fields for pos+avoid was
+// "confusing" — one 4-field panel is reused for whichever direction is
+// active; "both" mode is the one case that still needs the 100-x mirror,
+// since there's no separate avoid input to read in that mode).
+export const CA_STRONG_AVOID_DEFAULTS = {
+  trainHR: CA_STRONG_MAX_TRAIN_HR_AVOID,
+  holdoutHR: CA_STRONG_MAX_HOLDOUT_HR_AVOID,
+  lift: CA_STRONG_MIN_LIFT,
+  minSample: CA_STRONG_MIN_SAMPLE,
+};
 export function isStrongCA(c, isAvoid, thresholds) {
   if (!c) return false;
   const t = thresholds || CA_STRONG_DEFAULTS;
@@ -898,10 +950,18 @@ export function isStrongCA(c, isAvoid, thresholds) {
         && trainLift >= liftBar
         && holdLift  >= liftBar;
   }
-  return trainHR <= (100 - trainHRBar)
-      && holdHR  <= (100 - holdoutHRBar)
-      && trainLift <= -liftBar
-      && holdLift  <= -liftBar;
+  // Avoid: DIRECT ceilings/floor if the caller supplied them (t.avoidTrainHR
+  // etc — the "direction = avoid" case, its own field set, its own
+  // defaults). Otherwise mirror the positive fields around 100 — the
+  // "direction = both" case, where there's only one field set on screen and
+  // it doubles as the positive threshold.
+  const trainCeil = t.avoidTrainHR   ?? (100 - trainHRBar);
+  const holdCeil  = t.avoidHoldoutHR ?? (100 - holdoutHRBar);
+  const avoidLiftBar = t.avoidLift ?? liftBar;
+  return trainHR <= trainCeil
+      && holdHR  <= holdCeil
+      && trainLift <= -avoidLiftBar
+      && holdLift  <= -avoidLiftBar;
 }
 
 
@@ -1076,6 +1136,20 @@ function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) 
 // output). Model agreement now pulls the safest score toward Over 2.5 and
 // away from BTTS in a case shaped like that one, instead of treating both as
 // equally solid.
+// 2026-07-19 FIX (Alden's report): "TT 0.5" (Home/Away Over 0.5) was
+// systematically winning the Mix tie-break over BTTS/Over 2.5 even when
+// both were also Strong — the exact "obvious market scores near zero"
+// problem this file's own comment above says lift-based shrink already
+// solves structurally. It WAS solved there. The leak was here: this
+// function measured model agreement against a flat 50, not against the
+// market's own baseline. A market like Home Over 0.5 has a naturally high
+// baseline (most teams score at least once most games) — its model
+// probability sits far from 50 EVEN WHEN NOTHING UNUSUAL IS HAPPENING, so
+// it collected a near-max "agreement" bonus for being an easy market, not
+// for genuinely elevated support. Centering on c.holdoutBaselineHR instead
+// (same baseline lift already uses) closes that gap: a market only earns
+// agreement credit for sitting ABOVE its own normal level, exactly the
+// same standard lift already holds every market to.
 export const CA_MODEL_AGREEMENT_BONUS = 0.20;
 function caModelProbFor(f, market) {
   const def = SA_MARKETS[market];
@@ -1087,16 +1161,61 @@ function caModelProbFor(f, market) {
 function caModelAgreementFactor(c, isAvoid, f) {
   const mp = caModelProbFor(f, c.market);
   if (mp == null) return 0; // no model prob available — neutral, no bonus or penalty
-  const agreement = isAvoid ? (50 - mp) : (mp - 50); // positive = model agrees with this direction
-  return Math.max(-1, Math.min(1, agreement / 50)); // -1..+1
+  const baseline = c.holdoutBaselineHR ?? 50; // fall back to the old flat-50 center only if a combo somehow has no baseline
+  const agreement = isAvoid ? (baseline - mp) : (mp - baseline);
+  // Normalize by the room actually available above/below that baseline, not
+  // a flat 50 — a market that already sits at 85% baseline only has 15pp of
+  // room to climb toward 100, so modelProb sitting at that ceiling should
+  // read as "fully agreed, for this market," not as artificially weaker
+  // than a 50%-baseline market's modelProb sitting at 100. Floor of 10 to
+  // avoid a near-zero room blowing the ratio up for baselines pinned near
+  // the extremes.
+  const room = isAvoid ? Math.max(baseline, 10) : Math.max(100 - baseline, 10);
+  return Math.max(-1, Math.min(1, agreement / room));
 }
 
-// "Safest lean" score (2026-07-13 plan, +model agreement 2026-07-14) — shrunk
-// lift, boosted by family corroboration, nudged by whether the main model's
-// own probability agrees with this lean. This is the always-computable lean
-// (no odds required) — `f` is optional so existing callers that can't supply
-// a fixture (there currently are none, but kept defensive) degrade to no
-// model-agreement term rather than throwing.
+// Gap-stability shrink (2026-07-19, ported from Alden's verdict-ca-select.mjs
+// — his own data-tested formula, run against real fresh-pool backtests, not
+// a fresh guess). CA already computes `gap` (trainHitRate − holdoutHitRate)
+// on every combo and, until now, only used it as a binary VALID/OVERFIT
+// switch upstream — two VALID combos with gap=0.3pp and gap=4.8pp scored
+// identically. This applies the same shrinkage shape already used for
+// sample size (k/(k+x)), just to instability instead of to n — the bigger
+// the train→holdout swing, the more the combo's score gets discounted,
+// continuously rather than only at the binary gate.
+// CA_GAP_SHRINK_K is the one genuinely new tunable this brings in (not
+// derived from anything already in config.js) — 5pp, the tested script's
+// own value, copied not re-guessed.
+export const CA_GAP_SHRINK_K = 5;
+function caStabilityFactor(gap) {
+  return CA_GAP_SHRINK_K / (CA_GAP_SHRINK_K + Math.abs(gap ?? 0));
+}
+
+// Absolute hit-rate scaling (2026-07-19, same port). caShrinkScore only
+// scores by LIFT magnitude — two combos with the same +15pp lift but
+// holdoutHitRate 55% vs 85% used to score identically. This multiplies in
+// (HR/100)^p — avoid direction uses ((100-HR)/100)^p — reusing config.js's
+// own POOL_SCORE_P_EXP shape (already live-calibrated for "blend a rate with
+// something else" in the main engine, same as CA_VALUE_P_EXP above).
+// 2026-07-19 adaptation: scored against the RECALIBRATED holdout HR, not the
+// raw claimed one — the recalibration layer (below) didn't exist yet when
+// this formula was tested, but its whole point ("don't trust the raw
+// claimed rate") applies here exactly as much as it already does to
+// shrink's lift input just below.
+export const CA_HITRATE_SCALE_P_EXP = 2.0; // == POOL_SCORE_P_EXP, reused not reguessed
+function caHitRateFactor(recalHR, isAvoid) {
+  const hr = recalHR ?? (isAvoid ? 100 : 0);
+  const base = isAvoid ? (100 - hr) / 100 : hr / 100;
+  return Math.pow(Math.max(base, 0), CA_HITRATE_SCALE_P_EXP);
+}
+
+// "Safest lean" score (2026-07-13 plan, +model agreement 2026-07-14,
+// +stability/HR-scaling 2026-07-19 port from verdict-ca-select.mjs) — shrunk
+// lift × gap-stability × absolute-HR-scaling × family corroboration × model
+// agreement. This is the always-computable lean (no odds required) — `f` is
+// optional so existing callers that can't supply a fixture (there currently
+// are none, but kept defensive) degrade to no model-agreement term rather
+// than throwing.
 function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
   // 2026-07-16: shrink now runs on RECALIBRATED lift (recalibrated HR minus
   // the same mined baseline), not the raw claimed lift — this is the actual
@@ -1106,10 +1225,13 @@ function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
   const recalHR = caRecalibratedHR(c.holdoutHitRate, isAvoid);
   const recalLift = recalHR != null && c.holdoutBaselineHR != null ? (recalHR - c.holdoutBaselineHR) : c.holdoutLift;
   const shrink = caShrinkScore(recalLift, c.holdoutSample);
+  const stability = caStabilityFactor(c.gap);
+  const hrFactor = caHitRateFactor(recalHR, isAvoid);
   const corrob = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
   const modelAgreement = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
-  return shrink * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
+  return shrink * stability * hrFactor * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
 }
+
 
 // Odds for a CA market — reuses SA_MARKETS' oddsKey (same lookup
 // computeSAFeatures already does for SA) rather than a second way of reading
@@ -5046,37 +5168,65 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging"
   const [caDirection,     setCaDirection]     = useState("both");     // "positive" | "avoid" | "both"
   const [caEmergingMinHR, setCaEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — holdout HR floor (positive) / ceiling mirror (avoid)
-  // Strong-mode thresholds (2026-07-18, Alden's request) — editable, same
-  // "hardcoded default, user can override" shape as the app's other Advanced
-  // Filter numeric inputs. Stored as strings (raw input value) so an
-  // in-progress edit (e.g. typing "7" on the way to "75") doesn't get
-  // clobbered by a parsed-number round-trip; parsed to numbers with the
-  // CA_STRONG_DEFAULTS fallback at the point of use in caRows below.
-  const [caStrongInputs, setCaStrongInputs] = useState({
-    trainHR: String(CA_STRONG_DEFAULTS.trainHR),
-    holdoutHR: String(CA_STRONG_DEFAULTS.holdoutHR),
-    lift: String(CA_STRONG_DEFAULTS.lift),
-    minSample: String(CA_STRONG_DEFAULTS.minSample),
+  // Strong-mode thresholds (2026-07-18, Alden's request; refined same day
+  // after his follow-up that 8 separate pos+avoid fields would be
+  // confusing). ONE 4-field row is shown on screen at any time — which
+  // underlying state it's bound to, and how avoid is computed, both depend
+  // on caDirection:
+  //   "both"     → shows/edits caStrongPosInputs. Avoid is auto-mirrored
+  //                around 100 inside isStrongCA (no separate avoid field
+  //                needed — Alden confirmed the mirror is fine here).
+  //   "positive" → shows/edits caStrongPosInputs directly (avoid pool is
+  //                already forced empty by the direction filter, so its
+  //                thresholds are never evaluated).
+  //   "avoid"    → shows/edits caStrongAvoidInputs directly (its OWN
+  //                defaults — 20/20/20/0, the original hardcoded avoid
+  //                ceiling — not derived from the positive numbers). Typed
+  //                values are used as direct ceilings/floor, not mirrored.
+  // Each set keeps its own edits independently ("each at default unless"
+  // the user has changed that particular one) — switching Direction back
+  // and forth doesn't lose either side's edits, it just changes which one
+  // is on screen and which one isStrongCA actually uses.
+  const strongDefaultStrings = d => ({
+    trainHR: String(d.trainHR), holdoutHR: String(d.holdoutHR),
+    lift: String(d.lift), minSample: String(d.minSample),
   });
-  const resetCaStrongInputs = () => setCaStrongInputs({
-    trainHR: String(CA_STRONG_DEFAULTS.trainHR),
-    holdoutHR: String(CA_STRONG_DEFAULTS.holdoutHR),
-    lift: String(CA_STRONG_DEFAULTS.lift),
-    minSample: String(CA_STRONG_DEFAULTS.minSample),
-  });
-  // Parsed, gap-safe version consumed by caRows — a blank/invalid field
+  const [caStrongPosInputs,   setCaStrongPosInputs]   = useState(strongDefaultStrings(CA_STRONG_DEFAULTS));
+  const [caStrongAvoidInputs, setCaStrongAvoidInputs] = useState(strongDefaultStrings(CA_STRONG_AVOID_DEFAULTS));
+  const caStrongActiveIsAvoid = caDirection === "avoid";
+  const caStrongActiveInputs  = caStrongActiveIsAvoid ? caStrongAvoidInputs : caStrongPosInputs;
+  const setCaStrongActiveInputs = caStrongActiveIsAvoid ? setCaStrongAvoidInputs : setCaStrongPosInputs;
+  const resetCaStrongActiveInputs = () => setCaStrongActiveInputs(
+    strongDefaultStrings(caStrongActiveIsAvoid ? CA_STRONG_AVOID_DEFAULTS : CA_STRONG_DEFAULTS)
+  );
+  // Parsed, gap-safe versions consumed by caRows — a blank/invalid field
   // falls back to its own default rather than becoming NaN and silently
   // failing every comparison (which would look like "Strong mode is empty"
   // with no visible reason).
-  const caStrongThresholds = useMemo(() => {
+  const parseStrongInputs = (inputs, defaults) => {
     const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
     return {
-      trainHR: num(caStrongInputs.trainHR, CA_STRONG_DEFAULTS.trainHR),
-      holdoutHR: num(caStrongInputs.holdoutHR, CA_STRONG_DEFAULTS.holdoutHR),
-      lift: num(caStrongInputs.lift, CA_STRONG_DEFAULTS.lift),
-      minSample: num(caStrongInputs.minSample, CA_STRONG_DEFAULTS.minSample),
+      trainHR: num(inputs.trainHR, defaults.trainHR),
+      holdoutHR: num(inputs.holdoutHR, defaults.holdoutHR),
+      lift: num(inputs.lift, defaults.lift),
+      minSample: num(inputs.minSample, defaults.minSample),
     };
-  }, [caStrongInputs]);
+  };
+  const caStrongPosParsed   = useMemo(() => parseStrongInputs(caStrongPosInputs, CA_STRONG_DEFAULTS), [caStrongPosInputs]);
+  const caStrongAvoidParsed = useMemo(() => parseStrongInputs(caStrongAvoidInputs, CA_STRONG_AVOID_DEFAULTS), [caStrongAvoidInputs]);
+  // Combined object handed to isStrongCA: positive fields always come from
+  // caStrongPosParsed; avoid fields are only included directly when
+  // Direction is "avoid" — leaving them out in "both"/"positive" mode is
+  // what lets isStrongCA fall through to its own 100-x mirror for those.
+  const caStrongThresholds = useMemo(() => ({
+    ...caStrongPosParsed,
+    ...(caDirection === "avoid" ? {
+      avoidTrainHR: caStrongAvoidParsed.trainHR,
+      avoidHoldoutHR: caStrongAvoidParsed.holdoutHR,
+      avoidLift: caStrongAvoidParsed.lift,
+      minSample: caStrongAvoidParsed.minSample, // avoid-only: sample floor is the avoid set's own value
+    } : {}),
+  }), [caStrongPosParsed, caStrongAvoidParsed, caDirection]);
 
   // CA verdict log (2026-07-14) — batches one row per fixture per market/
   // direction the verdict engine considered, POSTed once to
@@ -5757,6 +5907,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
     const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
     const isMix = caMarket === "CA:Mix";
+    // Captured once per recompute (2026-07-19 fix) — `family` is the outer
+    // Pick Market row's own state. caResolveFamily() below decides per-row
+    // whether to honor it (valid complement of the CA market shown) or fall
+    // back to that CA market's own default.
+    const pickMarketFamily = family;
 
     const out = [];
     for (const f of fixtures) {
@@ -5844,22 +5999,35 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       let bestPositive, bestAvoid, marketLabel, family;
       if (isMix) {
         // Floor gates already applied above — cleanPositive/cleanAvoid ARE
-        // the candidate pools here, just ranked by score. If nothing cleared
-        // either gate, that side contributes no candidate — Mix falls back
-        // to the other side, or skips the fixture if neither clears.
+        // the candidate pools here, just ranked by score.
         bestPositive = cleanPositive.length
           ? cleanPositive.reduce((best, c) => scoreOf(c, false) > scoreOf(best, false) ? c : best)
           : null;
         bestAvoid = cleanAvoid.length
           ? cleanAvoid.reduce((best, c) => scoreOf(c, true) > scoreOf(best, true) ? c : best)
           : null;
-        if (!bestPositive && !bestAvoid) continue;
+        // 2026-07-19 (Alden): "mix don't shows avoid" — Mix is a best-PICK
+        // surface, not a warnings feed. When Direction is "both" or
+        // "positive", a fixture with no positive candidate just isn't a Mix
+        // pick — it's dropped, never downgraded into a red avoid-flagged
+        // row the way it used to (that fallback used to let a coincidental
+        // avoid pattern stand in as "the pick" for a fixture, which isn't
+        // what Mix is for). Direction "avoid" is the one deliberate
+        // exception — that's the user explicitly asking to browse avoid
+        // patterns, so it's the only case where bestAvoid IS the winner.
+        if (caDirection === "avoid") {
+          if (!bestAvoid) continue;
+        } else {
+          if (!bestPositive) continue;
+          bestAvoid = null; // don't let a coincidental avoid candidate leak into flagged/red styling below
+        }
         const winner = bestPositive || bestAvoid;
         marketLabel = (winner.market || "").replace(/^TB:/, "");
-        family = SA_TO_FAMILY_ID[winner.market];
+        family = caResolveFamily(winner.market, pickMarketFamily);
       } else {
         // A single market can still have more than one VALID combo matching
         // this fixture at once (different thresholds) — score them too,
+
         // rather than just taking the first one off the array's holdout-HR
         // sort order (the same high-baseline-style bias, just at the
         // within-market level).
@@ -5873,7 +6041,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           : null;
         if (!bestPositive && !bestAvoid) continue;
         marketLabel = caMarket.replace(/^TB:/, "");
-        family = SA_TO_FAMILY_ID[caMarket];
+        family = caResolveFamily(caMarket, pickMarketFamily);
       }
       const primaryPick = getCustomPick(f, family, C);
       const flagged = !bestPositive;
@@ -5922,7 +6090,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds]);
+  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
 
   const displayRows = saMarket ? saRows : (caMarket ? caRows : rows);
 
@@ -6400,28 +6568,35 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 {caMode === "strong" && (
                   <>
                     <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
-                      Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline (avoid mirrors this — low train/holdout hit rate, strongly negative lift, ceilings mirrored around 100%).
+                      {caStrongActiveIsAvoid
+                        ? `Avoid patterns with a low train hit rate, a low holdout hit rate, and a strongly negative lift vs. that market's own baseline. These fields apply directly — set the ceilings/floor yourself.`
+                        : `Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline.${caDirection === "both" ? " Avoid mirrors this automatically (ceilings mirrored around 100%) — no separate avoid input needed." : ""}`}
                     </div>
                     <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5 }}>
                       <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,opacity:.75 }}>
-                        Thresholds
+                        Thresholds{caStrongActiveIsAvoid ? " (Avoid)" : ""}
                       </div>
-                      <button onClick={resetCaStrongInputs} className="gb-ghost"
+                      <button onClick={resetCaStrongActiveInputs} className="gb-ghost"
                         style={{ padding:"2px 8px",fontSize:8,textTransform:"none",color:C.muted,border:`1px solid ${C.faint}` }}>
                         Reset to defaults
                       </button>
                     </div>
                     <div style={{ display:"flex",gap:6,marginBottom:8,flexWrap:"wrap" }}>
-                      {[
+                      {(caStrongActiveIsAvoid ? [
+                        { key:"trainHR",   label:"Max Train HR %",     placeholder:String(CA_STRONG_AVOID_DEFAULTS.trainHR) },
+                        { key:"holdoutHR", label:"Max Holdout HR %",   placeholder:String(CA_STRONG_AVOID_DEFAULTS.holdoutHR) },
+                        { key:"lift",      label:"Min |Lift| (pp)",    placeholder:String(CA_STRONG_AVOID_DEFAULTS.lift) },
+                        { key:"minSample", label:"Min Sample (n)",     placeholder:String(CA_STRONG_AVOID_DEFAULTS.minSample) },
+                      ] : [
                         { key:"trainHR",   label:"Min Train HR %",   placeholder:String(CA_STRONG_DEFAULTS.trainHR) },
                         { key:"holdoutHR", label:"Min Holdout HR %", placeholder:String(CA_STRONG_DEFAULTS.holdoutHR) },
                         { key:"lift",      label:"Min Lift (pp)",    placeholder:String(CA_STRONG_DEFAULTS.lift) },
                         { key:"minSample", label:"Min Sample (n)",   placeholder:String(CA_STRONG_DEFAULTS.minSample) },
-                      ].map(fld => (
+                      ]).map(fld => (
                         <div key={fld.key} style={{ flex:"1 1 100px",minWidth:100 }}>
                           <div style={{ fontSize:7,color:C.muted,marginBottom:3 }}>{fld.label}</div>
-                          <input type="number" value={caStrongInputs[fld.key]}
-                            onChange={e => setCaStrongInputs(prev => ({ ...prev, [fld.key]: e.target.value }))}
+                          <input type="number" value={caStrongActiveInputs[fld.key]}
+                            onChange={e => { const v = e.target.value; setCaStrongActiveInputs(prev => ({ ...prev, [fld.key]: v })); }}
                             placeholder={fld.placeholder} className="gb-ghost"
                             style={{ width:"100%",padding:"6px 8px",fontSize:11,color:C.text,background:C.faint,borderColor:C.border }} />
                         </div>
