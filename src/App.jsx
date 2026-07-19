@@ -964,6 +964,63 @@ export function isStrongCA(c, isAvoid, thresholds) {
       && holdLift  <= -avoidLiftBar;
 }
 
+// SA-STRONG (2026-07-19, Davies request #5): SA's own "Strong" quality tier,
+// mirroring isStrongCA's shape/defaults/avoid-mirroring exactly, but reading
+// SA's actual pattern field names (trainHR/testHR/trainN/testN/lift — SA has
+// ONE lift field, not separate train/holdout lifts like CA, so both the
+// train and test hit-rate floors gate against that single lift value).
+// SA's typical lift magnitudes run smaller than CA's in the sample pattern
+// Davies shared (lift: 1.5 alongside trainHR 87.6 / baseHR 86.1), so the
+// default lift floor here is set lower than CA's — fully editable either way.
+export const SA_STRONG_MIN_TRAIN_HR       = 75;  // positive: train hit-rate floor
+export const SA_STRONG_MIN_TEST_HR        = 70;  // positive: test/holdout hit-rate floor
+export const SA_STRONG_MAX_TRAIN_HR_AVOID = 20;  // avoid: train hit-rate ceiling
+export const SA_STRONG_MAX_TEST_HR_AVOID  = 20;  // avoid: test hit-rate ceiling
+export const SA_STRONG_MIN_LIFT           = 10;  // pp vs baseHR — NOTE: lower default than CA's 20; SA's lift scale runs smaller, tune to taste
+export const SA_STRONG_MIN_SAMPLE         = 0;   // train AND test leg count floor — 0 = off (default)
+export const SA_STRONG_DEFAULTS = {
+  trainHR: SA_STRONG_MIN_TRAIN_HR,
+  testHR: SA_STRONG_MIN_TEST_HR,
+  lift: SA_STRONG_MIN_LIFT,
+  minSample: SA_STRONG_MIN_SAMPLE,
+};
+// Avoid's OWN defaults for when Avoid is filtered on its own (direction =
+// "avoid") — same "8 fields is confusing, one 4-field panel reused per
+// direction" pattern CA settled on (Alden's 2026-07-18 call).
+export const SA_STRONG_AVOID_DEFAULTS = {
+  trainHR: SA_STRONG_MAX_TRAIN_HR_AVOID,
+  testHR: SA_STRONG_MAX_TEST_HR_AVOID,
+  lift: SA_STRONG_MIN_LIFT,
+  minSample: SA_STRONG_MIN_SAMPLE,
+};
+export function isStrongSA(p, isAvoid, thresholds) {
+  if (!p) return false;
+  const t = thresholds || SA_STRONG_DEFAULTS;
+  const trainHRBar = t.trainHR   ?? SA_STRONG_MIN_TRAIN_HR;
+  const testHRBar  = t.testHR    ?? SA_STRONG_MIN_TEST_HR;
+  const liftBar    = t.lift      ?? SA_STRONG_MIN_LIFT;
+  const sampleBar  = t.minSample ?? SA_STRONG_MIN_SAMPLE;
+  // Missing-data defaults land on the FAILING side, same guard as isStrongCA —
+  // an incomplete pattern object should never silently read as "strong".
+  const trainHR = p.trainHR ?? (isAvoid ? 100 : 0);
+  const testHR  = p.testHR  ?? (isAvoid ? 100 : 0);
+  const lift    = p.lift    ?? 0;
+  if (sampleBar > 0) {
+    const trainN = p.trainN ?? 0, testN = p.testN ?? 0;
+    if (trainN < sampleBar || testN < sampleBar) return false;
+  }
+  if (!isAvoid) {
+    return trainHR >= trainHRBar && testHR >= testHRBar && lift >= liftBar;
+  }
+  // Avoid: direct ceilings if the caller supplied them (direction="avoid",
+  // its own field set/defaults), otherwise mirror the positive fields
+  // around 100 (direction="both", one field set doubling as both).
+  const trainCeil = t.avoidTrainHR ?? (100 - trainHRBar);
+  const testCeil  = t.avoidTestHR  ?? (100 - testHRBar);
+  const avoidLiftBar = t.avoidLift ?? liftBar;
+  return trainHR <= trainCeil && testHR <= testCeil && Math.abs(lift) >= avoidLiftBar;
+}
+
 
 // Shared floor/ceiling for "this is a genuinely bettable signal, not just an
 // impressive lift number" (Sterling's call, 2026-07-13 — 60/40 as a
@@ -5070,9 +5127,54 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // PE:Mix de-gated 2026-07-04 (Sterling's call) — no longer admin-only.
   const [saExpanded,  setSaExpanded]  = useState(false); // panel collapsed by default
   const [saMarket,    setSaMarket]    = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
+  // COMBINE-MODE (2026-07-19, Davies request #4): SA and CA validate the SAME
+  // 13 TB: market strings (see CA_MARKET_LABELS above — derived straight off
+  // SA_TO_FAMILY_ID's keys), so "select both rows" means ONE market, checked
+  // by both engines — not two independently-picked markets. Default OFF so
+  // existing single-engine behavior (and the mutual-exclusivity toggle) is
+  // completely unchanged unless a user explicitly opts in.
+  const [combineMode, setCombineMode] = useState(false);
   const [saPatterns,  setSaPatterns]  = useState(null); // raw sa-patterns.json payload
   const [saLoading,   setSaLoading]   = useState(false);
   const [saError,     setSaError]     = useState(null);
+  // SA-STRONG (2026-07-19, Davies request #5): "Standard" (existing, lift-ranked,
+  // untouched by default) vs "Strong" (threshold-gated, mirrors CA's Strong mode
+  // exactly). No "Emerging" for SA — Davies confirmed SA has no low-test-n
+  // server-side arrays the way CA does, so only two tiers exist here.
+  const [saMode,      setSaMode]      = useState("standard"); // "standard" | "strong"
+  const [saDirection, setSaDirection] = useState("both");     // "positive" | "avoid" | "both"
+  const strongDefaultStringsSA = d => ({
+    trainHR: String(d.trainHR), testHR: String(d.testHR),
+    lift: String(d.lift), minSample: String(d.minSample),
+  });
+  const [saStrongPosInputs,   setSaStrongPosInputs]   = useState(strongDefaultStringsSA(SA_STRONG_DEFAULTS));
+  const [saStrongAvoidInputs, setSaStrongAvoidInputs] = useState(strongDefaultStringsSA(SA_STRONG_AVOID_DEFAULTS));
+  const saStrongActiveIsAvoid = saDirection === "avoid";
+  const saStrongActiveInputs  = saStrongActiveIsAvoid ? saStrongAvoidInputs : saStrongPosInputs;
+  const setSaStrongActiveInputs = saStrongActiveIsAvoid ? setSaStrongAvoidInputs : setSaStrongPosInputs;
+  const resetSaStrongActiveInputs = () => setSaStrongActiveInputs(
+    strongDefaultStringsSA(saStrongActiveIsAvoid ? SA_STRONG_AVOID_DEFAULTS : SA_STRONG_DEFAULTS)
+  );
+  const parseStrongInputsSA = (inputs, defaults) => {
+    const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
+    return {
+      trainHR: num(inputs.trainHR, defaults.trainHR),
+      testHR: num(inputs.testHR, defaults.testHR),
+      lift: num(inputs.lift, defaults.lift),
+      minSample: num(inputs.minSample, defaults.minSample),
+    };
+  };
+  const saStrongPosParsed   = useMemo(() => parseStrongInputsSA(saStrongPosInputs, SA_STRONG_DEFAULTS), [saStrongPosInputs]);
+  const saStrongAvoidParsed = useMemo(() => parseStrongInputsSA(saStrongAvoidInputs, SA_STRONG_AVOID_DEFAULTS), [saStrongAvoidInputs]);
+  const saStrongThresholds = useMemo(() => ({
+    ...saStrongPosParsed,
+    ...(saDirection === "avoid" ? {
+      avoidTrainHR: saStrongAvoidParsed.trainHR,
+      avoidTestHR: saStrongAvoidParsed.testHR,
+      avoidLift: saStrongAvoidParsed.lift,
+      minSample: saStrongAvoidParsed.minSample,
+    } : {}),
+  }), [saStrongPosParsed, saStrongAvoidParsed, saDirection]);
   // SA-RESET: when adminMode flips (unlock or lock), clear any cached patterns
   // so the fetch useEffect reruns with the correct token on next expansion.
   const prevAdminModeRef = useRef(adminMode);
@@ -5840,7 +5942,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       })) continue;
       const _saPickLabel = saMarket.replace(/^TB:/,""); const _saPick = { label: _saPickLabel, market: _saPickLabel };
       if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(_saPick, f))) continue;
-      const { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
+      let { positive, avoid } = matchSAPatterns(f, saMarket, saPatterns.patterns);
+      // SA-STRONG (2026-07-19): "standard" (default) is byte-identical to the
+      // pre-existing behavior below — no threshold gate, no direction narrowing
+      // beyond "both" (a no-op). "strong" swaps in isStrongSA's composite gate,
+      // same as caMode's "strong" branch does for CA.
+      if (saMode === "strong") {
+        positive = positive.filter(p => isStrongSA(p, false, saStrongThresholds));
+        avoid    = avoid.filter(p => isStrongSA(p, true, saStrongThresholds));
+      }
+      if (saDirection === "positive") avoid = [];
+      if (saDirection === "avoid")    positive = [];
       if (!positive.length && !avoid.length) continue;
       const odds    = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
       const flagged = positive.length === 0;
@@ -5889,7 +6001,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, saMode, saDirection, saStrongThresholds]);
 
   // CA row — mirrors saRows' shape/filters above so the existing row JSX
   // renders it unchanged. One real difference from SA beyond the matcher
@@ -6092,7 +6204,48 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     return out;
   }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
 
-  const displayRows = saMarket ? saRows : (caMarket ? caRows : rows);
+  // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
+  // caRows by fixture — a game only shows if BOTH engines matched it for this
+  // market (given whatever Mode/Direction each row currently has set; this is
+  // the single-select version — multi-select "OR within a row" is the next
+  // increment, not yet built). Reuses each row's own filtering (statFilters,
+  // excludedMarkets, kickoff, prob, sortActive quality toggles all already
+  // applied inside saRows/caRows individually) rather than re-deriving any of
+  // that here, so nothing about single-engine filtering can drift out of sync.
+  const combinedRows = useMemo(() => {
+    if (!combineMode || !saMarket || !caMarket || saMarket !== caMarket) return [];
+    const caByFixture = new Map(caRows.map(r => [r.f.id, r]));
+    const out = [];
+    for (const saRow of saRows) {
+      const caRow = caByFixture.get(saRow.f.id);
+      if (!caRow) continue; // must match BOTH engines
+      // CA's pick is built off getCustomPick/family (richer — real odds+prob
+      // per the app's actionable-pick pipeline used for ticket legs); SA's own
+      // pick object is a plainer computeProb-derived stand-in. Since it's the
+      // same market either way, prefer CA's for anything that gets booked.
+      const combinedFlagged = saRow._saFlagged || caRow._caFlagged;
+      out.push({
+        f: saRow.f,
+        pick: { ...caRow.pick, color: combinedFlagged ? C.red : C.green },
+        _saPositive: saRow._saPositive, _saAvoid: saRow._saAvoid, _saFlagged: saRow._saFlagged,
+        _caPositive: caRow._caPositive, _caAvoid: caRow._caAvoid, _caFlagged: caRow._caFlagged,
+      });
+    }
+    // Both-flagged sorts to the very bottom; otherwise SA's lift order wins
+    // ties since Standard-mode SA is lift-ranked by definition — CA's own
+    // sort (holdout hit-rate) only matters as the secondary key.
+    out.sort((a, b) => {
+      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1;
+      if (a._caFlagged !== b._caFlagged) return a._caFlagged ? 1 : -1;
+      const aLift = a._saFlagged ? (a._saAvoid[0]?.lift || 0) : (a._saPositive[0]?.lift || 0);
+      const bLift = b._saFlagged ? (b._saAvoid[0]?.lift || 0) : (b._saPositive[0]?.lift || 0);
+      return a._saFlagged ? aLift - bLift : bLift - aLift;
+    });
+    return out;
+  }, [combineMode, saMarket, caMarket, saRows, caRows]);
+
+  const bothCombined = combineMode && saMarket && caMarket && saMarket === caMarket;
+  const displayRows = bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : rows));
 
   const saveListToJSON = () => {
     const payload = {
@@ -6359,13 +6512,44 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </div>
       </div>
 
+      {/* ── COMBINE SA+CA (2026-07-19, Davies request #4) — SA and CA validate
+           the same 13 TB: markets, so combining means locking both rows to one
+           market rather than picking two. Off by default; turning it on while
+           only one row is active locks the other to match automatically. ── */}
+      <div style={{ marginBottom:10,display:"flex",alignItems:"center",gap:8 }}>
+        <button onClick={() => {
+          const turningOn = !combineMode;
+          setCombineMode(turningOn);
+          if (turningOn) {
+            // Lock whichever market is already active onto both rows. If both
+            // were already set to different markets (leftover from before
+            // combine was ever turned on), SA wins — arbitrary but consistent.
+            const shared = saMarket || caMarket || null;
+            setSaMarket(shared);
+            setCaMarket(shared);
+          }
+        }} className="gb"
+          style={{ padding:"6px 12px",fontSize:10,textTransform:"none",
+                   background:combineMode ? C.accent : "transparent",
+                   color:combineMode ? "#fff" : C.muted,
+                   border:`1px solid ${combineMode ? C.accent : C.faint}`,
+                   fontWeight:combineMode ? 800 : undefined }}>
+          {combineMode ? "✓ " : ""}Combine SA + CA
+        </button>
+        {combineMode && (
+          <div style={{ fontSize:8,color:C.text,opacity:.6,lineHeight:1.4 }}>
+            One market, both engines must match — SA Mix / CA Mix hidden while combined.
+          </div>
+        )}
+      </div>
+
       {/* ── STRATEGY ANALYST — collapsible, visible to all users ── */}
       {/* SA4-FIX: was admin-only ({adminMode && ...}). Now a collapsed panel
           any user can expand. PE:Mix de-gated 2026-07-04 — no longer admin-only. */}
       <div style={{ marginBottom:10 }}>
         {/* Collapse toggle header */}
         <button
-          onClick={() => { setSaExpanded(v => !v); if (saMarket && !saExpanded) setSaMarket(null); }}
+          onClick={() => { setSaExpanded(v => !v); if (saMarket && !saExpanded && !combineMode) setSaMarket(null); }}
           style={{ width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
                    background: saExpanded ? `${C.accent}10` : (saMarket ? `${C.accent}08` : C.surface),
                    border:`1px solid ${saExpanded ? `${C.accent}40` : (saMarket ? `${C.accent}30` : C.border)}`,
@@ -6409,7 +6593,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {true && (
             <div className="cscroll" style={{ marginBottom:6 }}>
               {saMarket && (
-                <button onClick={() => setSaMarket(null)} className="gb"
+                <button onClick={() => { setSaMarket(null); if (combineMode) setCaMarket(null); }} className="gb"
                   style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
                            background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
                   ✕ Off
@@ -6417,6 +6601,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               )}
               {SA_MARKET_LABELS.map(mk => {
                 const isMix    = mk.id === "PE:Mix";
+                // COMBINE-MODE: Mix picks a different market per fixture, which
+                // doesn't fit "one market, validated by both engines" — hide it
+                // while combined rather than allow a confusing half-state.
+                if (isMix && combineMode) return null;
                 const isOn     = saMarket === mk.id;
                 // De-gated 2026-07-04 (Sterling's call) — PE:Mix used to be
                 // hidden here (`if (isMix && !adminMode) return null;`) since
@@ -6426,7 +6614,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
                     setSaMarket(turningOn ? mk.id : null);
-                    if (turningOn) setCaMarket(null); // mutually exclusive with the CA row below
+                    if (combineMode) {
+                      // COMBINE-MODE (#4): CA locks to the same market instead
+                      // of being nulled — SA and CA both validate ONE market.
+                      setCaMarket(turningOn ? mk.id : null);
+                    } else if (turningOn) {
+                      setCaMarket(null); // mutually exclusive with the CA row below (unchanged default behavior)
+                    }
                     if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
                       setFamily(SA_TO_FAMILY_ID[mk.id]);
                       setActiveStrategy(null);
@@ -6454,6 +6648,101 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
               </div>
             )}
+
+            {/* ── SA PATTERN QUALITY (2026-07-19, Davies request #5) — mirrors
+                 CA's Pattern Quality block. Standard/Strong only (no Emerging —
+                 SA has no server-side low-test-n arrays the way CA does). ── */}
+            {saMarket && saMarket !== "PE:Mix" && (
+              <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.accent}20` }}>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Pattern Quality
+                </div>
+                <div className="cscroll" style={{ marginBottom:6 }}>
+                  {[
+                    { id:"standard", label:"Standard" },
+                    { id:"strong",   label:"Strong" },
+                  ].map(m => {
+                    const isOn = saMode === m.id;
+                    return (
+                      <button key={m.id} onClick={() => setSaMode(m.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? C.accent : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? C.accent : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {saMode === "standard" && (
+                  <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                    Default — ranks by SA lift, no threshold gate. Same behavior as before this feature.
+                  </div>
+                )}
+                {saMode === "strong" && (
+                  <>
+                    <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                      {saStrongActiveIsAvoid
+                        ? `Avoid patterns with a low train hit rate, a low test hit rate, and a strongly negative lift vs. that market's own baseline. These fields apply directly — set the ceilings/floor yourself.`
+                        : `Only patterns with a high train hit rate, a high test hit rate, and a strong lift vs. that market's own baseline.${saDirection === "both" ? " Avoid mirrors this automatically (ceilings mirrored around 100%) — no separate avoid input needed." : ""}`}
+                    </div>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5 }}>
+                      <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,opacity:.75 }}>
+                        Thresholds{saStrongActiveIsAvoid ? " (Avoid)" : ""}
+                      </div>
+                      <button onClick={resetSaStrongActiveInputs} className="gb-ghost"
+                        style={{ padding:"2px 8px",fontSize:8,textTransform:"none",color:C.muted,border:`1px solid ${C.faint}` }}>
+                        Reset to defaults
+                      </button>
+                    </div>
+                    <div style={{ display:"flex",gap:6,marginBottom:8,flexWrap:"wrap" }}>
+                      {(saStrongActiveIsAvoid ? [
+                        { key:"trainHR",   label:"Max Train HR %",  placeholder:String(SA_STRONG_AVOID_DEFAULTS.trainHR) },
+                        { key:"testHR",    label:"Max Test HR %",   placeholder:String(SA_STRONG_AVOID_DEFAULTS.testHR) },
+                        { key:"lift",      label:"Min |Lift| (pp)", placeholder:String(SA_STRONG_AVOID_DEFAULTS.lift) },
+                        { key:"minSample", label:"Min Sample (n)",  placeholder:String(SA_STRONG_AVOID_DEFAULTS.minSample) },
+                      ] : [
+                        { key:"trainHR",   label:"Min Train HR %",  placeholder:String(SA_STRONG_DEFAULTS.trainHR) },
+                        { key:"testHR",    label:"Min Test HR %",   placeholder:String(SA_STRONG_DEFAULTS.testHR) },
+                        { key:"lift",      label:"Min Lift (pp)",   placeholder:String(SA_STRONG_DEFAULTS.lift) },
+                        { key:"minSample", label:"Min Sample (n)",  placeholder:String(SA_STRONG_DEFAULTS.minSample) },
+                      ]).map(fld => (
+                        <div key={fld.key} style={{ flex:"1 1 100px",minWidth:100 }}>
+                          <div style={{ fontSize:7,color:C.muted,marginBottom:3 }}>{fld.label}</div>
+                          <input type="number" value={saStrongActiveInputs[fld.key]}
+                            onChange={e => { const v = e.target.value; setSaStrongActiveInputs(prev => ({ ...prev, [fld.key]: v })); }}
+                            placeholder={fld.placeholder} className="gb-ghost"
+                            style={{ width:"100%",padding:"6px 8px",fontSize:11,color:C.text,background:C.faint,borderColor:C.border }} />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Direction
+                </div>
+                <div className="cscroll">
+                  {[
+                    { id:"both",     label:"Both" },
+                    { id:"positive", label:"Positive" },
+                    { id:"avoid",    label:"Avoid" },
+                  ].map(d => {
+                    const isOn = saDirection === d.id;
+                    return (
+                      <button key={d.id} onClick={() => setSaDirection(d.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.accent) : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.accent) : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {d.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -6461,7 +6750,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       {/* ── CONDITION STRATEGY (CA) ROW — mirrors the SA panel above exactly ── */}
       <div style={{ marginBottom:10 }}>
         <button
-          onClick={() => { setCaExpanded(v => !v); if (caMarket && !caExpanded) setCaMarket(null); }}
+          onClick={() => { setCaExpanded(v => !v); if (caMarket && !caExpanded && !combineMode) setCaMarket(null); }}
           style={{ width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
                    background: caExpanded ? `${C.amber}10` : (caMarket ? `${C.amber}08` : C.surface),
                    border:`1px solid ${caExpanded ? `${C.amber}40` : (caMarket ? `${C.amber}30` : C.border)}`,
@@ -6498,7 +6787,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             </div>
             <div className="cscroll" style={{ marginBottom:6 }}>
               {caMarket && (
-                <button onClick={() => setCaMarket(null)} className="gb"
+                <button onClick={() => { setCaMarket(null); if (combineMode) setSaMarket(null); }} className="gb"
                   style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
                            background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
                   ✕ Off
@@ -6506,12 +6795,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               )}
               {CA_MARKET_LABELS.map(mk => {
                 const isMix = mk.id === "CA:Mix";
+                // COMBINE-MODE: same reasoning as PE:Mix on the SA side above.
+                if (isMix && combineMode) return null;
                 const isOn  = caMarket === mk.id;
                 return (
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
                     setCaMarket(turningOn ? mk.id : null);
-                    if (turningOn) setSaMarket(null); // mutually exclusive with the SA row above
+                    if (combineMode) {
+                      // COMBINE-MODE (#4): SA locks to the same market instead
+                      // of being nulled — SA and CA both validate ONE market.
+                      setSaMarket(turningOn ? mk.id : null);
+                    } else if (turningOn) {
+                      setSaMarket(null); // mutually exclusive with the SA row above (unchanged default behavior)
+                    }
                     if (turningOn && !isMix && SA_TO_FAMILY_ID[mk.id]) {
                       setFamily(SA_TO_FAMILY_ID[mk.id]);
                       setActiveStrategy(null);
@@ -7003,7 +7300,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           and a separate Clear action, instead of vanishing once any item is selected. */}
       <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap" }}>
         <div style={{ display:"flex",alignItems:"center",gap:12,flexWrap:"wrap" }}>
-          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{saMarket ? (saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`) : caMarket ? ` (${caMarket === "CA:Mix" ? "CA Mix" : "CA " + caMarket.replace(/^TB:/,"")})` : ""}</span>
+          <span style={{ fontSize:9,color:C.text }}>{displayRows.length} matches{bothCombined ? ` (SA+CA ${saMarket.replace(/^TB:/,"")})` : saMarket ? (saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`) : caMarket ? ` (${caMarket === "CA:Mix" ? "CA Mix" : "CA " + caMarket.replace(/^TB:/,"")})` : ""}</span>
           {(() => {
             const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
             const allSelected = eligibleIds.length > 0 && eligibleIds.every(id => selectedIds.has(id));
@@ -13066,6 +13363,18 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [trimInputs, setTrimInputs] = useState({});         // per-mode field values, keyed by field key
   const [trimResult, setTrimResult] = useState(null);        // [{ label, legs, totalOdds }] | null
   const [trimError, setTrimError] = useState(null);
+  // ENGINE-MODE (2026-07-19, Davies request — Smart Tier): which pattern
+  // engine(s) feed trimScore. Default "sa" + both SA submodes checked is
+  // BYTE-IDENTICAL to the pre-existing behavior (SA lift, every validated
+  // match counted, no quality gate) — nothing changes for existing users
+  // until they explicitly switch engine or uncheck a submode.
+  const [trimEngineMode, setTrimEngineMode] = useState("sa"); // "sa" | "ca" | "both"
+  // Submodes are OR'd: "standard" alone already counts every validated match
+  // (no extra gate), so checking "strong"/"emerging" alongside it is a no-op —
+  // the narrowing only bites once "standard" is unchecked. CA's "emerging" is
+  // OFF by default: those are low-test-n matches, opt-in only.
+  const [trimSaSubmodes, setTrimSaSubmodes] = useState(() => new Set(["standard", "strong"]));
+  const [trimCaSubmodes, setTrimCaSubmodes] = useState(() => new Set(["standard", "strong"]));
   // UX-FIX (2026-07-04, Alden feedback): ticket source list was a flat dump of
   // every saved ticket (unusable once there are dozens). Now a collapsed
   // dropdown/sheet with an optional filter box — see "1. Pick a ticket" render.
@@ -13082,21 +13391,62 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0).toFixed(2)
   );
 
-  // SA5-FIX: upgraded trimScore — uses SA lift from fixture._saScores when available.
-  // fixtureId on a leg is set at add-time; we look it up from the fixtures prop.
-  // If no SA data exists (patterns not loaded yet, or no pattern match), falls
-  // back gracefully to leg.conf so existing behaviour is preserved.
+  // Does this SA match count as a scoring signal, given the checked submodes?
+  // "standard" = no extra gate (any validated match counts). "strong" narrows
+  // to isStrongSA's composite gate (using SA_STRONG_DEFAULTS — Trim doesn't
+  // expose editable thresholds, unlike the Custom List SA row).
+  const passesSaSubmode = (p, isAvoid) => {
+    if (trimSaSubmodes.has("standard")) return true;
+    if (trimSaSubmodes.has("strong") && isStrongSA(p, isAvoid)) return true;
+    return false;
+  };
+  // Same idea for CA, plus a third box: "emerging" only ever counts an
+  // emergingPositive/emergingAvoid entry, never a standard/strong one.
+  const passesCaSubmode = (c, isAvoid, isEmerging) => {
+    if (isEmerging) return trimCaSubmodes.has("emerging");
+    if (trimCaSubmodes.has("standard")) return true;
+    if (trimCaSubmodes.has("strong") && isStrongCA(c, isAvoid)) return true;
+    return false;
+  };
+
+  // ENGINE-MODE (2026-07-19): trimScore now blends SA and/or CA lift
+  // depending on trimEngineMode, each gated by that engine's checked
+  // submodes above. "both" averages the two engines' lift components when
+  // both have a signal for this leg's market — if only one engine has a
+  // validated match there, that one alone drives the score (there's nothing
+  // to average against). This averaging choice is a judgment call, not
+  // something Davies specified — flag it if you want sum/max instead.
+  // Formula still mirrors trimmer.mjs compositeScore: conf*0.5 + lift*3
+  // (capped ±30) — unchanged from before, just the lift source is wider now.
   const trimScore = (leg) => {
     const conf = leg.conf != null ? parseFloat(leg.conf) : 50;
-    if (leg.fixtureId && fixtures?.length) {
-      const fix = fixtures.find(f => String(f.id) === String(leg.fixtureId));
-      if (fix?._saScores && leg.market && fix._saScores[leg.market]) {
-        const sa = fix._saScores[leg.market];
-        const saLift = Math.max(-30, Math.min(30, (sa.lift || 0) * 3));
-        return parseFloat((conf * 0.5 + saLift).toFixed(2));
-      }
+    if (!leg.fixtureId || !fixtures?.length || !leg.market) return conf;
+    const fix = fixtures.find(f => String(f.id) === String(leg.fixtureId));
+    if (!fix) return conf;
+
+    let saLift = null;
+    if ((trimEngineMode === "sa" || trimEngineMode === "both") && fix._saScores?.[leg.market]) {
+      const sa = fix._saScores[leg.market];
+      const pos = sa.positive?.[0], av = sa.avoid?.[0];
+      if (pos && passesSaSubmode(pos, false)) saLift = pos.lift || 0;
+      else if (av && !pos && passesSaSubmode(av, true)) saLift = -Math.abs(av.lift || 0);
     }
-    return conf;
+
+    let caLift = null;
+    if ((trimEngineMode === "ca" || trimEngineMode === "both") && fix._caScores?.[leg.market]) {
+      const ca = fix._caScores[leg.market];
+      const pos = ca.positive?.[0], av = ca.avoid?.[0];
+      const emPos = ca.emergingPositive?.[0], emAv = ca.emergingAvoid?.[0];
+      if (pos && passesCaSubmode(pos, false, false)) caLift = pos.holdoutLift ?? 0;
+      else if (av && !pos && passesCaSubmode(av, true, false)) caLift = -Math.abs(av.holdoutLift ?? 0);
+      else if (emPos && passesCaSubmode(emPos, false, true)) caLift = emPos.holdoutLift ?? 0;
+      else if (emAv && !emPos && passesCaSubmode(emAv, true, true)) caLift = -Math.abs(emAv.holdoutLift ?? 0);
+    }
+
+    if (saLift == null && caLift == null) return conf; // neither engine had a usable signal — fall back exactly as before
+    const blendedLift = saLift != null && caLift != null ? (saLift + caLift) / 2 : (saLift ?? caLift);
+    const cappedLift = Math.max(-30, Math.min(30, blendedLift * 3));
+    return parseFloat((conf * 0.5 + cappedLift).toFixed(2));
   };
   const trimRanked = (legs) => [...legs].sort((a, b) => trimScore(b) - trimScore(a));
 
@@ -13129,19 +13479,20 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     return groups;
   };
 
-  // saCoverage: how many legs in this result actually had SA pattern data
-  // applied to their ranking score (vs falling back to raw confidence).
-  // Answers Alden feedback #1 / dev-log #23 directly — instead of just
-  // trusting trimScore blends SA lift internally, this makes it visible
-  // per result card so it's "verifiable at a glance" as the dev log asked.
-  const trimSaCoverage = (legs) => {
-    let used = 0;
+  // coverage: how many legs in this result actually had pattern data applied
+  // to their ranking score (vs falling back to raw confidence) — split by
+  // engine so a "both" run can show "SA applied to 5/8, CA applied to 3/8"
+  // rather than one blended number that hides which engine actually fired.
+  const trimCoverage = (legs) => {
+    let saUsed = 0, caUsed = 0;
     for (const l of legs) {
-      if (!l.fixtureId || !fixtures?.length) continue;
+      if (!l.fixtureId || !fixtures?.length || !l.market) continue;
       const fix = fixtures.find(f => String(f.id) === String(l.fixtureId));
-      if (fix?._saScores && l.market && fix._saScores[l.market]) used++;
+      if (!fix) continue;
+      if ((trimEngineMode === "sa" || trimEngineMode === "both") && fix._saScores?.[l.market]) saUsed++;
+      if ((trimEngineMode === "ca" || trimEngineMode === "both") && fix._caScores?.[l.market]) caUsed++;
     }
-    return { used, total: legs.length };
+    return { saUsed, caUsed, total: legs.length, engine: trimEngineMode };
   };
 
   const TRIM_MODES = [
@@ -13171,7 +13522,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     // Backtest Evaluator can later group performance by method (Smart Split
     // vs Top-N vs etc). See saveTicketInternal / "Add to Builder" handlers
     // below, which copy trimMethod through onto the ticket object.
-    const asResult = (legs, label) => ({ legs, label, method: trimModeId, totalOdds: trimOddsOf(legs), saCoverage: trimSaCoverage(legs) });
+    const asResult = (legs, label) => ({ legs, label, method: trimModeId, totalOdds: trimOddsOf(legs), coverage: trimCoverage(legs) });
     // UX-FIX: selection defaults to "everything selected" so the old
     // one-tap "add all" habit still works — see multi-select add UI below.
     const commit = (arr) => { setTrimResult(arr); setSelectedTrimResults(new Set(arr.map((_, i) => i))); };
@@ -14570,13 +14921,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
             ) : (
               <>
                 <div style={{ fontSize:9,color:C.muted,lineHeight:1.6,marginBottom:10 }}>
-                  Pick a ticket, pick a mode. Legs are ranked by confidence{fixtures?.some(f => f._saScores) ? " + SA lift" : ""} — best legs always survive a trim, weakest go first in a split.
+                  Pick a ticket, pick an engine, pick a mode. Legs are ranked by confidence{
+                    trimEngineMode === "both" ? " + SA/CA lift" : trimEngineMode === "ca" ? " + CA lift" : (fixtures?.some(f => f._saScores) ? " + SA lift" : "")
+                  } — best legs always survive a trim, weakest go first in a split.
                 </div>
-                {fixtures?.some(f => f._saScores) && (
-                  <div style={{ fontSize:8,background:`${C.accent}08`,border:`1px solid ${C.accent}25`,borderRadius:8,padding:"6px 10px",marginBottom:10,color:C.text,lineHeight:1.6 }}>
-                    <span style={{ color:C.accent,fontWeight:800 }}>SA Active</span> — legs are scored using SA pattern lift + confidence. Legs with strong positive patterns rank higher; avoid-flagged legs rank lower.
-                  </div>
-                )}
                 <div style={{ fontSize:8,color:C.text,background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:8,padding:"7px 10px",marginBottom:14,lineHeight:1.6 }}>
                   <span style={{ color:C.gold,fontWeight:800 }}>Tip:</span> Saved tickets appear here with their code. To trim a ticket you haven't saved yet, save it first from the Builder tab.
                 </div>
@@ -14638,8 +14986,65 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
                 {trimSourceKey && (
                   <>
+                    {/* ENGINE-MODE (2026-07-19, Davies request — Smart Tier): which
+                        pattern engine(s) feed trimScore, and which quality tiers
+                        count as a signal from each. Default (SA, Standard+Strong
+                        checked) is byte-identical to pre-existing behavior. */}
+                    <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>2. Signal engine</div>
+                    <div style={{ display:"flex",gap:6,marginBottom:8 }}>
+                      {[
+                        { id:"sa",   label:"SA" },
+                        { id:"ca",   label:"CA" },
+                        { id:"both", label:"Both" },
+                      ].map(e => {
+                        const isOn = trimEngineMode === e.id;
+                        return (
+                          <button key={e.id} onClick={() => setTrimEngineMode(e.id)} className="gb"
+                            style={{ flex:1,padding:"6px 10px",fontSize:10,textTransform:"none",
+                                     background:isOn ? C.gold : "transparent",
+                                     color:isOn ? "#000" : C.muted,
+                                     border:`1px solid ${isOn ? C.gold : C.faint}`,
+                                     fontWeight:isOn ? 800 : undefined }}>
+                            {e.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {(trimEngineMode === "sa" || trimEngineMode === "both") && (
+                      <div style={{ marginBottom:8 }}>
+                        <div style={{ fontSize:7,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".08em" }}>SA quality</div>
+                        <div style={{ display:"flex",gap:12 }}>
+                          {["standard","strong"].map(sm => (
+                            <label key={sm} style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,color:C.text,cursor:"pointer" }}>
+                              <input type="checkbox" checked={trimSaSubmodes.has(sm)}
+                                onChange={() => setTrimSaSubmodes(prev => { const n = new Set(prev); n.has(sm) ? n.delete(sm) : n.add(sm); return n; })} />
+                              {sm === "standard" ? "Standard" : "Strong"}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(trimEngineMode === "ca" || trimEngineMode === "both") && (
+                      <div style={{ marginBottom:8 }}>
+                        <div style={{ fontSize:7,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:".08em" }}>CA quality</div>
+                        <div style={{ display:"flex",gap:12 }}>
+                          {["standard","strong","emerging"].map(sm => (
+                            <label key={sm} style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,color:C.text,cursor:"pointer" }}>
+                              <input type="checkbox" checked={trimCaSubmodes.has(sm)}
+                                onChange={() => setTrimCaSubmodes(prev => { const n = new Set(prev); n.has(sm) ? n.delete(sm) : n.add(sm); return n; })} />
+                              {sm === "standard" ? "Standard" : sm === "strong" ? "Strong" : "Emerging"}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ fontSize:7,color:C.muted,marginBottom:14,lineHeight:1.5 }}>
+                      Checked boxes are OR'd — any checked tier counts as a signal. "Both" engines blend by averaging when both have a match for a leg's market;
+                      if only one does, that one alone drives the score.
+                    </div>
+
                     {/* Mode picker */}
-                    <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>2. Pick a mode</div>
+                    <div style={{ fontSize:9,fontWeight:800,color:C.gold,textTransform:"uppercase",letterSpacing:".1em",marginBottom:8 }}>3. Pick a mode</div>
                     <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:14 }}>
                       {TRIM_MODES.map(m => {
                         const active = trimModeId === m.id;
@@ -14718,32 +15123,49 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                 </div>
                                 <span style={{ fontSize:13,fontWeight:800,color:C.text,flexShrink:0 }}>×{r.totalOdds}</span>
                               </div>
-                              {/* FEATURE #1: SA-lift coverage — makes it visible, per card, whether
-                                  this ranking actually had Strategy Analyst data to blend in (dev log
-                                  #23's "Expected" outcome — verifiable at a glance, not just trusted). */}
-                              {r.saCoverage?.total > 0 && (
-                                <div style={{ fontSize:7,fontWeight:700,letterSpacing:".04em",marginBottom:7,
-                                              color: r.saCoverage.used > 0 ? C.accent : C.muted }}>
-                                  {r.saCoverage.used > 0
-                                    ? `SA lift applied to ${r.saCoverage.used}/${r.saCoverage.total} legs`
-                                    : `No SA pattern data for these legs — ranked on confidence only`}
+                              {/* ENGINE-MODE (2026-07-19): coverage — makes it visible, per card,
+                                  whether this ranking actually had pattern data to blend in, and
+                                  from which engine(s), given the active Engine mode. */}
+                              {r.coverage?.total > 0 && (
+                                <div style={{ fontSize:7,fontWeight:700,letterSpacing:".04em",marginBottom:7 }}>
+                                  {r.coverage.engine !== "ca" && (
+                                    <span style={{ color: r.coverage.saUsed > 0 ? C.accent : C.muted, marginRight: r.coverage.engine === "both" ? 8 : 0 }}>
+                                      {r.coverage.saUsed > 0 ? `SA applied ${r.coverage.saUsed}/${r.coverage.total}` : `No SA match for these legs`}
+                                    </span>
+                                  )}
+                                  {r.coverage.engine !== "sa" && (
+                                    <span style={{ color: r.coverage.caUsed > 0 ? C.amber : C.muted }}>
+                                      {r.coverage.caUsed > 0 ? `CA applied ${r.coverage.caUsed}/${r.coverage.total}` : `No CA match for these legs`}
+                                    </span>
+                                  )}
+                                  {r.coverage.saUsed === 0 && r.coverage.caUsed === 0 && (
+                                    <span style={{ color:C.muted }}> — ranked on confidence only</span>
+                                  )}
                                 </div>
                               )}
                               <div style={{ display:"flex",flexDirection:"column",gap:3,marginBottom:isMulti?8:0 }}>
                                 {r.legs.map((leg, i) => {
-                                  // SA5: show SA lift badge if fixture data is available
+                                  // ENGINE-MODE (2026-07-19): show whichever engine badge(s) are active.
                                   const fix = leg.fixtureId && fixtures?.find(f => String(f.id) === String(leg.fixtureId));
-                                  const saEntry = fix?._saScores?.[leg.market];
+                                  const saEntry = (trimEngineMode === "sa" || trimEngineMode === "both") ? fix?._saScores?.[leg.market] : null;
+                                  const caEntry = (trimEngineMode === "ca" || trimEngineMode === "both") ? fix?._caScores?.[leg.market] : null;
                                   const saLift = saEntry?.lift;
+                                  const caLift = caEntry?.lift;
                                   const saColor = saLift > 0 ? C.green : saLift < 0 ? C.red : C.muted;
+                                  const caColor = caLift > 0 ? C.green : caLift < 0 ? C.red : C.muted;
                                   return (
                                   <div key={i} style={{ display:"flex",justifyContent:"space-between",fontSize:9,color:C.text,alignItems:"center" }}>
                                     <span style={{ color:C.text,fontWeight:600,flex:1 }}>{leg.game}</span>
                                     <span style={{ color:mktStyle(leg.market||"").color,fontWeight:700,marginLeft:8 }}>{leg.pick}</span>
                                     <span style={{ marginLeft:6 }}>{leg.odds ? `${leg.odds}x` : "—"}</span>
                                     {saLift != null && (
-                                      <span style={{ marginLeft:5,fontSize:8,color:saColor,fontWeight:800 }}>
+                                      <span style={{ marginLeft:5,fontSize:8,color:saColor,fontWeight:800 }} title="SA">
                                         {saLift > 0 ? `+${saLift.toFixed(1)}` : saLift.toFixed(1)}pp
+                                      </span>
+                                    )}
+                                    {caLift != null && (
+                                      <span style={{ marginLeft:5,fontSize:8,color:caColor,fontWeight:800 }} title="CA">
+                                        {caLift > 0 ? `+${caLift.toFixed(1)}` : caLift.toFixed(1)}pp(CA)
                                       </span>
                                     )}
                                   </div>
@@ -16089,15 +16511,46 @@ function GRMProInner() {
   // SA lift for scoring without waiting for the user to open the SA panel.
   const [appSaPatterns, setAppSaPatterns] = useState(null);
   const appSaPatternsLoadingRef = useRef(false);
-  // Fetch SA patterns once on mount (no adminToken needed for basic patterns)
+  // top-level CA copy (2026-07-19, Davies request — Smart Tier Trim needs CA
+  // data the same way it already had SA data). Same shape CustomListView's
+  // own caPatternsRow fetch expects: { byMarket, byMarketAvoid,
+  // byMarketEmerging, byMarketAvoidEmerging, byMarketTraps }.
+  const [appCaPatterns, setAppCaPatterns] = useState(null);
+  const appCaPatternsLoadingRef = useRef(false);
+  // RETRY-FIX (2026-07-19): both fetches used to be strictly one-shot on
+  // mount with a swallowed catch — if sa-patterns.json/ca-patterns.json
+  // wasn't ready yet at cold Termux start (or mid-regeneration by your cron),
+  // the fetch failed silently and NEVER tried again for the rest of the
+  // session, even though the SA/CA row's own on-demand fetch (fired later,
+  // when a user opens that panel) would succeed once the file existed. One
+  // retry after a short delay closes that race without looping forever.
   useEffect(() => {
     if (appSaPatterns || appSaPatternsLoadingRef.current) return;
     appSaPatternsLoadingRef.current = true;
-    fetch(`${SERVER}/api/sa-patterns`)
+    let retried = false;
+    const attempt = () => fetch(`${SERVER}/api/sa-patterns`)
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.patterns?.length) setAppSaPatterns(d.patterns); })
-      .catch(() => {}) // non-fatal — SA scoring degrades gracefully to leg.conf
+      .then(d => {
+        if (d?.patterns?.length) { setAppSaPatterns(d.patterns); return; }
+        if (!retried) { retried = true; setTimeout(attempt, 4000); }
+      })
+      .catch(() => { if (!retried) { retried = true; setTimeout(attempt, 4000); } })
       .finally(() => { appSaPatternsLoadingRef.current = false; });
+    attempt();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (appCaPatterns || appCaPatternsLoadingRef.current) return;
+    appCaPatternsLoadingRef.current = true;
+    let retried = false;
+    const attempt = () => fetch(`${SERVER}/api/ca-patterns`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && (d.byMarket || d.byMarketAvoid)) { setAppCaPatterns(d); return; }
+        if (!retried) { retried = true; setTimeout(attempt, 4000); }
+      })
+      .catch(() => { if (!retried) { retried = true; setTimeout(attempt, 4000); } })
+      .finally(() => { appCaPatternsLoadingRef.current = false; });
+    attempt();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [tab, setTab]             = useState("all");
@@ -16640,6 +17093,40 @@ function GRMProInner() {
     });
   }, []);
 
+  // CA-SCORES (2026-07-19, Davies request — Smart Tier Trim): mirrors
+  // injectSAScores exactly, but off matchCAConditions instead of
+  // matchSAPatterns. Emerging matches are kept in their OWN fields
+  // (emergingPositive/emergingAvoid) rather than merged into positive/avoid —
+  // same "never silently blend a low-sample match into a validated one"
+  // rule matchCAConditions itself already follows — so Trim's "Emerging"
+  // checkbox can opt into them explicitly instead of them always counting.
+  const injectCAScores = useCallback((fixturesArr, caPatterns) => {
+    if (!caPatterns) return fixturesArr;
+    return fixturesArr.map(f => {
+      const { positive, avoid, emergingPositive, emergingAvoid } = matchCAConditions(f, caPatterns);
+      const scoresMap = {};
+      const allMarkets = new Set([...positive, ...avoid, ...emergingPositive, ...emergingAvoid].map(c => c.market));
+      let bestLift = 0;
+      let bestMarket = null;
+      for (const mkt of allMarkets) {
+        const pos   = positive.filter(c => c.market === mkt);
+        const av    = avoid.filter(c => c.market === mkt);
+        const emPos = emergingPositive.filter(c => c.market === mkt);
+        const emAv  = emergingAvoid.filter(c => c.market === mkt);
+        const posLift = pos.length ? (pos[0].holdoutLift ?? 0) : 0;
+        const negLift = av.length && !pos.length ? Math.abs(av[0].holdoutLift ?? 0) : 0;
+        const lift = posLift - negLift;
+        scoresMap[mkt] = {
+          lift, positive: pos, avoid: av,
+          emergingPositive: emPos, emergingAvoid: emAv,
+          flagged: !pos.length && av.length > 0,
+        };
+        if (lift > bestLift) { bestLift = lift; bestMarket = mkt; }
+      }
+      return { ...f, _caScores: scoresMap, _caBestLift: bestLift, _caBestMarket: bestMarket };
+    });
+  }, []);
+
   const startPolling = (session, pollDate) => {
     if (pollRef.current) clearInterval(pollRef.current);
     fetchStartTimeRef.current = Date.now();
@@ -16718,7 +17205,7 @@ function GRMProInner() {
               // deep links) — past, present, or future, whichever wasn't the
               // currently active `date`. Now replaces only this date's own
               // slice of the pool, same pattern mergeDate itself already uses.
-              const _fd1 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate);
+              const _fd1 = injectCAScores(stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate), appCaPatterns);
               setFixtures(prev => [...prev.filter(f => f.date !== capturedDate), ..._fd1]);
               safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
@@ -16758,7 +17245,7 @@ function GRMProInner() {
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores (sync 200 path)
-      const _fd2 = stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date);
+      const _fd2 = injectCAScores(stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date), appCaPatterns);
       // 3.2-FIX: same reasoning as the async path above.
       setFixtures(prev => [...prev.filter(f => f.date !== date), ..._fd2]);
       safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
@@ -16829,7 +17316,7 @@ function GRMProInner() {
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores on snapshot load too
-      const _fdSnap = stampFixtureDates(injectSAScores(data, appSaPatterns), snapDate);
+      const _fdSnap = injectCAScores(stampFixtureDates(injectSAScores(data, appSaPatterns), snapDate), appCaPatterns);
       setFixtures(_fdSnap); setDate(snapDate); setCached(true); setFrozenFixtures(_fdSnap);
       startAutoRefresh(snapDate);
       if (json.legacySchema) setLegacySnapshot(true);
@@ -16896,7 +17383,7 @@ function GRMProInner() {
       const res = await fetch(`${SERVER}/api/load-snapshot?date=${mergeDateStr}`);
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error || res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      const enriched = stampFixtureDates(injectSAScores(data, appSaPatterns), mergeDateStr);
+      const enriched = injectCAScores(stampFixtureDates(injectSAScores(data, appSaPatterns), mergeDateStr), appCaPatterns);
 
       // Same auto-merge-saved-results-for-past-dates step loadSnapshot does,
       // so a merged-in past date shows final scores too, not just fixtures.
@@ -16931,7 +17418,7 @@ function GRMProInner() {
     } finally {
       setMergingDates(prev => { const n = new Set(prev); n.delete(mergeDateStr); return n; });
     }
-  }, [appSaPatterns]);
+  }, [appSaPatterns, appCaPatterns]);
 
   // Remove a date from the stack. Guards against emptying the stack entirely —
   // the calendar widget itself also disables this so it's a belt-and-braces check.
