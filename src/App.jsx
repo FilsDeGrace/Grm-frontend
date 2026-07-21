@@ -5909,7 +5909,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         const odds = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
         out.push({
-          f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: C.accent },
+          f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: C.accent, market: saMarket.replace(/^TB:/,"") },
           _saPositive: [], _saAvoid: [], _saFlagged: false,
         });
       }
@@ -5957,7 +5957,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       const odds    = def.oddsKey ? (f.odds?.[def.oddsKey] || null) : null;
       const flagged = positive.length === 0;
       out.push({
-        f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: flagged ? C.red : C.green },
+        f, pick: { label: saMarket.replace(/^TB:/,""), prob, odds, color: flagged ? C.red : C.green, market: saMarket.replace(/^TB:/,"") },
         _saPositive: positive, _saAvoid: avoid, _saFlagged: flagged,
       });
     }
@@ -6677,7 +6677,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 </div>
                 {saMode === "standard" && (
                   <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
-                    Default — ranks by SA lift, no threshold gate. Same behavior as before this feature.
+                    Default view — ranks fixtures by SA lift, highest first. No hit-rate or lift threshold is applied.
                   </div>
                 )}
                 {saMode === "strong" && (
@@ -6758,7 +6758,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                    cursor:"pointer",padding:"9px 13px",transition:"all .15s" }}>
           <div style={{ display:"flex",alignItems:"center",gap:8 }}>
             <span style={{ fontSize:9,color: caMarket ? C.amber : C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>
-              Condition Strategy
+              Condition Analyst
             </span>
             {caMarket && (
               <span style={{ fontSize:8,background:`${C.amber}20`,color:C.amber,border:`1px solid ${C.amber}40`,
@@ -7561,7 +7561,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         })}
         {displayRows.length === 0 && (
           <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
-            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : caMarket ? "No fixtures match a Condition Strategy pattern for this market" : "No matches"}
+            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : caMarket ? "No fixtures match a Condition Analyst pattern for this market" : "No matches"}
           </div>
         )}
       </div>
@@ -13387,6 +13387,16 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // checkable, plus has its own standalone Add button for a single quick add.
   const [selectedTrimResults, setSelectedTrimResults] = useState(() => new Set());
 
+  // RESOLVER (2026-07-19): _saScores/_caScores are keyed off SA_MARKETS/pattern
+  // `market` strings, which always carry a "TB:" prefix (e.g. "TB:Over 1.5").
+  // leg.market on an actual ticket leg isn't consistently one or the other
+  // across the codebase (getCustomPick's bare theRead.anchor.market vs
+  // saMixLegs' prefixed market) — try both forms rather than assume.
+  const scoreEntryFor = (scoresMap, market) => {
+    if (!scoresMap || !market) return null;
+    return scoresMap[market] ?? scoresMap[`TB:${market}`] ?? scoresMap[market.replace(/^TB:/, "")] ?? null;
+  };
+
   const trimOddsOf = (legs) => parseFloat(
     legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0).toFixed(2)
   );
@@ -13424,27 +13434,49 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     const fix = fixtures.find(f => String(f.id) === String(leg.fixtureId));
     if (!fix) return conf;
 
-    let saLift = null;
-    if ((trimEngineMode === "sa" || trimEngineMode === "both") && fix._saScores?.[leg.market]) {
-      const sa = fix._saScores[leg.market];
-      const pos = sa.positive?.[0], av = sa.avoid?.[0];
-      if (pos && passesSaSubmode(pos, false)) saLift = pos.lift || 0;
-      else if (av && !pos && passesSaSubmode(av, true)) saLift = -Math.abs(av.lift || 0);
+    // HR-BASED RANKING (2026-07-19, Davies request): once a positive SA match
+    // qualifies as Strong, rank it by holdout hit rate (testHR) rather than
+    // lift — lift measures the edge over baseline, testHR is the raw
+    // reliability number, and Strong-tier legs are exactly where Davies wants
+    // the ranking driven by the latter. Standard-only matches (not Strong)
+    // keep using lift, same as before. Avoid-direction still uses lift here —
+    // "rank by testHR" is murkier for a bet you're avoiding, so that half
+    // wasn't changed; flag if you want it inverted/handled differently too.
+    let saLift = null, saHR = null;
+    if ((trimEngineMode === "sa" || trimEngineMode === "both")) {
+      const sa = scoreEntryFor(fix._saScores, leg.market);
+      if (sa) {
+        const pos = sa.positive?.[0], av = sa.avoid?.[0];
+        if (pos && passesSaSubmode(pos, false)) {
+          if (isStrongSA(pos, false)) saHR = pos.testHR ?? null;
+          else saLift = pos.lift || 0;
+        } else if (av && !pos && passesSaSubmode(av, true)) {
+          saLift = -Math.abs(av.lift || 0);
+        }
+      }
     }
 
     let caLift = null;
-    if ((trimEngineMode === "ca" || trimEngineMode === "both") && fix._caScores?.[leg.market]) {
-      const ca = fix._caScores[leg.market];
-      const pos = ca.positive?.[0], av = ca.avoid?.[0];
-      const emPos = ca.emergingPositive?.[0], emAv = ca.emergingAvoid?.[0];
-      if (pos && passesCaSubmode(pos, false, false)) caLift = pos.holdoutLift ?? 0;
-      else if (av && !pos && passesCaSubmode(av, true, false)) caLift = -Math.abs(av.holdoutLift ?? 0);
-      else if (emPos && passesCaSubmode(emPos, false, true)) caLift = emPos.holdoutLift ?? 0;
-      else if (emAv && !emPos && passesCaSubmode(emAv, true, true)) caLift = -Math.abs(emAv.holdoutLift ?? 0);
+    if ((trimEngineMode === "ca" || trimEngineMode === "both")) {
+      const ca = scoreEntryFor(fix._caScores, leg.market);
+      if (ca) {
+        const pos = ca.positive?.[0], av = ca.avoid?.[0];
+        const emPos = ca.emergingPositive?.[0], emAv = ca.emergingAvoid?.[0];
+        if (pos && passesCaSubmode(pos, false, false)) caLift = pos.holdoutLift ?? 0;
+        else if (av && !pos && passesCaSubmode(av, true, false)) caLift = -Math.abs(av.holdoutLift ?? 0);
+        else if (emPos && passesCaSubmode(emPos, false, true)) caLift = emPos.holdoutLift ?? 0;
+        else if (emAv && !emPos && passesCaSubmode(emAv, true, true)) caLift = -Math.abs(emAv.holdoutLift ?? 0);
+      }
     }
 
-    if (saLift == null && caLift == null) return conf; // neither engine had a usable signal — fall back exactly as before
-    const blendedLift = saLift != null && caLift != null ? (saLift + caLift) / 2 : (saLift ?? caLift);
+    if (saLift == null && saHR == null && caLift == null) return conf; // neither engine had a usable signal — fall back exactly as before
+    // saHR (testHR, 0-100 scale) isn't comparable to a pp-lift value directly —
+    // rescale around a 50% neutral point so it lands in roughly the same
+    // range lift already occupies, before blending with CA below. This
+    // 0.6 factor is a starting point, not a validated constant — tune once
+    // you've seen this against real Strong-tier legs.
+    const saComponent = saHR != null ? (saHR - 50) * 0.6 : saLift;
+    const blendedLift = saComponent != null && caLift != null ? (saComponent + caLift) / 2 : (saComponent ?? caLift);
     const cappedLift = Math.max(-30, Math.min(30, blendedLift * 3));
     return parseFloat((conf * 0.5 + cappedLift).toFixed(2));
   };
@@ -13489,8 +13521,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       if (!l.fixtureId || !fixtures?.length || !l.market) continue;
       const fix = fixtures.find(f => String(f.id) === String(l.fixtureId));
       if (!fix) continue;
-      if ((trimEngineMode === "sa" || trimEngineMode === "both") && fix._saScores?.[l.market]) saUsed++;
-      if ((trimEngineMode === "ca" || trimEngineMode === "both") && fix._caScores?.[l.market]) caUsed++;
+      if ((trimEngineMode === "sa" || trimEngineMode === "both") && scoreEntryFor(fix._saScores, l.market)) saUsed++;
+      if ((trimEngineMode === "ca" || trimEngineMode === "both") && scoreEntryFor(fix._caScores, l.market)) caUsed++;
     }
     return { saUsed, caUsed, total: legs.length, engine: trimEngineMode };
   };
@@ -15039,8 +15071,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       </div>
                     )}
                     <div style={{ fontSize:7,color:C.muted,marginBottom:14,lineHeight:1.5 }}>
-                      Checked boxes are OR'd — any checked tier counts as a signal. "Both" engines blend by averaging when both have a match for a leg's market;
-                      if only one does, that one alone drives the score.
+                      Any checked box counts as a signal — check more than one to widen what qualifies. With "Both" engines active, a leg matched by SA and CA both blends the two; if only one engine matches, that one alone sets the score.
                     </div>
 
                     {/* Mode picker */}
@@ -15147,8 +15178,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                 {r.legs.map((leg, i) => {
                                   // ENGINE-MODE (2026-07-19): show whichever engine badge(s) are active.
                                   const fix = leg.fixtureId && fixtures?.find(f => String(f.id) === String(leg.fixtureId));
-                                  const saEntry = (trimEngineMode === "sa" || trimEngineMode === "both") ? fix?._saScores?.[leg.market] : null;
-                                  const caEntry = (trimEngineMode === "ca" || trimEngineMode === "both") ? fix?._caScores?.[leg.market] : null;
+                                  const saEntry = (trimEngineMode === "sa" || trimEngineMode === "both") ? scoreEntryFor(fix?._saScores, leg.market) : null;
+                                  const caEntry = (trimEngineMode === "ca" || trimEngineMode === "both") ? scoreEntryFor(fix?._caScores, leg.market) : null;
                                   const saLift = saEntry?.lift;
                                   const caLift = caEntry?.lift;
                                   const saColor = saLift > 0 ? C.green : saLift < 0 ? C.red : C.muted;
@@ -18404,11 +18435,11 @@ function GRMProInner() {
                 </button>
               </FilterSection>
 
-              {/* Condition Strategy (CA) — off by default. Only gates whether
+              {/* Condition Analyst (CA) — off by default. Only gates whether
                   FullModelPage fetches /api/ca-patterns and shows its own
-                  "Condition Strategy" section; does not touch the main list,
+                  "Condition Analyst" section; does not touch the main list,
                   strategyTags, or any existing fixture-card badge. */}
-              <FilterSection title="Analysis" summary={`Condition Strategy ${caModeEnabled ? "on" : "off"}`} badge={caModeEnabled?1:0}>
+              <FilterSection title="Analysis" summary={`Condition Analyst ${caModeEnabled ? "on" : "off"}`} badge={caModeEnabled?1:0}>
                 <button onClick={() => setCaModeEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -18436,7 +18467,7 @@ function GRMProInner() {
                   <div style={{ textAlign:"left", flex:1 }}>
                     <div style={{ fontSize:10, fontWeight:800,
                       color: caModeEnabled ? C.amber : C.text }}>
-                      Condition Strategy
+                      Condition Analyst
                     </div>
                     <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
                       Show a fixture's holdout-tested condition matches — positive, avoid, emerging, and trap patterns — in its Full Model page.

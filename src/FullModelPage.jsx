@@ -1649,14 +1649,14 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled, caLoad
   const selectMarket = (m) => setSelectedMarket(m);
   if (!caModeEnabled) return null;
   if (caLoading) return (
-    <SectionPanel label="Condition Strategy">
+    <SectionPanel label="Condition Analyst">
       <div style={{ padding: "12px 16px", fontSize: 10, color: C.muted, fontStyle: "italic" }}>
         <span className="pu">Computing CA patterns…</span>
       </div>
     </SectionPanel>
   );
   if (caError) return (
-    <SectionPanel label="Condition Strategy">
+    <SectionPanel label="Condition Analyst">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{caError}</div>
     </SectionPanel>
   );
@@ -1678,7 +1678,7 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled, caLoad
   // same-market contradiction would otherwise hit this early return and
   // silently drop the conflicting-signal verdict along with everything else.
   if (!cleanPositive.length && !cleanAvoid.length && !emergingPositive.length && !emergingAvoid.length && !traps.length && !contradictoryMarkets.length) return (
-    <SectionPanel label="Condition Strategy">
+    <SectionPanel label="Condition Analyst">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
         <CAIconNone color={C.muted} />
         No holdout-validated condition matches this fixture right now.
@@ -1721,7 +1721,7 @@ function ConditionStrategySection({ f, caMatches, caError, caModeEnabled, caLoad
   const shownTraps = (showTop ? traps : traps.filter(c => c.market === selectedMarket)).slice(0, 2);
   const hasAnyShown = shownPositive.length || shownAvoid.length || shownEmergingPositive.length || shownEmergingAvoid.length || shownTraps.length;
   return (
-    <SectionPanel label="Condition Strategy">
+    <SectionPanel label="Condition Analyst">
       <div className="cscroll" style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 6 }}>
         <CAMarketPill label={`Top (${cleanPositive.length + cleanAvoid.length})`}
           isOn={selectedMarket === "__top__"} hasPositive={cleanPositive.length > 0} hasAvoid={!cleanPositive.length && cleanAvoid.length > 0}
