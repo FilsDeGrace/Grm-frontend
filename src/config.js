@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://909a421a7be968.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://b324763443fcad.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
@@ -337,7 +337,44 @@ export const VOLATILE_LEAGUES = new Set([
   "Eredivisie", "Eerste Divisie",
 ]);
 
-// ── League Scoring Tiers ──────────────────────────────────────────────────
+// ── Cross-Competition Mismatch Risk (2026-07-19) ──────────────────────────
+// hasCupNoStandings (server.js) already detects "no standings data" as a
+// proxy for cup/friendly fixtures, and reacts by shifting to pure form xG +
+// a heavier BM-odds blend. But that BM-blend guard only runs when all three
+// 1X2 odds are present — for the (majority of) cup/friendly fixtures with no
+// odds at all, there's currently no independent cross-check whatsoever.
+// This is the name-based classifier that closes that gap: match the actual
+// competition name string (Alden's own list, from SofaScore's naming) so
+// fixtures can be flagged BEFORE odds are even checked, not just inferred
+// from missing standings data (which also fires for early-season leagues
+// that aren't actually a mismatch risk at all).
+// Patterns, not exact strings — SofaScore prefixes/suffixes vary by country
+// ("Copa Argentina", "Cup, Round of 32", "Club Friendlies", "International
+// Friendlies", "World Championship" for the World Cup itself).
+export const CROSS_COMPETITION_RISK_PATTERNS = [
+  { type: "cup",          re: /\bcup\b/i },              // domestic cups, League Cup, League Cup, Copa del Rey-style "... Cup" names
+  { type: "copa",         re: /\bcopa\b/i },              // Copa America, Copa Libertadores, Copa Argentina, etc.
+  { type: "clubFriendly", re: /club friendl/i },          // covers "Club Friendlies" AND "Club Friendly Games" (SofaScore's actual string — see 2026-07-19 note below)
+  { type: "intFriendly",  re: /\bint(?:ernational)?\.?\s*friendl/i }, // "International Friendlies" / "Int Friendlies" / "Int. Friendlies"
+  { type: "worldCup",     re: /world championship/i },    // SofaScore's name for the World Cup itself
+];
+
+// ── Cross-Competition Mismatch Guard — no-odds fallback (2026-07-19) ───────
+// processFixture's existing BM-blend "quality gap multiplier" already
+// corrects for a cup fixture pitting very different competition tiers
+// against each other — but only when odds.o1/oX/o2 are all present. This is
+// the same correction for when they aren't: each team's inferred domestic
+// league (see getTeamRecentStats' inferredDomesticLeague) resolved to a
+// LEAGUE_RANK, and a shift applied proportional to the gap between them.
+// Deliberately capped well below the BM-based guard's ceiling (that one
+// reads a live market price; this one reads an inferred, once-removed
+// signal — a wrong guess here should cost less than a wrong bookmaker read
+// would, since there's no direct market confirmation backing it).
+export const CROSS_MISMATCH_RANK_GAP_MIN = 40;   // min |rank gap| to trigger any shift at all — below this, treat as same tier
+export const CROSS_MISMATCH_RANK_GAP_MAX = 400;  // rank gap at which the shift caps out (e.g. a top-division team vs an amateur/regional side)
+export const CROSS_MISMATCH_SHIFT_MIN    = 0.05; // shift fraction at the minimum triggering gap
+export const CROSS_MISMATCH_SHIFT_MAX    = 0.20; // shift fraction at/beyond the max gap — NOTE: well under the BM guard's ceiling, on purpose (see above)
+
 // Used to select the right backtest prior in calibrateMarkets.
 // Tier based on long-run avg goals/game (multi-season):
 //   low    < 2.3

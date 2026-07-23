@@ -7455,10 +7455,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                   {!_saFlagged && _saPositive?.length > 0 && (
-                    <span title={`${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
+                    <span title={saMode === "strong"
+                        ? `${_saPositive[0].id} — train ${_saPositive[0].trainHR}% / test ${_saPositive[0].testHR}% (base ${_saPositive[0].baseHR}%)`
+                        : `${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
                       style={{ marginLeft:5,fontSize:7,color:C.green,background:`${C.green}15`,
                                border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
-                      ✓ SA +{_saPositive[0].lift}pp
+                      {saMode === "strong"
+                        ? `✓ SA ${_saPositive[0].testHR}% (base ${_saPositive[0].baseHR}%)`
+                        : `✓ SA +${_saPositive[0].lift}pp`}
                     </span>
                   )}
                   {_caFlagged && (
@@ -7526,10 +7530,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                   {!_saFlagged && _saPositive?.length > 0 && (
-                    <span title={`${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
+                    <span title={saMode === "strong"
+                        ? `${_saPositive[0].id} — train ${_saPositive[0].trainHR}% / test ${_saPositive[0].testHR}% (base ${_saPositive[0].baseHR}%)`
+                        : `${_saPositive[0].id} — testHR ${_saPositive[0].testHR}% (+${_saPositive[0].lift}pp)`}
                       style={{ fontSize:7,color:C.green,background:`${C.green}15`,
                                border:`1px solid ${C.green}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
-                      ✓ SA +{_saPositive[0].lift}pp
+                      {saMode === "strong"
+                        ? `✓ SA ${_saPositive[0].testHR}% (base ${_saPositive[0].baseHR}%)`
+                        : `✓ SA +${_saPositive[0].lift}pp`}
                     </span>
                   )}
                   {_caFlagged && (
