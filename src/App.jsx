@@ -13333,7 +13333,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0 }) {
+function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0, appSaPatterns = null, appCaPatterns = null }) {
   // Only the first ticket card (in render order) that actually has a leg-risk
   // flag should auto-open its explainer on entry — otherwise every flagged
   // ticket would pop its panel open simultaneously, which is just noise.
@@ -13362,10 +13362,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   //      threshold on. Don't fake it with a number that means nothing.
   //   #8 "Just view ranked legs" — redundant here; the source picker already
   //      shows the ticket, and any mode's preview shows it ranked.
-  // SA5-FIX: Score now uses injected SA data from fixtures (_saScores) when
-  // available — matching each leg's market to get the correct SA lift for that
-  // specific bet type. Falls back to leg.conf if no SA data is present.
-  // Formula mirrors trimmer.mjs compositeScore: conf*0.5 + saLift*3 (capped ±30).
+  // SA5-FIX: Score uses live SA/CA data (2026-07-19: computed on-demand via
+  // liveSaMatchCache/liveCaMatchCache, not baked-in injection — see that
+  // comment below for why) — matching each leg's market to get the correct
+  // lift for that specific bet type. Falls back to leg.conf if no data is
+  // present. Formula mirrors trimmer.mjs compositeScore: conf*0.5 + saLift*3
+  // (capped ±30).
   const [trimSourceKey, setTrimSourceKey] = useState(null); // "draft" | `ticket:${id}` | `saved:${code}`
   const [trimModeId, setTrimModeId] = useState("topn");
   const [trimInputs, setTrimInputs] = useState({});         // per-mode field values, keyed by field key
@@ -13395,14 +13397,79 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // checkable, plus has its own standalone Add button for a single quick add.
   const [selectedTrimResults, setSelectedTrimResults] = useState(() => new Set());
 
-  // RESOLVER (2026-07-19): _saScores/_caScores are keyed off SA_MARKETS/pattern
-  // `market` strings, which always carry a "TB:" prefix (e.g. "TB:Over 1.5").
-  // leg.market on an actual ticket leg isn't consistently one or the other
-  // across the codebase (getCustomPick's bare theRead.anchor.market vs
-  // saMixLegs' prefixed market) — try both forms rather than assume.
-  const scoreEntryFor = (scoresMap, market) => {
-    if (!scoresMap || !market) return null;
-    return scoresMap[market] ?? scoresMap[`TB:${market}`] ?? scoresMap[market.replace(/^TB:/, "")] ?? null;
+  // LIVE-COMPUTE (2026-07-19 fix, replacing the _saScores/_caScores
+  // injection). Root cause of "Smart Tier not injecting CA/SA": injection
+  // ran ONCE at fixtures-fetch time, and appSaPatterns/appCaPatterns load
+  // via a separate, unsequenced fetch — if fixtures landed first (the
+  // common case), that batch got injected with null patterns and never got
+  // a second chance; only a later poll cycle self-healed it. Custom List's
+  // caRows/saRows never had this problem because they don't inject at all —
+  // they compute matches live, every render, off whatever pattern data
+  // currently exists. This does the same thing here: a useMemo cache,
+  // keyed on [fixtures, appSaPatterns]/[fixtures, appCaPatterns], so it
+  // recomputes automatically whenever either actually changes (no manual
+  // injection call to forget, no race to lose), while still only running
+  // the full per-fixture/per-market scan once per render pass rather than
+  // once per leg lookup. Same per-market entry shape the old injection
+  // baked in ({lift, positive, avoid, flagged} / +emergingPositive/
+  // emergingAvoid for CA), so nothing downstream needed to change.
+  const liveSaMatchCache = useMemo(() => {
+    const cache = new Map();
+    if (!appSaPatterns?.length || !fixtures?.length) return cache;
+    for (const f of fixtures) {
+      const perMarket = {};
+      for (const mkt of Object.keys(SA_MARKETS)) {
+        const { positive, avoid } = matchSAPatterns(f, mkt, appSaPatterns);
+        if (!positive.length && !avoid.length) continue;
+        const posLift = positive.length ? positive[0].lift : 0;
+        const negLift = avoid.length && !positive.length ? Math.abs(avoid[0].lift) : 0;
+        perMarket[mkt] = { lift: posLift - negLift, positive, avoid, flagged: !positive.length && avoid.length > 0 };
+      }
+      cache.set(String(f.id), perMarket);
+    }
+    return cache;
+  }, [fixtures, appSaPatterns]);
+  const liveCaMatchCache = useMemo(() => {
+    const cache = new Map();
+    if (!appCaPatterns || !fixtures?.length) return cache;
+    for (const f of fixtures) {
+      const { positive, avoid, emergingPositive, emergingAvoid } = matchCAConditions(f, appCaPatterns);
+      const allMarkets = new Set([...positive, ...avoid, ...emergingPositive, ...emergingAvoid].map(c => c.market));
+      const perMarket = {};
+      for (const mkt of allMarkets) {
+        const pos   = positive.filter(c => c.market === mkt);
+        const av    = avoid.filter(c => c.market === mkt);
+        const emPos = emergingPositive.filter(c => c.market === mkt);
+        const emAv  = emergingAvoid.filter(c => c.market === mkt);
+        const posLift = pos.length ? (pos[0].holdoutLift ?? 0) : 0;
+        const negLift = av.length && !pos.length ? Math.abs(av[0].holdoutLift ?? 0) : 0;
+        perMarket[mkt] = {
+          lift: posLift - negLift, positive: pos, avoid: av,
+          emergingPositive: emPos, emergingAvoid: emAv,
+          flagged: !pos.length && av.length > 0,
+        };
+      }
+      cache.set(String(f.id), perMarket);
+    }
+    return cache;
+  }, [fixtures, appCaPatterns]);
+  // RESOLVER (2026-07-19): pattern `market` strings always carry a "TB:"
+  // prefix (e.g. "TB:Over 1.5"). leg.market on an actual ticket leg isn't
+  // consistently one or the other across the codebase (getCustomPick's bare
+  // theRead.anchor.market vs saMixLegs' prefixed market) — try both forms.
+  const liveSaEntry = (fix, market) => {
+    if (!fix || !market) return null;
+    const perMarket = liveSaMatchCache.get(String(fix.id));
+    if (!perMarket) return null;
+    const mkt = market.startsWith("TB:") ? market : `TB:${market}`;
+    return perMarket[mkt] ?? perMarket[market] ?? null;
+  };
+  const liveCaEntry = (fix, market) => {
+    if (!fix || !market) return null;
+    const perMarket = liveCaMatchCache.get(String(fix.id));
+    if (!perMarket) return null;
+    const mkt = market.startsWith("TB:") ? market : `TB:${market}`;
+    return perMarket[mkt] ?? perMarket[market] ?? null;
   };
 
   const trimOddsOf = (legs) => parseFloat(
@@ -13452,7 +13519,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     // wasn't changed; flag if you want it inverted/handled differently too.
     let saLift = null, saHR = null;
     if ((trimEngineMode === "sa" || trimEngineMode === "both")) {
-      const sa = scoreEntryFor(fix._saScores, leg.market);
+      const sa = liveSaEntry(fix, leg.market);
       if (sa) {
         const pos = sa.positive?.[0], av = sa.avoid?.[0];
         if (pos && passesSaSubmode(pos, false)) {
@@ -13466,7 +13533,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
     let caLift = null;
     if ((trimEngineMode === "ca" || trimEngineMode === "both")) {
-      const ca = scoreEntryFor(fix._caScores, leg.market);
+      const ca = liveCaEntry(fix, leg.market);
       if (ca) {
         const pos = ca.positive?.[0], av = ca.avoid?.[0];
         const emPos = ca.emergingPositive?.[0], emAv = ca.emergingAvoid?.[0];
@@ -13529,8 +13596,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       if (!l.fixtureId || !fixtures?.length || !l.market) continue;
       const fix = fixtures.find(f => String(f.id) === String(l.fixtureId));
       if (!fix) continue;
-      if ((trimEngineMode === "sa" || trimEngineMode === "both") && scoreEntryFor(fix._saScores, l.market)) saUsed++;
-      if ((trimEngineMode === "ca" || trimEngineMode === "both") && scoreEntryFor(fix._caScores, l.market)) caUsed++;
+      if ((trimEngineMode === "sa" || trimEngineMode === "both") && liveSaEntry(fix, l.market)) saUsed++;
+      if ((trimEngineMode === "ca" || trimEngineMode === "both") && liveCaEntry(fix, l.market)) caUsed++;
     }
     return { saUsed, caUsed, total: legs.length, engine: trimEngineMode };
   };
@@ -14962,7 +15029,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
               <>
                 <div style={{ fontSize:9,color:C.muted,lineHeight:1.6,marginBottom:10 }}>
                   Pick a ticket, pick an engine, pick a mode. Legs are ranked by confidence{
-                    trimEngineMode === "both" ? " + SA/CA lift" : trimEngineMode === "ca" ? " + CA lift" : (fixtures?.some(f => f._saScores) ? " + SA lift" : "")
+                    trimEngineMode === "both" ? " + SA/CA lift" : trimEngineMode === "ca" ? " + CA lift" : (appSaPatterns?.length ? " + SA lift" : "")
                   } — best legs always survive a trim, weakest go first in a split.
                 </div>
                 <div style={{ fontSize:8,color:C.text,background:`${C.gold}08`,border:`1px solid ${C.gold}25`,borderRadius:8,padding:"7px 10px",marginBottom:14,lineHeight:1.6 }}>
@@ -15186,8 +15253,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                 {r.legs.map((leg, i) => {
                                   // ENGINE-MODE (2026-07-19): show whichever engine badge(s) are active.
                                   const fix = leg.fixtureId && fixtures?.find(f => String(f.id) === String(leg.fixtureId));
-                                  const saEntry = (trimEngineMode === "sa" || trimEngineMode === "both") ? scoreEntryFor(fix?._saScores, leg.market) : null;
-                                  const caEntry = (trimEngineMode === "ca" || trimEngineMode === "both") ? scoreEntryFor(fix?._caScores, leg.market) : null;
+                                  const saEntry = (trimEngineMode === "sa" || trimEngineMode === "both") ? liveSaEntry(fix, leg.market) : null;
+                                  const caEntry = (trimEngineMode === "ca" || trimEngineMode === "both") ? liveCaEntry(fix, leg.market) : null;
                                   const saLift = saEntry?.lift;
                                   const caLift = caEntry?.lift;
                                   const saColor = saLift > 0 ? C.green : saLift < 0 ? C.red : C.muted;
@@ -17102,69 +17169,17 @@ function GRMProInner() {
     });
   }, []);
 
-  // SA5-FIX: inject SA pattern scores into every fixture at load time.
-  // This makes SA lift data available to any feature that holds a fixtureId —
-  // including the Trim tab (which can now score legs beyond just leg.conf)
-  // and the SA Admin Row (which reads from the same enriched dataset).
-  //
-  // Approach: for each fixture, run matchSAPatterns across all TB markets and
-  // pick the highest positive lift as the fixture's _saBestLift. Also store
-  // a per-market score map (_saScores) so Trim can look up the exact market
-  // a leg was added under and get the right SA lift for that market.
-  //
-  // This function is pure (no side effects) — it returns a new array.
-  // It's called once per data load, not on every render.
-  const injectSAScores = useCallback((fixturesArr, patterns) => {
-    if (!patterns || !patterns.length) return fixturesArr;
-    return fixturesArr.map(f => {
-      const scoresMap = {};
-      let bestLift = 0;
-      let bestMarket = null;
-      for (const mkt of Object.keys(SA_MARKETS)) {
-        const { positive, avoid } = matchSAPatterns(f, mkt, patterns);
-        const posLift = positive.length ? positive[0].lift : 0;
-        const negLift = avoid.length && !positive.length ? Math.abs(avoid[0].lift) : 0;
-        const lift = posLift - negLift;
-        scoresMap[mkt] = { lift, positive, avoid, flagged: !positive.length && avoid.length > 0 };
-        if (lift > bestLift) { bestLift = lift; bestMarket = mkt; }
-      }
-      return { ...f, _saScores: scoresMap, _saBestLift: bestLift, _saBestMarket: bestMarket };
-    });
-  }, []);
+  // REMOVED (2026-07-19): injectSAScores/injectCAScores used to bake
+  // _saScores/_caScores onto every fixture once, at fetch time. Root cause
+  // of "Smart Tier not injecting CA/SA": appSaPatterns/appCaPatterns load
+  // via a separate, unsequenced fetch, so a batch of fixtures could get
+  // baked with null patterns if it landed first — and since injection only
+  // ran once, that batch never got a second chance. Replaced with
+  // ParlayJarvisTab's own liveSaMatchCache/liveCaMatchCache (a useMemo, not
+  // a one-time bake), same as Custom List's caRows/saRows never had this
+  // problem in the first place because they compute live too. Nothing else
+  // in the codebase read _saScores/_caScores (confirmed before removing).
 
-  // CA-SCORES (2026-07-19, Davies request — Smart Tier Trim): mirrors
-  // injectSAScores exactly, but off matchCAConditions instead of
-  // matchSAPatterns. Emerging matches are kept in their OWN fields
-  // (emergingPositive/emergingAvoid) rather than merged into positive/avoid —
-  // same "never silently blend a low-sample match into a validated one"
-  // rule matchCAConditions itself already follows — so Trim's "Emerging"
-  // checkbox can opt into them explicitly instead of them always counting.
-  const injectCAScores = useCallback((fixturesArr, caPatterns) => {
-    if (!caPatterns) return fixturesArr;
-    return fixturesArr.map(f => {
-      const { positive, avoid, emergingPositive, emergingAvoid } = matchCAConditions(f, caPatterns);
-      const scoresMap = {};
-      const allMarkets = new Set([...positive, ...avoid, ...emergingPositive, ...emergingAvoid].map(c => c.market));
-      let bestLift = 0;
-      let bestMarket = null;
-      for (const mkt of allMarkets) {
-        const pos   = positive.filter(c => c.market === mkt);
-        const av    = avoid.filter(c => c.market === mkt);
-        const emPos = emergingPositive.filter(c => c.market === mkt);
-        const emAv  = emergingAvoid.filter(c => c.market === mkt);
-        const posLift = pos.length ? (pos[0].holdoutLift ?? 0) : 0;
-        const negLift = av.length && !pos.length ? Math.abs(av[0].holdoutLift ?? 0) : 0;
-        const lift = posLift - negLift;
-        scoresMap[mkt] = {
-          lift, positive: pos, avoid: av,
-          emergingPositive: emPos, emergingAvoid: emAv,
-          flagged: !pos.length && av.length > 0,
-        };
-        if (lift > bestLift) { bestLift = lift; bestMarket = mkt; }
-      }
-      return { ...f, _caScores: scoresMap, _caBestLift: bestLift, _caBestMarket: bestMarket };
-    });
-  }, []);
 
   const startPolling = (session, pollDate) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -17244,7 +17259,7 @@ function GRMProInner() {
               // deep links) — past, present, or future, whichever wasn't the
               // currently active `date`. Now replaces only this date's own
               // slice of the pool, same pattern mergeDate itself already uses.
-              const _fd1 = injectCAScores(stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), capturedDate), appCaPatterns);
+              const _fd1 = stampFixtureDates(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), capturedDate);
               setFixtures(prev => [...prev.filter(f => f.date !== capturedDate), ..._fd1]);
               safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd1);
               // N7-FIX: startAutoRefresh was missing from the 202 async path — it only
@@ -17284,7 +17299,7 @@ function GRMProInner() {
 
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores (sync 200 path)
-      const _fd2 = injectCAScores(stampFixtureDates(injectSAScores(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), appSaPatterns), date), appCaPatterns);
+      const _fd2 = stampFixtureDates(applyFinishedStates(preserveLiveStates(data, fixturesRef.current)), date);
       // 3.2-FIX: same reasoning as the async path above.
       setFixtures(prev => [...prev.filter(f => f.date !== date), ..._fd2]);
       safeCacheWrite(CACHE_KEY, { date, data }); setFrozenFixtures(_fd2);
@@ -17355,7 +17370,7 @@ function GRMProInner() {
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
       // SA5-FIX: inject SA scores on snapshot load too
-      const _fdSnap = injectCAScores(stampFixtureDates(injectSAScores(data, appSaPatterns), snapDate), appCaPatterns);
+      const _fdSnap = stampFixtureDates(data, snapDate);
       setFixtures(_fdSnap); setDate(snapDate); setCached(true); setFrozenFixtures(_fdSnap);
       startAutoRefresh(snapDate);
       if (json.legacySchema) setLegacySnapshot(true);
@@ -17422,7 +17437,7 @@ function GRMProInner() {
       const res = await fetch(`${SERVER}/api/load-snapshot?date=${mergeDateStr}`);
       if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error || res.statusText); }
       const json = await res.json(), data = Array.isArray(json.data) ? json.data : [];
-      const enriched = injectCAScores(stampFixtureDates(injectSAScores(data, appSaPatterns), mergeDateStr), appCaPatterns);
+      const enriched = stampFixtureDates(data, mergeDateStr);
 
       // Same auto-merge-saved-results-for-past-dates step loadSnapshot does,
       // so a merged-in past date shows final scores too, not just fixtures.
@@ -19077,6 +19092,7 @@ function GRMProInner() {
       {parlayJarvisOpen && (
         <ParlayJarvisTab
           fixtures={fixtures} tickets={tickets} setTickets={setTickets}
+          appSaPatterns={appSaPatterns} appCaPatterns={appCaPatterns}
           draftLegs={draftLegs} setDraftLegs={setDraftLegs}
           budget={budget} setBudget={setBudget} budgetPct={budgetPct} setBudgetPct={setBudgetPct}
           numParlays={numParlays} setNumParlays={setNumParlays} targetOdds={targetOdds} setTargetOdds={setTargetOdds}
