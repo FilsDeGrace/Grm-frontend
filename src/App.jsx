@@ -1834,6 +1834,42 @@ function persistTickets(tickets) { try { localStorage.setItem(SAVED_TICKETS_KEY,
 // actually been booked before. Populated EXCLUSIVELY by a successful Book Now
 // call (the real bookmaker API booking) — building, saving, or drafting a
 // ticket never touches this list.
+// PENDING-BOOKINGS (2026-07-25, Alden feedback — booking progress UX): the
+// backend already finishes a booking and delivers the result even after the
+// user navigates away (TicketBookNowButton's sessionStorage result cache,
+// below). The remaining gap was pure awareness — nothing told the user a
+// booking was STILL running once they left that screen, so they could
+// reasonably think it failed and start a duplicate. localStorage (not
+// sessionStorage) specifically because the point is surviving the exact
+// interruption that causes that doubt: closing the tab, backgrounding the
+// app — not just switching to a different in-app tab.
+const PENDING_BOOKINGS_KEY = "grm_pending_bookings_v1";
+// Safety ceiling — the booking poll loop itself gives up at 3 min (MAX_MS in
+// TicketBookNowButton.book()). This is generous slack on top of that for
+// clock skew / a backgrounded tab's timers being throttled, so an entry that
+// somehow never got cleaned up (tab killed mid-poll) can't haunt the banner
+// forever.
+const PENDING_BOOKING_MAX_AGE_MS = 15 * 60 * 1000;
+function loadPendingBookings() {
+  try {
+    const v = JSON.parse(localStorage.getItem(PENDING_BOOKINGS_KEY) || "[]");
+    const list = Array.isArray(v) ? v : [];
+    const fresh = list.filter(p => Date.now() - (p.startedAt || 0) < PENDING_BOOKING_MAX_AGE_MS);
+    if (fresh.length !== list.length) persistPendingBookings(fresh); // prune stale entries as a side effect of reading
+    return fresh;
+  } catch { return []; }
+}
+function persistPendingBookings(list) {
+  try { localStorage.setItem(PENDING_BOOKINGS_KEY, JSON.stringify(list)); } catch {}
+}
+function addPendingBooking(entry) {
+  const list = loadPendingBookings().filter(p => p.jobId !== entry.jobId);
+  persistPendingBookings([...list, entry]);
+}
+function removePendingBooking(jobId) {
+  persistPendingBookings(loadPendingBookings().filter(p => p.jobId !== jobId));
+}
+
 const BOOKED_LEGS_KEY = "grm_booked_legs_v1";
 function loadBookedLegs() {
   try {
@@ -1918,8 +1954,19 @@ function recordFailedLegs(legs, ticketCode) {
 function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], otherTickets = [], crossCheckEnabled = false, unresolvableEnabled = false } = {}) {
   const legs = ticket?.legs || [];
   if (!legs.length) return [];
+  // PICKS-TRACKING-FIX (2026-07-25, Alden feedback): used to keep only the
+  // FIRST booked leg per fixture (Map.set guarded by !has), so a fixture
+  // booked twice with different picks (Home Win, then later Over 1.5) only
+  // ever remembered the first one — "we currently only track the fixture
+  // name" in effect, even though recordBookedLegs was already storing
+  // pick/market per leg all along. Now collects every leg for that fixture,
+  // deduped further down.
   const bookedByFixture = new Map();
-  bookedLegs.forEach(b => { if (b.fixtureId && !bookedByFixture.has(b.fixtureId)) bookedByFixture.set(b.fixtureId, b); });
+  bookedLegs.forEach(b => {
+    if (!b.fixtureId) return;
+    if (!bookedByFixture.has(b.fixtureId)) bookedByFixture.set(b.fixtureId, []);
+    bookedByFixture.get(b.fixtureId).push(b);
+  });
 
   const today = todayStr();
   const failedByFixture = new Map();
@@ -1936,8 +1983,21 @@ function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], oth
     const fid = l.fixtureId || l.game;
     if (!fid) return;
     const booked = bookedByFixture.get(fid);
-    if (booked) {
-      risks.push({ type:"booked", game: l.game || booked.game, pick: l.pick, bookedPick: booked.pick, ticketCode: booked.ticketCode });
+    if (booked && booked.length) {
+      // Dedup by MARKET (Alden's ask: "unique markets previously booked...
+      // out of our 14 supported markets"), not by exact pick-text — the same
+      // market re-booked (e.g. after a push/void) shouldn't pad the list as
+      // if it were 2 different bets. Falls back to pick text as the dedup
+      // key only for older legs recorded before `market` was captured.
+      const seenMarkets = new Set();
+      const bookedPicks = [];
+      for (const b of booked) {
+        const key = b.market || b.pick;
+        if (!key || seenMarkets.has(key)) continue;
+        seenMarkets.add(key);
+        bookedPicks.push(b.pick || b.market);
+      }
+      risks.push({ type:"booked", game: l.game || booked[0].game, pick: l.pick, bookedPicks, ticketCode: booked[0].ticketCode });
     }
     if (unresolvableEnabled) {
       const failed = failedByFixture.get(fid);
@@ -3080,6 +3140,8 @@ function injectStyles(T) {
     }
     .grm-score-value{font-size:15px;font-weight:800;color:var(--text);letter-spacing:-.01em}
     .grm-score-ft{font-size:9px;color:var(--muted);font-weight:700}
+    .grm-score-badge-compact{padding:3px 6px;gap:0;white-space:nowrap}
+    .grm-score-value-compact{font-size:11px}
 
     /* ── Signal section panels ───────────────────────────────────────── */
     .grm-signal-panel{border-radius:var(--r-lg);padding:14px 16px}
@@ -3918,7 +3980,7 @@ export function AskJarvis({ fixture, backtestSummary, brief = null }) {
 }
 
 // ── RESULT BADGE ──────────────────────────────────────────────────────────
-function ResultBadge({ f }) {
+function ResultBadge({ f, compact = false }) {
   // Neutral score display — not tied to any pick, no green/red evaluation on the card.
   // Pick results are evaluated in the ticket (Check Progress), not on the fixture card.
   if (f.hGoals == null) return null;
@@ -3926,10 +3988,16 @@ function ResultBadge({ f }) {
   const ft    = f.state && ["finished","ft","fulltime","ended","complete","aet"].includes(
     (f.state || "").toLowerCase().replace(/[_\-\s]/g, "")
   );
+  // COMPACT-FIX (2026-07-25, Alden feedback — "score box text seems out of
+  // place" on mobile): the default badge (15px font, 13px horizontal
+  // padding) was sized for a wide desktop cell. Mobile's Score grid column
+  // is only 44px — the badge's natural width exceeded that, so "1–0" was
+  // wrapping onto two lines ("1–" / "0"). compact drops font/padding and
+  // forces nowrap instead of fighting the grid column width.
   return (
-    <div className="grm-score-badge">
-      <span className="grm-score-value">{score}</span>
-      {ft && <span className="grm-score-ft">FT</span>}
+    <div className={compact ? "grm-score-badge grm-score-badge-compact" : "grm-score-badge"}>
+      <span className={compact ? "grm-score-value grm-score-value-compact" : "grm-score-value"}>{score}</span>
+      {ft && !compact && <span className="grm-score-ft">FT</span>}
     </div>
   );
 }
@@ -7412,7 +7480,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
           const cols = hasResults ? "24px 50px 1fr 140px 60px 60px 72px" : "24px 50px 1fr 140px 60px 60px";
-          const mCols = hasResults ? "20px 1fr 44px 44px" : "20px 1fr 44px";
+          const mCols = hasResults ? "20px 1fr 40px 48px" : "20px 1fr 44px";
           if (isMobile) return (
             <div key={f.id} style={{ display:"grid",gridTemplateColumns:mCols,gap:6,padding:"8px 10px",
                                      background:isFT?`${C.surface}60`:isSelected?"rgba(99,102,241,0.1)":C.surface,
@@ -7441,6 +7509,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                   <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{pick.label}</span>
+                  {/* MOBILE-ODDS-FIX (2026-07-25, Alden feedback): odds column only ever
+                      existed in !isMobile — mobile users had no way to see odds at all.
+                      Attached beside the pick label rather than as a separate grid column,
+                      since mobile's column budget (mCols) is already tight. */}
+                  {pick.odds && (
+                    <span style={{ flexShrink:0,fontSize:8,color:C.muted,fontWeight:700 }}>
+                      @{pick.odds}
+                    </span>
+                  )}
                   {_usedFallback && (
                     <span style={{ marginLeft:5,fontSize:7,color:C.amber,background:`${C.amber}15`,
                                    border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
@@ -7485,7 +7562,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ textAlign:"right",fontSize:12,fontWeight:800,color:probColor }}>{Math.round(pick.prob)}%</div>
               {hasResults && (
                 <div style={{ textAlign:"right" }}>
-                  {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
+                  {f.hGoals != null ? <ResultBadge f={f} compact /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
                 </div>
               )}
             </div>
@@ -8245,6 +8322,59 @@ const BOOKMAKERS = [
   { id:"luckyledger", label:"Lucky's Ledger", api:"/api/book-luckyledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`, appLink: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 ];
 
+// ── PENDING BOOKINGS BANNER (2026-07-25, Alden feedback) ────────────────────
+// Lives at the GRMProInner shell level (rendered next to JarvisFAB, "always
+// visible on all tabs") — NOT inside TicketBookNowButton, which is exactly
+// the thing that unmounts when the user navigates away and stops being able
+// to tell them anything. Polls /api/book-status/{jobId} directly rather
+// than depending on any single component's sessionStorage result cache, so
+// it's still correct even in a brand new tab/session that never had the
+// originating TicketBookNowButton mounted — e.g. the user closed the tab
+// entirely and reopened the app later.
+function PendingBookingsBanner() {
+  const [pending, setPending] = useState(() => loadPendingBookings());
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      const list = loadPendingBookings();
+      if (!list.length) { if (!cancelled) setPending(list); return; }
+      // Poll each job's real status; drop anything actually resolved
+      // server-side even if THIS tab never got the completion (e.g. this is
+      // the tab that navigated away mid-poll, and a different tab — or none
+      // — is the one whose polling loop is still running).
+      const stillPending = [];
+      for (const p of list) {
+        try {
+          const r = await fetch(`${SERVER}/api/book-status/${p.jobId}`);
+          const job = await r.json();
+          if (job.status === "pending") stillPending.push(p);
+          else removePendingBooking(p.jobId); // done or error — no longer pending, TicketBookNowButton's own sessionStorage cache has the result if that panel gets reopened
+        } catch {
+          stillPending.push(p); // transient check failure — assume still pending rather than dropping it
+        }
+      }
+      if (!cancelled) setPending(stillPending);
+    };
+    check();
+    const id = setInterval(check, 4000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  if (!pending.length) return null;
+  return (
+    <div style={{ position:"fixed", bottom:76, left:"50%", transform:"translateX(-50%)", zIndex:998,
+                  background:C.edge, borderRadius:12, padding:"9px 16px", display:"flex", alignItems:"center", gap:10,
+                  boxShadow:"0 4px 24px rgba(0,0,0,0.5)", maxWidth:"92vw" }}>
+      <div style={{ width:14,height:14,borderRadius:"50%",border:`2px solid ${C.accentText}40`,borderTopColor:C.accentText,
+                    animation:"spinRing 0.9s linear infinite",flexShrink:0 }} />
+      <span style={{ fontSize:10,fontWeight:700,color:C.accentText,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
+        {pending.length === 1
+          ? `Booking in progress — ${pending[0].label}`
+          : `${pending.length} bookings in progress`}
+      </span>
+    </div>
+  );
+}
+
 function TicketBookNowButton({ legs }) {
   const [open, setOpen]         = useState(false);
   const [bookie, setBookie]     = useState("");
@@ -8315,6 +8445,7 @@ function TicketBookNowButton({ legs }) {
     const built = buildLegsWithOrigIndex();
     if (!built.length) { setError("No valid legs to book"); return; }
     setBooking(true); setResult(null); setError(null); setRetryable(true); setBookingElapsed(0);
+    let pendingJobId = null; // set once we have a jobId to register with the app-shell banner; cleared in finally below
     try {
       const res  = await fetch(`${SERVER}${selectedBookie.api}`, {
         method:"POST", headers:{"Content-Type":"application/json"},
@@ -8341,6 +8472,18 @@ function TicketBookNowButton({ legs }) {
       // final. LuckyLedger doesn't have a jobId (untouched, discontinued),
       // so it falls straight through to the old synchronous path below.
       if (data.jobId) {
+        // PENDING-BOOKINGS (2026-07-25): register BEFORE polling starts —
+        // `data` gets reassigned to `job.result` once the poll resolves
+        // (a few lines down), so jobId has to be captured in its own
+        // variable now, not read off `data` later.
+        pendingJobId = data.jobId;
+        addPendingBooking({
+          jobId: pendingJobId,
+          label: built.length > 1
+            ? `${built[0].leg.home} vs ${built[0].leg.away} +${built.length - 1} more`
+            : `${built[0]?.leg?.home || ""} vs ${built[0]?.leg?.away || ""}`,
+          startedAt: Date.now(),
+        });
         const pollStart = Date.now();
         const POLL_MS = 1500, MAX_MS = 3 * 60 * 1000; // 3 min ceiling
         while (true) {
@@ -8398,7 +8541,13 @@ function TicketBookNowButton({ legs }) {
           : msg || "Booking failed — please try again."
       );
     }
-    finally { setBooking(false); }
+    finally {
+      setBooking(false);
+      // PENDING-BOOKINGS (2026-07-25): finally runs on every exit path
+      // (success, thrown error, the 3-min timeout) — one cleanup site
+      // instead of needing it duplicated at each of those.
+      if (pendingJobId) removePendingBooking(pendingJobId);
+    }
   };
 
   const copyCode = () => {
@@ -10144,7 +10293,11 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                       {/* Description */}
                       <div style={{ marginBottom:7 }}>
                         {r.type === "booked"
-                          ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked ({r.bookedPick}). This leg: {r.pick}.</>
+                          ? <><span style={{ color:C.red, fontWeight:700 }}>Already booked</span> — <em>{r.game}</em> is in a ticket you booked. Previous picks: {
+                              r.bookedPicks?.length > 2
+                                ? `${r.bookedPicks.slice(0,2).join(", ")}, +${r.bookedPicks.length - 2} more`
+                                : (r.bookedPicks || []).join(", ") || "unknown"
+                            }. This leg: {r.pick}.</>
                           : r.type === "unresolvable"
                           ? <><span style={{ color:C.amber, fontWeight:700 }}>Unresolvable on bookmaker</span> — <em>{r.game}</em> came back unbookable last time you tried this leg today.</>
                           : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
@@ -19174,6 +19327,11 @@ function GRMProInner() {
         draftCount={draftLegs.length}
         parleyOpen={parlayJarvisOpen}
       />
+
+      {/* ── PENDING BOOKINGS BANNER — always visible on all tabs ──────────── */}
+      {/* Lives OUTSIDE the content shell, same as JarvisFAB just below, so a
+          booking started from any screen stays visible after navigating away. */}
+      <PendingBookingsBanner />
 
       {/* ── JARVIS FAB — draggable, always visible on all tabs ────────────── */}
       {/* Lives OUTSIDE the content shell so it renders on every tab.          */}
