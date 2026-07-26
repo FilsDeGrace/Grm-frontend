@@ -1843,6 +1843,10 @@ function persistTickets(tickets) { try { localStorage.setItem(SAVED_TICKETS_KEY,
 // sessionStorage) specifically because the point is surviving the exact
 // interruption that causes that doubt: closing the tab, backgrounding the
 // app — not just switching to a different in-app tab.
+// Shared with TicketBookNowButton's own poll loop below AND PendingBookingsBanner
+// — both compute the same "elapsed / this ceiling" percentage, so they need to
+// agree on the same number rather than drift if one gets tuned later and not the other.
+const BOOKING_MAX_MS = 3 * 60 * 1000; // 3 min ceiling
 const PENDING_BOOKINGS_KEY = "grm_pending_bookings_v1";
 // Safety ceiling — the booking poll loop itself gives up at 3 min (MAX_MS in
 // TicketBookNowButton.book()). This is generous slack on top of that for
@@ -8322,55 +8326,99 @@ const BOOKMAKERS = [
   { id:"luckyledger", label:"Lucky's Ledger", api:"/api/book-luckyledger", link: code => `https://luckysledger.com/sports?btBookingCode=${code}`, appLink: code => `luckysledger://betslip?btBookingCode=${code}`, disabled: true, disabledText: "Experiencing downtime" },
 ];
 
-// ── PENDING BOOKINGS BANNER (2026-07-25, Alden feedback) ────────────────────
+// ── PENDING BOOKINGS BANNER (2026-07-25, Alden feedback; revised same day
+// after his follow-up testing) ──────────────────────────────────────────────
 // Lives at the GRMProInner shell level (rendered next to JarvisFAB, "always
 // visible on all tabs") — NOT inside TicketBookNowButton, which is exactly
 // the thing that unmounts when the user navigates away and stops being able
-// to tell them anything. Polls /api/book-status/{jobId} directly rather
-// than depending on any single component's sessionStorage result cache, so
-// it's still correct even in a brand new tab/session that never had the
-// originating TicketBookNowButton mounted — e.g. the user closed the tab
-// entirely and reopened the app later.
+// to tell them anything.
+//
+// FIX — "banner disappears sometimes": the first version treated ANY
+// non-"pending" response as completion, including an HTTP 404. But
+// /api/book-status/:jobId returns 404 whenever the server's in-memory job
+// map doesn't have that jobId — which happens not just on genuine
+// completion-and-expiry, but ALSO on a server restart mid-booking
+// (bookingJobs is a plain Map server-side, not persisted to disk). Treating
+// "not found" the same as "done" meant a server restart silently killed the
+// banner while the booking might still genuinely be running. Now only a
+// CONFIRMED response (HTTP ok, status !== "pending") clears an entry —
+// everything else (404, 5xx, network failure) is treated as "don't
+// actually know," so the banner stays up until either a real result comes
+// in or the 15-min safety ceiling prunes it.
+//
+// Percentage: elapsed / BOOKING_MAX_MS, capped at 96 so it never visually
+// claims done before an actually-confirmed result.
+//
+// Connection-loss handling (Alden: "if client-side can't reconnect... users
+// shouldn't wait forever not knowing"): after 5 consecutive failed checks,
+// backs off from 4s to 15s polling and shows an honest "can't reach server"
+// note — still doesn't drop the entry, that's still the 15-min ceiling's
+// job, just stops silently pretending everything's fine.
 function PendingBookingsBanner() {
   const [pending, setPending] = useState(() => loadPendingBookings());
+  const [, setTick] = useState(0); // forces a re-render every second so the % bar visibly ticks between actual status checks, without re-fetching
+  const failCountRef = useRef(0);
   useEffect(() => {
     let cancelled = false;
+    let timeoutId = null;
     const check = async () => {
       const list = loadPendingBookings();
-      if (!list.length) { if (!cancelled) setPending(list); return; }
-      // Poll each job's real status; drop anything actually resolved
-      // server-side even if THIS tab never got the completion (e.g. this is
-      // the tab that navigated away mid-poll, and a different tab — or none
-      // — is the one whose polling loop is still running).
+      if (!list.length) {
+        if (!cancelled) setPending(list);
+        failCountRef.current = 0;
+        if (!cancelled) timeoutId = setTimeout(check, 4000);
+        return;
+      }
       const stillPending = [];
+      let anyFailure = false;
       for (const p of list) {
         try {
           const r = await fetch(`${SERVER}/api/book-status/${p.jobId}`);
+          if (!r.ok) { stillPending.push(p); anyFailure = true; continue; } // 404/5xx — don't know, don't drop
           const job = await r.json();
           if (job.status === "pending") stillPending.push(p);
-          else removePendingBooking(p.jobId); // done or error — no longer pending, TicketBookNowButton's own sessionStorage cache has the result if that panel gets reopened
+          else removePendingBooking(p.jobId); // CONFIRMED done/error only
         } catch {
-          stillPending.push(p); // transient check failure — assume still pending rather than dropping it
+          stillPending.push(p); anyFailure = true; // network failure — don't know, don't drop
         }
       }
-      if (!cancelled) setPending(stillPending);
+      failCountRef.current = anyFailure ? failCountRef.current + 1 : 0;
+      const connIssue = failCountRef.current >= 5;
+      if (!cancelled) setPending(stillPending.map(p => ({ ...p, _connIssue: connIssue })));
+      // Back off once we're clearly not reaching the server — no point
+      // hammering a dead connection every 4s.
+      if (!cancelled) timeoutId = setTimeout(check, connIssue ? 15000 : 4000);
     };
     check();
-    const id = setInterval(check, 4000);
-    return () => { cancelled = true; clearInterval(id); };
+    const tickId = setInterval(() => setTick(t => t + 1), 1000);
+    return () => { cancelled = true; clearTimeout(timeoutId); clearInterval(tickId); };
   }, []);
   if (!pending.length) return null;
+  const pctOf = p => Math.min(96, Math.round(((Date.now() - p.startedAt) / BOOKING_MAX_MS) * 100));
+  const worstPct = Math.min(...pending.map(pctOf));
+  const connIssue = pending.some(p => p._connIssue);
   return (
-    <div style={{ position:"fixed", bottom:76, left:"50%", transform:"translateX(-50%)", zIndex:998,
-                  background:C.edge, borderRadius:12, padding:"9px 16px", display:"flex", alignItems:"center", gap:10,
-                  boxShadow:"0 4px 24px rgba(0,0,0,0.5)", maxWidth:"92vw" }}>
-      <div style={{ width:14,height:14,borderRadius:"50%",border:`2px solid ${C.accentText}40`,borderTopColor:C.accentText,
-                    animation:"spinRing 0.9s linear infinite",flexShrink:0 }} />
-      <span style={{ fontSize:10,fontWeight:700,color:C.accentText,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-        {pending.length === 1
-          ? `Booking in progress — ${pending[0].label}`
-          : `${pending.length} bookings in progress`}
-      </span>
+    <div style={{ position:"fixed", top:"calc(env(safe-area-inset-top, 0px) + 10px)", left:"50%", transform:"translateX(-50%)", zIndex:999,
+                  background:C.edge, borderRadius:12, padding:"9px 14px", display:"flex", flexDirection:"column", gap:5,
+                  boxShadow:"0 4px 24px rgba(0,0,0,0.5)", maxWidth:"92vw", minWidth:230 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+        <div style={{ width:14,height:14,borderRadius:"50%",border:`2px solid ${C.accentText}40`,borderTopColor:C.accentText,
+                      animation:"spinRing 0.9s linear infinite",flexShrink:0 }} />
+        <span style={{ fontSize:10,fontWeight:700,color:C.accentText,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1 }}>
+          {pending.length === 1
+            ? `Booking in progress — ${pending[0].label}`
+            : `${pending.length} bookings in progress`}
+        </span>
+        <span style={{ fontSize:10,fontWeight:800,color:C.accentText,flexShrink:0 }}>{worstPct}%</span>
+      </div>
+      <div style={{ height:3,borderRadius:2,background:`${C.accentText}25`,overflow:"hidden" }}>
+        <div style={{ height:"100%",width:`${worstPct}%`,background:C.accentText,borderRadius:2,transition:"width 1s linear" }} />
+      </div>
+      {connIssue && (
+        <div style={{ fontSize:8,color:C.muted }}>
+          Can't reach the server to check status right now — still tracking, will keep trying.
+        </div>
+      )}
     </div>
   );
 }
@@ -8393,6 +8441,21 @@ function TicketBookNowButton({ legs }) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [copied, setCopied]     = useState(false);
   const [sharedOk, setSharedOk] = useState(false);
+
+  // GLOBAL-LOCK (2026-07-25, Alden feedback): the collapsed "Book Now"
+  // trigger button used to stay clickable even while a DIFFERENT booking
+  // (started from another ticket/screen) was still running — nothing
+  // stopped the user from starting a second, overlapping booking if they
+  // navigated to a fresh ticket while the first was still in flight. Checks
+  // the same localStorage-backed pending list PendingBookingsBanner reads,
+  // so it reflects a booking started from ANY screen, not just this one.
+  const [globalPending, setGlobalPending] = useState(() => loadPendingBookings());
+  useEffect(() => {
+    const check = () => setGlobalPending(loadPendingBookings());
+    check();
+    const id = setInterval(check, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   // N27-FIX: persist booking result across panel remounts via sessionStorage
   const resultKey = "grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80);
@@ -8485,7 +8548,7 @@ function TicketBookNowButton({ legs }) {
           startedAt: Date.now(),
         });
         const pollStart = Date.now();
-        const POLL_MS = 1500, MAX_MS = 3 * 60 * 1000; // 3 min ceiling
+        const POLL_MS = 1500, MAX_MS = BOOKING_MAX_MS;
         while (true) {
           await new Promise(r => setTimeout(r, POLL_MS));
           setBookingElapsed(Math.round((Date.now() - pollStart) / 1000));
@@ -8593,18 +8656,27 @@ function TicketBookNowButton({ legs }) {
   const legCount = buildLegs().length;
 
   // ── Collapsed trigger ──
-  if (!open) return (
-    <button onClick={() => setOpen(true)} className="gb-ghost"
-      style={{ width:"100%", marginTop:6, color:C.gold, borderColor:`${C.gold}40`,
-               padding:"8px 0", fontSize:10, fontWeight:700, letterSpacing:".05em",
-               display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/>
-        <path d="M13 5v14"/>
-      </svg>
-      Book Now
-    </button>
-  );
+  if (!open) {
+    // Doesn't need to exclude "this instance's own" job — if this instance
+    // were the one currently booking, `open` would already be true (the
+    // panel opens the moment the user taps Book Now), so this collapsed
+    // button is only ever visible when THIS ticket isn't the one running.
+    const blocked = globalPending.length > 0;
+    return (
+      <button onClick={() => { if (!blocked) setOpen(true); }} className="gb-ghost" disabled={blocked}
+        title={blocked ? "A booking is already in progress on another ticket — please wait for it to finish first." : undefined}
+        style={{ width:"100%", marginTop:6, color: blocked ? C.muted : C.gold, borderColor: blocked ? C.border : `${C.gold}40`,
+                 padding:"8px 0", fontSize:10, fontWeight:700, letterSpacing:".05em",
+                 display:"flex", alignItems:"center", justifyContent:"center", gap:7,
+                 opacity: blocked ? 0.45 : 1, cursor: blocked ? "not-allowed" : "pointer" }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 9V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2a3 3 0 0 0 0 6v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a3 3 0 0 0 0-6z"/>
+          <path d="M13 5v14"/>
+        </svg>
+        {blocked ? "Booking in progress on another ticket…" : "Book Now"}
+      </button>
+    );
+  }
 
   return (
     <div style={{ marginTop:6, background:`${C.gold}06`, border:`1px solid ${C.goldBorder}`,
@@ -8657,35 +8729,51 @@ function TicketBookNowButton({ legs }) {
           {/* Booking "please wait" spinner state */}
           {booking ? (
             <div style={{ width:"100%", background:C.faint, borderRadius:br,
-                          padding:"12px 14px", display:"flex", alignItems:"center", gap:12,
+                          padding:"12px 14px", display:"flex", flexDirection:"column", gap:8,
                           border:`1px solid ${C.border}` }}>
-              <div style={{ width:18, height:18, borderRadius:"50%", flexShrink:0,
-                            border:`2.5px solid ${C.gold}35`, borderTopColor:C.gold,
-                            animation:"spin .75s linear infinite" }}/>
-              <div>
-                <div style={{ fontSize:11, fontWeight:800, color:C.text }}>Booking your ticket…</div>
-                {/* 40/45-FIX: was a static "10-20 seconds" claim regardless of
-                    how long it actually took — misleading for a big ticket,
-                    and gave no signal that a long wait is still normal.
-                    bookingElapsed only starts counting once polling begins
-                    (i.e. the initial request already came back, so this is
-                    genuinely still running server-side, not stuck). */}
-                <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
-                  {bookingElapsed > 0
-                    ? `Still working — ${bookingElapsed}s so far. Longer tickets take longer, this is normal. Keep this screen open.`
-                    : "Sending to the bookmaker… keep this screen open."}
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ width:18, height:18, borderRadius:"50%", flexShrink:0,
+                              border:`2.5px solid ${C.gold}35`, borderTopColor:C.gold,
+                              animation:"spin .75s linear infinite" }}/>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:800, color:C.text }}>
+                    Booking your ticket…{bookingElapsed > 0 ? ` ${Math.min(96, Math.round((bookingElapsed * 1000 / BOOKING_MAX_MS) * 100))}%` : ""}
+                  </div>
+                  {/* 40/45-FIX: was a static "10-20 seconds" claim regardless of
+                      how long it actually took — misleading for a big ticket,
+                      and gave no signal that a long wait is still normal.
+                      bookingElapsed only starts counting once polling begins
+                      (i.e. the initial request already came back, so this is
+                      genuinely still running server-side, not stuck).
+                      2026-07-25: added the % above (Alden — "more reassuring"
+                      than a bare second-count), same elapsed/BOOKING_MAX_MS
+                      calc PendingBookingsBanner uses, capped at 96 so it
+                      never visually claims done before an actual result. */}
+                  <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
+                    {bookingElapsed > 0
+                      ? `Still working — ${bookingElapsed}s so far. Longer tickets take longer, this is normal. Keep this screen open.`
+                      : "Sending to the bookmaker… keep this screen open."}
+                  </div>
                 </div>
               </div>
+              {bookingElapsed > 0 && (
+                <div style={{ height:3,borderRadius:2,background:`${C.gold}25`,overflow:"hidden" }}>
+                  <div style={{ height:"100%",
+                                width:`${Math.min(96, Math.round((bookingElapsed * 1000 / BOOKING_MAX_MS) * 100))}%`,
+                                background:C.gold,borderRadius:2,transition:"width 1s linear" }} />
+                </div>
+              )}
             </div>
           ) : (
-            <button onClick={book} disabled={!legCount || !bookie} className="gb"
+            <button onClick={book} disabled={!legCount || !bookie || globalPending.length > 0} className="gb"
+              title={globalPending.length > 0 ? "A booking is already in progress on another ticket — please wait for it to finish first." : undefined}
               style={{ width:"100%",
-                       background:(!legCount||!bookie) ? C.faint : C.accent,
-                       color:(!legCount||!bookie) ? C.muted : C.accentText,
-                       border:`1px solid ${(!legCount||!bookie) ? C.border : C.accentBorder}`,
+                       background:(!legCount||!bookie||globalPending.length>0) ? C.faint : C.accent,
+                       color:(!legCount||!bookie||globalPending.length>0) ? C.muted : C.accentText,
+                       border:`1px solid ${(!legCount||!bookie||globalPending.length>0) ? C.border : C.accentBorder}`,
                        borderRadius:br, padding:"11px 0", fontWeight:900, fontSize:11,
                        letterSpacing:".08em", textTransform:"uppercase" }}>
-              {!bookie ? "Select a bookmaker first" : "Generate Code"}
+              {globalPending.length > 0 ? "Booking in progress elsewhere…" : !bookie ? "Select a bookmaker first" : "Generate Code"}
             </button>
           )}
 
