@@ -11915,8 +11915,16 @@ function DateStackCalendar({ dateStack, mergingDates, loading, onReplace, onAppl
     setOpen(true);
   };
 
+  // B-FIX: previously refused to let `pending` size drop to 0 ("never allow
+  // the stack to go to zero dates"), silently no-opping the long-press. That
+  // made "deselect present, then select a new date" fail invisibly on the
+  // first attempt — present just stayed highlighted with zero feedback.
+  // The real floor-of-one-date guarantee lives where it belongs: on the
+  // actual data, in removeDate() in the parent — and it's now sequenced
+  // after adds (see onApply below) so a legitimate swap never trips it.
+  // `pending` is just UI selection state; it's safe to let it hit 0 so the
+  // calendar always reflects the true in-progress selection.
   const toggleOff = (dstr) => setPending(prev => {
-    if (prev.size <= 1) return prev; // never allow the stack to go to zero dates
     const n = new Set(prev); n.delete(dstr); return n;
   });
   const toggleOn = (dstr) => setPending(prev => new Set(prev).add(dstr));
@@ -12053,12 +12061,16 @@ function DateStackCalendar({ dateStack, mergingDates, loading, onReplace, onAppl
 
             {!singleDateOnly && (
               <div style={{ padding:"10px 16px 16px", display:"flex", gap:8 }}>
-                <div style={{ flex:1, fontSize:10, color:C.muted, display:"flex", alignItems:"center" }}>
-                  {pending.size > 1 ? `${pending.size} dates selected` : "1 date selected"}
+                <div style={{ flex:1, fontSize:10, color: pending.size===0 ? C.red : C.muted, display:"flex", alignItems:"center" }}>
+                  {pending.size === 0 ? "Select at least one date"
+                    : pending.size === 1 ? "1 date selected"
+                    : `${pending.size} dates selected`}
                 </div>
                 {dirty && (
                   <button onClick={() => { onApply([...pending].sort()); setOpen(false); }} className="gb-primary"
-                    style={{ padding:"9px 20px", fontSize:12, minHeight:FILTER_TRIGGER_H }}>
+                    disabled={pending.size === 0}
+                    style={{ padding:"9px 20px", fontSize:12, minHeight:FILTER_TRIGGER_H,
+                             opacity: pending.size===0 ? 0.5 : 1, cursor: pending.size===0 ? "not-allowed" : "pointer" }}>
                     Apply
                   </button>
                 )}
@@ -18133,7 +18145,20 @@ function GRMProInner() {
   // replaceDate: the calendar widget's tap gesture. Single-select, clears the
   // whole stack, fetches immediately — identical to picking a date then
   // hitting FETCH today, just collapsed into one tap.
+  //
+  // B-FIX: this used to just setDate + queue a fetch, relying on fetchData to
+  // do the "clear the stack" part. But fetchData's setFixtures only replaces
+  // the slice for its OWN target date (see the 3.2-FIX comment above fetchData)
+  // — that's required so the 90s auto-refresh tick doesn't blow away other
+  // merged-in dates. Reusing that same merge-only fetch for a single-select
+  // tap meant any other date already in `fixtures` (present, most often)
+  // never actually got removed — it just sat there alongside the new date.
+  // Clearing `fixtures` here, at the one call site that actually means
+  // "replace, not merge," gets the tap gesture back to what its own
+  // docstring promises without touching fetchData's merge behavior that the
+  // FETCH button and auto-refresh both depend on.
   const replaceDate = useCallback((d) => {
+    setFixtures([]);
     setDate(d);
     setPendingDateFetch(d);
   }, []);
@@ -18735,8 +18760,15 @@ function GRMProInner() {
               onApply={async (targetDates) => {
                 const toAdd    = targetDates.filter(d => !dateStack.includes(d));
                 const toRemove = dateStack.filter(d => !targetDates.includes(d));
-                toRemove.forEach(removeDate);
+                // B-FIX: adds must land BEFORE removals. removeDate refuses to let
+                // `fixtures` go empty (its own zero-guard), so removing the last
+                // remaining date while its replacement hasn't been fetched yet
+                // silently no-ops — the old date survives the swap. Doing the add
+                // first means the replacement's data is already in `fixtures` by
+                // the time the old date is removed, so the guard is never tripped
+                // by a legitimate one-for-one swap.
                 await Promise.all(toAdd.map(mergeDate));
+                toRemove.forEach(removeDate);
               }}
             />
             {/* Show progress% inline on the button so user knows it's running.
