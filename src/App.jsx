@@ -531,9 +531,9 @@ const SA_MARKETS = {
   // key — handled as a special case in the saRows memo below.
   "PE:Mix":           { _isPEMix: true },
 };
-const SA_MARKET_LABELS = Object.keys(SA_MARKETS).map(id => ({
+const SA_MARKET_LABELS = [...Object.keys(SA_MARKETS), "SA:Correlation"].map(id => ({
   id,
-  label: id === "PE:Mix" ? "Mix" : id.replace(/^TB:/, ""),
+  label: id === "PE:Mix" ? "Mix" : id === "SA:Correlation" ? "Correlation" : id.replace(/^TB:/, ""),
 }));
 
 // Selecting an SA Pattern market should make the normal Pick Market filter
@@ -592,8 +592,8 @@ function caResolveFamily(caMarketId, pickMarketFamily) {
 // identical 14-market scope, minus PE:Mix which is SA-specific), plus its
 // own "CA:Mix" virtual entry. Reuses SA_TO_FAMILY_ID's keys directly rather
 // than a second hardcoded list of the same 13 strings.
-const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Mix"].map(id => ({
-  id, label: id === "CA:Mix" ? "Mix" : id.replace(/^TB:/, ""),
+const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Mix", "CA:Correlation"].map(id => ({
+  id, label: id === "CA:Mix" ? "Mix" : id === "CA:Correlation" ? "Correlation" : id.replace(/^TB:/, ""),
 }));
 
 function saTheReadToTBMarket(anchor) {
@@ -1288,6 +1288,193 @@ function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
   const modelAgreement = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
   return shrink * stability * hrFactor * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── CROSS-MARKET CORRELATION ENGINE (2026-07-26, Alden's DC X2 case) ───────
+// ══════════════════════════════════════════════════════════════════════════
+// A NEW category, deliberately separate from Mix — Mix stays exactly as-is.
+// This is a genuinely different kind of reasoning, not a replacement: Mix
+// scores each market's own pattern independently (caSafestScore) and picks
+// whichever single market scored highest, with zero awareness of what any
+// OTHER market is saying. This instead asks: given ALL 14 markets' signals
+// for this fixture — not just the candidate's own — which single market
+// survives strongest once penalties/bonuses from every OTHER market's
+// signal (or the ABSENCE of one) are applied?
+//
+// Concrete motivating case: DC X2 at 74-75% HR was Mix's pick. Home Win had
+// only Avoid signals. Away Over 0.5 had NO pattern at all. Away Over 1.5 was
+// a 52-53% coinflip. Away Win itself was a modest 58%. Over 1.5 AND Over 2.5
+// both had Avoid patterns (pointing at a low-scoring game). Under 3.5 was
+// 76% — the actual highest raw HR — and the away-side weakness independently
+// pointed toward exactly the same low-scoring conclusion. The home team won
+// 2-0. Mix had no way to see any of that; this engine is built to.
+//
+// GROUNDING: the family groupings below are the validated part — they match
+// Alden's fresh 801-fixture holdout breakdown exactly (a file CA never
+// trained on): per-DIRECTION hit rate came back Dominance 75.7%, Goals
+// 75.7%, Slow-game 75.7%, Result 69.8%. Result trailing the other three by a
+// real out-of-sample margin is independent confirmation that Result-family
+// confidence should structurally lag, which is exactly what let DC X2 look
+// falsely competitive with Under 3.5 in the first place.
+//
+// HONESTY NOTE: the family groupings and WHICH markets depend on which are
+// the validated/reasoned-from-data part. The specific PENALTY/BONUS
+// MAGNITUDES below (0.88, 0.80, 1.20, etc.) are reasoned defaults following
+// the shape Alden described, not yet backtested the way the
+// verdict-ca-select.mjs port was. Same caveat as everything shipped without
+// a backtest behind it: run it, check the numbers, don't trust the theory
+// alone.
+
+// Family groupings for THIS engine only — deliberately separate from
+// CA_FAMILY_GOALS/UNDER/RESULT/DOMINANCE above (an older taxonomy built for
+// Mix's corroboration bonus, which groups Home/Away Over 0.5 into "goals"
+// and only Over 1.5 into "dominance"). This grouping is the one Alden's
+// fresh-holdout breakdown actually validates: dominance = all 4 team-total
+// markets, goals = match-total overs (+BTTS), slow-game = match-total
+// unders, result = all 5 result markets.
+export const CORR_FAMILY_DOMINANCE = new Set(["TB:Home Over 0.5", "TB:Home Over 1.5", "TB:Away Over 0.5", "TB:Away Over 1.5"]);
+export const CORR_FAMILY_GOALS     = new Set(["TB:Over 1.5", "TB:Over 2.5", "TB:BTTS"]);
+export const CORR_FAMILY_SLOWGAME  = new Set(["TB:Under 3.5", "TB:Under 4.5"]);
+export const CORR_FAMILY_RESULT    = new Set(["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"]);
+
+// Per-market dependency spec — for each of the 14 markets, which OTHER
+// markets its confidence should move with:
+//   supports             — a WEAK or ABSENT signal on one of these penalizes
+//                           the candidate (the candidate's theory depends on
+//                           this being true — e.g. DC X2 depends on the away
+//                           side having a real attacking signal at all)
+//   opposedBy             — a STRONG (>=CORR_OPPOSED_STRONG_HR) positive
+//                           signal on one of these penalizes the candidate
+//                           (a real contradiction, not just weak support —
+//                           e.g. strong home dominance actively argues
+//                           against an away-leaning result)
+//   reinforcedByAvoidOn    — an AVOID pattern on one of these is CORROBORATING
+//                           evidence for the candidate. Only meaningful
+//                           between Goals and Slow-game, which are literal
+//                           opposites of the same total-goals question: an
+//                           Avoid on Over 2.5 (i.e. Over 2.5 is unlikely) is
+//                           itself evidence FOR a low-scoring game.
+export const CA_CORR_DEPENDENCIES = {
+  "TB:1X2-Home":      { supports: ["TB:Home Over 0.5", "TB:Home Over 1.5"], opposedBy: ["TB:Away Over 1.5"] },
+  "TB:DC1X":          { supports: ["TB:Home Over 0.5"],                     opposedBy: ["TB:Away Over 1.5"] },
+  "TB:1X2-Away":      { supports: ["TB:Away Over 0.5", "TB:Away Over 1.5"], opposedBy: ["TB:Home Over 1.5"] },
+  "TB:DCX2":          { supports: ["TB:Away Over 0.5"],                     opposedBy: ["TB:Home Over 1.5"] },
+  "TB:1X2-Draw":      { opposedBy: ["TB:Home Over 1.5", "TB:Away Over 1.5"] },
+  "TB:Over 1.5":      { supports: ["TB:Home Over 0.5", "TB:Away Over 0.5"], reinforcedByAvoidOn: ["TB:Under 3.5", "TB:Under 4.5"] },
+  "TB:Over 2.5":      { supports: ["TB:Home Over 1.5", "TB:Away Over 1.5"], reinforcedByAvoidOn: ["TB:Under 3.5", "TB:Under 4.5"] },
+  "TB:BTTS":          { supports: ["TB:Home Over 0.5", "TB:Away Over 0.5"] },
+  "TB:Under 3.5":     { opposedBy: ["TB:Home Over 1.5", "TB:Away Over 1.5"], reinforcedByAvoidOn: ["TB:Over 1.5", "TB:Over 2.5"] },
+  "TB:Under 4.5":     { opposedBy: ["TB:Home Over 1.5", "TB:Away Over 1.5"], reinforcedByAvoidOn: ["TB:Over 1.5", "TB:Over 2.5"] },
+  "TB:Home Over 0.5": {}, // base dominance signal — doesn't itself depend on anything else in this spec
+  "TB:Home Over 1.5": { supports: ["TB:Home Over 0.5"] },
+  "TB:Away Over 0.5": {},
+  "TB:Away Over 1.5": { supports: ["TB:Away Over 0.5"] },
+};
+
+// Tunable magnitudes — see HONESTY NOTE above.
+export const CORR_ABSENT_PENALTY         = 0.88; // a "supports" market has no pattern at all
+export const CORR_COINFLIP_PENALTY       = 0.92; // a "supports" market's own positive HR sits within CORR_COINFLIP_BAND of 50
+export const CORR_COINFLIP_BAND          = 8;    // pp either side of 50 counted as "coinflip"
+export const CORR_SUPPORT_AVOID_PENALTY  = 0.80; // a "supports" market itself has an Avoid pattern — caution, not disqualifying (Alden: "doesn't eliminate the possibility")
+export const CORR_OPPOSED_PENALTY        = 0.75; // an "opposedBy" market has a strong positive pattern — real contradiction
+export const CORR_OPPOSED_STRONG_HR      = 70;   // threshold for what counts as "strong" on the opposing side
+export const CORR_REINFORCE_BONUS        = 1.20; // a "reinforcedByAvoidOn" market genuinely has an Avoid pattern — corroborating evidence
+export const CORR_MULT_FLOOR             = 0.40; // compounded multiplier can't push a candidate below 40% of its base score
+export const CORR_MULT_CEIL              = 1.90; // or above 190% of it
+export const CORR_MODEL_AGREEMENT_WEIGHT = 0.15; // how much the main model's own probability (same baseline-centered calc caSafestScore uses) moves the final score
+export const CORR_VALUE_LIFT_WEIGHT      = 2.2;  // "Best Value" mode only: lift counted at this multiple of its raw pp value, added on top of the HR base
+
+// Applies every supports/opposedBy/reinforcedByAvoidOn rule for one
+// candidate market against the OTHER 13 markets' info, returns the
+// compounded multiplier (clamped to [CORR_MULT_FLOOR, CORR_MULT_CEIL]).
+function corrMultiplierFor(market, info) {
+  const dep = CA_CORR_DEPENDENCIES[market] || {};
+  let mult = 1;
+  for (const supMarket of (dep.supports || [])) {
+    const s = info[supMarket];
+    if (!s) continue;
+    if (s.absent) mult *= CORR_ABSENT_PENALTY;
+    else if (s.pos && Math.abs(s.pos.hr - 50) <= CORR_COINFLIP_BAND) mult *= CORR_COINFLIP_PENALTY;
+    else if (s.av && !s.pos) mult *= CORR_SUPPORT_AVOID_PENALTY;
+  }
+  for (const oppMarket of (dep.opposedBy || [])) {
+    const o = info[oppMarket];
+    if (o?.pos && o.pos.hr >= CORR_OPPOSED_STRONG_HR) mult *= CORR_OPPOSED_PENALTY;
+  }
+  for (const reinMarket of (dep.reinforcedByAvoidOn || [])) {
+    const r = info[reinMarket];
+    if (r?.av && !r.pos) mult *= CORR_REINFORCE_BONUS;
+  }
+  return Math.max(CORR_MULT_FLOOR, Math.min(CORR_MULT_CEIL, mult));
+}
+
+// Per-market info for ONE fixture, CA source — {absent, pos:{hr,lift,entry}|null, av:{hr,lift,entry}|null}
+// for all 14 markets. hr is RECALIBRATED (same caRecalibratedHR everything
+// else in CA scoring already runs through), not the raw claimed rate.
+function buildCACorrInfo(f, caPatterns) {
+  const { positive, avoid } = matchCAConditions(f, caPatterns);
+  const info = {};
+  for (const market of Object.keys(SA_MARKETS)) {
+    const posEntry = positive.find(c => c.market === market) || null;
+    const avEntry  = avoid.find(c => c.market === market) || null;
+    const posHR = posEntry ? caRecalibratedHR(posEntry.holdoutHitRate, false) : null;
+    const avHR  = avEntry  ? caRecalibratedHR(avEntry.holdoutHitRate, true)   : null;
+    info[market] = {
+      absent: !posEntry && !avEntry,
+      pos: posEntry ? { hr: posHR, lift: posHR - (posEntry.holdoutBaselineHR ?? 50), entry: posEntry } : null,
+      av:  avEntry  ? { hr: avHR,  lift: avHR  - (avEntry.holdoutBaselineHR ?? 50),  entry: avEntry }  : null,
+    };
+  }
+  return info;
+}
+
+// Same shape, SA source — matchSAPatterns' combos carry .empiricalRate and
+// .lift directly (no separate train/holdout recalibration layer exists for
+// SA), so hr is used as-is rather than recalibrated.
+function buildSACorrInfo(f, saPatterns) {
+  const info = {};
+  for (const market of Object.keys(SA_MARKETS)) {
+    const { positive, avoid } = matchSAPatterns(f, market, saPatterns);
+    const posEntry = positive[0] || null;
+    const avEntry  = avoid[0] || null;
+    info[market] = {
+      absent: !posEntry && !avEntry,
+      pos: posEntry ? { hr: posEntry.empiricalRate, lift: posEntry.lift, entry: posEntry } : null,
+      av:  avEntry  ? { hr: avEntry.empiricalRate,  lift: avEntry.lift,  entry: avEntry }  : null,
+    };
+  }
+  return info;
+}
+
+// Shared winner-picker — works off either buildCACorrInfo or buildSACorrInfo's
+// output, since both produce the same {absent, pos, av} shape per market.
+// mode: "hr" (Alden's main description — recalibrated/raw HR is the base
+// signal) | "value" (lift counted at CORR_VALUE_LIFT_WEIGHT on top of HR).
+// Only markets with a POSITIVE pattern are candidates to WIN — an
+// Avoid-only market (like Home Win in the motivating case) is correctly
+// excluded from ever winning, same as it would be from any other mode; the
+// correlation math still uses its Avoid signal as an input to OTHER
+// candidates' scores, just never as a candidate itself.
+function pickCorrelationWinner(info, mode, f) {
+  let best = null, bestScore = -Infinity;
+  for (const market of Object.keys(SA_MARKETS)) {
+    const entry = info[market]?.pos;
+    if (!entry || entry.hr == null) continue;
+    const base = mode === "value" ? entry.hr + entry.lift * CORR_VALUE_LIFT_WEIGHT : entry.hr;
+    const mult = corrMultiplierFor(market, info);
+    // Reuses caModelAgreementFactor as-is (already baseline-centered, fixed
+    // 2026-07-19) — works for SA entries too since it defaults gracefully
+    // to a flat-50 baseline when holdoutBaselineHR is absent (SA doesn't
+    // have one), same defensive ?? fallback it already had.
+    const modelAgreement = f ? caModelAgreementFactor(entry.entry, false, f) : 0;
+    const modelMult = 1 + modelAgreement * CORR_MODEL_AGREEMENT_WEIGHT;
+    const score = base * mult * modelMult;
+    if (score > bestScore) { bestScore = score; best = { market, score, entry: entry.entry, mult, modelMult, base, hr: entry.hr, lift: entry.lift }; }
+  }
+  return best;
+}
+
+
 
 
 // Odds for a CA market — reuses SA_MARKETS' oddsKey (same lookup
@@ -5214,6 +5401,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // exactly). No "Emerging" for SA — Davies confirmed SA has no low-test-n
   // server-side arrays the way CA does, so only two tiers exist here.
   const [saMode,      setSaMode]      = useState("standard"); // "standard" | "strong"
+  const [saCorrMode,  setSaCorrMode]  = useState("hr"); // "hr" | "value" — only relevant when saMarket === "SA:Correlation"
   const [saDirection, setSaDirection] = useState("both");     // "positive" | "avoid" | "both"
   const strongDefaultStringsSA = d => ({
     trainHR: String(d.trainHR), testHR: String(d.testHR),
@@ -5340,6 +5528,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // to Positive-only/Avoid-only/Both — "both" is a no-op so standard mode's
   // existing behavior is byte-identical unless a user explicitly narrows it.
   const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging"
+  // Correlation category (2026-07-26) — independent of caMode above, only
+  // relevant when caMarket === "CA:Correlation". "hr" = Alden's main
+  // description (recalibrated hit rate is the base signal). "value" = lift
+  // counted at CORR_VALUE_LIFT_WEIGHT on top of HR, so a big lift can win
+  // over a merely-higher raw rate.
+  const [caCorrMode,      setCaCorrMode]      = useState("hr"); // "hr" | "value"
   const [caDirection,     setCaDirection]     = useState("both");     // "positive" | "avoid" | "both"
   const [caEmergingMinHR, setCaEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — holdout HR floor (positive) / ceiling mirror (avoid)
   // Strong-mode thresholds (2026-07-18, Alden's request; refined same day
@@ -5856,8 +6050,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const saRows = useMemo(() => {
     if (!saMarket) return [];
     const s = search.toLowerCase();
-    const def = SA_MARKETS[saMarket];
-    if (!def) return [];
+    // SA:Correlation is a virtual label (like PE:Mix used to be the only
+    // one) — NOT a real SA_MARKETS key, so it can't go through the normal
+    // def lookup/early-return below.
+    const isSACorrelation = saMarket === "SA:Correlation";
+    const def = isSACorrelation ? null : SA_MARKETS[saMarket];
+    if (!isSACorrelation && !def) return [];
+    // Captured once per recompute, same reason caRows captures
+    // pickMarketFamily — `family` is the outer Pick Market row state;
+    // declaring a local `const family` further down (inside the
+    // correlation branch) would otherwise shadow it within that block's
+    // scope from the point of declaration, same TDZ trap caRows already
+    // had to work around.
+    const saFamilySnapshot = family;
 
     const hasLiveFilter      = statFilters.includes("live");
     const hasScheduledFilter = statFilters.includes("scheduled");
@@ -5865,10 +6070,75 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
     const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
 
+    // ── SA:Correlation (2026-07-26) — same cross-market correlation engine
+    // as CA:Correlation, run off SA's own patterns (matchSAPatterns'
+    // empiricalRate/lift) instead of CA's holdout data. See the CROSS-MARKET
+    // CORRELATION ENGINE comment near caSafestScore for the full reasoning —
+    // shared dependency spec/multiplier logic, only the info-builder differs
+    // (buildSACorrInfo vs buildCACorrInfo).
+    if (isSACorrelation) {
+      if (!saPatterns?.length) return [];
+      const out = [];
+      for (const f of fixtures) {
+        if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+        if (!bothOrNeither) {
+          const st = (f.state||"").toLowerCase();
+          if (hasLiveFilter && !liveStates.has(st)) continue;
+          if (hasScheduledFilter && !isScheduledState(st)) continue;
+        }
+        if (statFilters.some(id => {
+          if (["live","scheduled"].includes(id)) return false;
+          const sf = STAT_FILTERS.find(x => x.id === id);
+          return sf ? !sf.fn(f) : false;
+        })) continue;
+        const corrInfo = buildSACorrInfo(f, saPatterns);
+        const winner = pickCorrelationWinner(corrInfo, saCorrMode, f);
+        if (!winner) continue;
+        const marketLabel = (winner.market || "").replace(/^TB:/, "");
+        // `family` here is the outer Pick Market row state (same role
+        // caRows' pickMarketFamily alias plays) — caResolveFamily decides
+        // whether to honor it or fall back to the correlation winner's own market.
+        const family = caResolveFamily(winner.market, saFamilySnapshot);
+        const primaryPick = getCustomPick(f, family, C);
+        const pick = primaryPick
+          ? { ...primaryPick, color: C.green }
+          : { label: marketLabel, prob: 0, odds: null, color: C.green };
+        if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
+        if (probFilter && pick.prob != null) {
+          if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
+          if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
+        }
+        if (kickoffFilter && f.time) {
+          const [hh, mm] = f.time.split(":").map(Number);
+          const mins = hh * 60 + (mm || 0);
+          const filterMins = kickoffFilter.hour * 60;
+          if (kickoffFilter.mode === "before" && mins > filterMins) continue;
+          if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+        }
+        if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
+        if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
+        if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
+        out.push({
+          f, pick,
+          _saPositive: [winner.entry], _saAvoid: [], _saFlagged: false,
+          _corrScore: winner.score, _corrMult: winner.mult, _corrBase: winner.base,
+        });
+      }
+      out.sort((a, b) => {
+        if (bothOrNeither) {
+          const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+          const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+          if (aLive !== bLive) return aLive - bLive;
+        }
+        return (b._corrScore ?? 0) - (a._corrScore ?? 0);
+      });
+      return out;
+    }
+
     // ── PE:Mix mode — home-market assignments from PE engine ─────────────────
     // Each fixture is shown with whichever gated market PE assigned as its
     // strongest signal. Sorted by combinedZ desc (same order PE uses for tickets).
-    if (def._isPEMix) {
+    if (def?._isPEMix) {
       if (!saMixLegs?.length) return [];
       const byGameId = new Map(saMixLegs.map(l => [l.gameId, l]));
       const out = [];
@@ -6073,7 +6343,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, saMode, saDirection, saStrongThresholds]);
+  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, saMode, saDirection, saStrongThresholds, family, saCorrMode]);
 
   // CA row — mirrors saRows' shape/filters above so the existing row JSX
   // renders it unchanged. One real difference from SA beyond the matcher
@@ -6112,6 +6382,47 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       })) continue;
 
       const { positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets = [] } = matchCAConditions(f, caPatternsRow);
+
+      // ── CA:Correlation (2026-07-26) — isolated early branch, doesn't touch
+      // the Mix/Standard/Strong/Emerging floor-gate machinery below at all.
+      // See CROSS-MARKET CORRELATION ENGINE comment near caSafestScore for
+      // the full reasoning. Duplicates the tail-end filters (excludedMarkets/
+      // probFilter/kickoffFilter/sortActive) rather than falling through to
+      // the shared tail — a little repetition is the safer trade against
+      // risking the well-tested Mix/single-market path just below.
+      if (caMarket === "CA:Correlation") {
+        const corrInfo = buildCACorrInfo(f, caPatternsRow);
+        const winner = pickCorrelationWinner(corrInfo, caCorrMode, f);
+        if (!winner) continue; // no positive candidate anywhere for this fixture
+        const marketLabel = (winner.market || "").replace(/^TB:/, "");
+        const family = caResolveFamily(winner.market, pickMarketFamily);
+        const primaryPick = getCustomPick(f, family, C);
+        const pick = primaryPick
+          ? { ...primaryPick, color: C.green }
+          : { label: marketLabel, prob: 0, odds: null, color: C.green };
+        if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
+        if (probFilter && pick.prob != null) {
+          if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
+          if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
+        }
+        if (kickoffFilter && f.time) {
+          const [hh, mm] = f.time.split(":").map(Number);
+          const mins = hh * 60 + (mm || 0);
+          const filterMins = kickoffFilter.hour * 60;
+          if (kickoffFilter.mode === "before" && mins > filterMins) continue;
+          if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+        }
+        if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
+        if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
+        if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
+        out.push({
+          f, pick,
+          _caPositive: [winner.entry], _caAvoid: [], _caFlagged: false,
+          _corrScore: winner.score, _corrMult: winner.mult, _corrBase: winner.base,
+        });
+        continue;
+      }
+
       const contradictorySet = new Set(contradictoryMarkets);
       // Two floor gates applied upfront (2026-07-13 full rewrite), same
       // exclusions computeCAVerdicts' Rule 3 uses so Mix/single-market rows
@@ -6274,7 +6585,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
+  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family, caCorrMode]);
 
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
@@ -6724,7 +7035,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {/* ── SA PATTERN QUALITY (2026-07-19, Davies request #5) — mirrors
                  CA's Pattern Quality block. Standard/Strong only (no Emerging —
                  SA has no server-side low-test-n arrays the way CA does). ── */}
-            {saMarket && saMarket !== "PE:Mix" && (
+            {saMarket && saMarket !== "PE:Mix" && saMarket !== "SA:Correlation" && (
               <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.accent}20` }}>
                 <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
                   Pattern Quality
@@ -6812,6 +7123,40 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       </button>
                     );
                   })}
+                </div>
+              </div>
+            )}
+
+            {saMarket === "SA:Correlation" && (
+              <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.accent}20` }}>
+                <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                  Same cross-market correlation engine as CA's Correlation category, run off SA's own patterns — for every fixture, ranks EVERY market's positive pattern against all 14 markets' signals together, applying penalties for weak/missing/contradicting support and bonuses when other markets corroborate it. Separate from Mix (PE:Mix, unchanged).
+                </div>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Base Signal
+                </div>
+                <div className="cscroll">
+                  {[
+                    { id:"hr",    label:"Best HR" },
+                    { id:"value", label:"Best Value" },
+                  ].map(m => {
+                    const isOn = saCorrMode === m.id;
+                    return (
+                      <button key={m.id} onClick={() => setSaCorrMode(m.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? C.accent : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? C.accent : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize:8,color:C.text,opacity:.5,marginTop:6,lineHeight:1.5 }}>
+                  {saCorrMode === "value"
+                    ? "Lift counted heavier than raw hit rate — a big elevation can outrank a merely-higher rate."
+                    : "Empirical hit rate is the base signal, same number Standard mode ranks by."}
                 </div>
               </div>
             )}
@@ -6910,7 +7255,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
             {/* ── PATTERN QUALITY MODE (2026-07-18) — Standard / Strong / Emerging
                  are mutually exclusive: only one populates the list at a time. ── */}
-            {caMarket && (
+            {caMarket && caMarket !== "CA:Correlation" && (
               <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.amber}20` }}>
                 <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
                   Pattern Quality
@@ -7019,6 +7364,40 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       </button>
                     );
                   })}
+                </div>
+              </div>
+            )}
+
+            {caMarket === "CA:Correlation" && (
+              <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.amber}20` }}>
+                <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                  For every fixture, ranks EVERY market's positive pattern against all 14 markets' signals together — not just its own — applying penalties for weak/missing/contradicting support elsewhere and bonuses when other markets' Avoid signals corroborate it. The strongest market after those adjustments wins, not necessarily the one with the highest raw number. Separate from Mix, which scores each market independently — Mix is unchanged.
+                </div>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Base Signal
+                </div>
+                <div className="cscroll">
+                  {[
+                    { id:"hr",    label:"Best HR" },
+                    { id:"value", label:"Best Value" },
+                  ].map(m => {
+                    const isOn = caCorrMode === m.id;
+                    return (
+                      <button key={m.id} onClick={() => setCaCorrMode(m.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? C.amber : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? C.amber : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize:8,color:C.text,opacity:.5,marginTop:6,lineHeight:1.5 }}>
+                  {caCorrMode === "value"
+                    ? "Lift vs. baseline counted heavier than raw hit rate — a big elevation can outrank a merely-higher rate."
+                    : "Recalibrated hit rate is the base signal, same number Standard mode floors against."}
                 </div>
               </div>
             )}
