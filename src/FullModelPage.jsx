@@ -1623,12 +1623,35 @@ function pickCATopSlots(list, isAvoid) {
   const byLift = [...list].sort((a, b) => isAvoid
     ? (a.holdoutLift ?? Infinity) - (b.holdoutLift ?? Infinity)
     : (b.holdoutLift ?? -Infinity) - (a.holdoutLift ?? -Infinity));
-  const keyOf = c => c.key || `${c.market}|${c.rank}|${JSON.stringify(c.conditions)}`;
+  // FAMILY DEDUP (2026-07-31, Sterling: "if you check the listed patterns,
+  // they're the same kinda family... winner will be the highest of each
+  // family of conditions, so I'll get different conditions"). Root cause:
+  // the old keyOf deduped on the EXACT condition set (field + operator + the
+  // specific numeric threshold), so "Home xG >= 2.406 & BTTS% < 44.216" and
+  // "Home xG >= 2.406 & BTTS% < 46.689" counted as two unrelated patterns —
+  // same underlying signal at a slightly different cutoff, not a second
+  // insight. Since each pass below just takes the next not-yet-used item in
+  // sorted order, a fixture with several close-threshold variants of the
+  // SAME combo could fill 3 of the 4 top slots with near-duplicates,
+  // crowding out a genuinely different signal further down the list (e.g. an
+  // Away-CS%-based pattern that only ever surfaced in the 4th slot).
+  // caFamilyKey drops the numeric threshold and keeps only WHICH fields +
+  // operators are combined (sorted, so source order doesn't matter) — each
+  // pass still returns up to 2 slots, but now at most one representative per
+  // family, so a second slot only gets filled by a genuinely different
+  // condition combo. The representative is still whichever family member is
+  // best on the current pass's own criterion, since sorting happens before
+  // this dedup runs — "winner of the family" falls out naturally.
+  const caFamilyKey = c => {
+    const conds = Array.isArray(c.conditions) ? c.conditions : [];
+    if (!conds.length) return c.key || `${c.market}|${JSON.stringify(c.conditions)}`;
+    return `${c.market}|${conds.map(cd => `${cd.field}${cd.op}`).sort().join(",")}`;
+  };
   const picked = [];
   const used = new Set();
   for (const c of byHitRate) {
     if (picked.length >= 2) break;
-    const k = keyOf(c);
+    const k = caFamilyKey(c);
     if (used.has(k)) continue;
     used.add(k);
     picked.push({ ...c, topReason: "hitrate" });
@@ -1636,7 +1659,7 @@ function pickCATopSlots(list, isAvoid) {
   const beforeLift = picked.length;
   for (const c of byLift) {
     if (picked.length >= beforeLift + 2) break;
-    const k = keyOf(c);
+    const k = caFamilyKey(c);
     if (used.has(k)) continue;
     used.add(k);
     picked.push({ ...c, topReason: "lift" });

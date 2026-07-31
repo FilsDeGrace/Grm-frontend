@@ -8814,10 +8814,6 @@ function TicketBookNowButton({ legs }) {
   // 40/45-FIX: elapsed seconds while polling a booking job, shown in the UI
   // instead of a plain spinner so a long booking doesn't look stuck/dead.
   const [bookingElapsed, setBookingElapsed] = useState(0);
-  // N27-FIX: auto-open if a persisted result exists from a previous mount
-  useEffect(() => {
-    try { const s = sessionStorage.getItem("grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80)); if (s) setOpen(true); } catch {}
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [copied, setCopied]     = useState(false);
   const [sharedOk, setSharedOk] = useState(false);
 
@@ -8829,12 +8825,41 @@ function TicketBookNowButton({ legs }) {
   // the same localStorage-backed pending list PendingBookingsBanner reads,
   // so it reflects a booking started from ANY screen, not just this one.
   const [globalPending, setGlobalPending] = useState(() => loadPendingBookings());
+  // ROOT-CAUSE FIX (2026-07-31, Sterling report #1 — "booking result doesn't
+  // show until I navigate away and back"): the old N27-FIX only checked
+  // sessionStorage for a persisted result ONCE, on mount. `book()` below is
+  // an async function tied to whichever component instance started it —
+  // when the user leaves this ticket's screen mid-booking, that instance
+  // unmounts, but book() keeps running (it's just a promise chain, not tied
+  // to React lifecycle) and writes the result into sessionStorage whenever
+  // it finishes. A REMOUNTED instance's mount effect had already fired and
+  // never fires again, so nothing was listening for that later write —
+  // globalPending clears the "blocked on another ticket" state within ~3s
+  // of completion, the button reverts to a plain "Book Now", and the actual
+  // result just sits in sessionStorage invisible until some unrelated
+  // remount happens to re-run the old mount check and finally surface it.
+  // FIX: fold the result check into this SAME polling interval (extending
+  // an existing pattern instead of adding a second timer) — a result that
+  // lands while this instance is mounted but idle now gets picked up within
+  // one 3s tick, from any screen, not just via a lucky remount.
+  // STALE-SOURCE NOTE: applied against the App_jsx.txt snapshot Sterling
+  // flagged as stale on 2026-07-31 — port this into the live App.jsx.
   useEffect(() => {
-    const check = () => setGlobalPending(loadPendingBookings());
+    const resultKeyNow = () =>
+      "grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80);
+    const check = () => {
+      setGlobalPending(loadPendingBookings());
+      if (!open) {
+        try {
+          const s = sessionStorage.getItem(resultKeyNow());
+          if (s) setOpen(true);
+        } catch {}
+      }
+    };
     check();
     const id = setInterval(check, 3000);
     return () => clearInterval(id);
-  }, []);
+  }, [open, legs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // N27-FIX: persist booking result across panel remounts via sessionStorage
   const resultKey = "grm_book_result_" + (legs || []).map(l => (l.game||"") + (l.pick||"")).join("|").slice(0, 80);
@@ -10742,6 +10767,48 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                                cursor:"pointer", marginBottom:8, background:`${C.red}12`,
                                border:`1px solid ${C.red}45`, color:C.red }}>
                       Remove all {corrRisks.filter(r => r.type !== "session").length} flagged legs from this ticket
+                    </button>
+                  )}
+                  {/* RISK-SHEET-CLEAR (2026-07-31, Sterling report #2 — wanted
+                      on the risk sheet itself, not tucked in the Settings
+                      menu, since navigating away to clear flags is worse UX
+                      than the "Clear booked flag" buttons already sitting
+                      right here per-leg). Scoped to exactly the risks visible
+                      in THIS ticket's panel — not a global wipe — so testing
+                      odds on a batch that overlaps a real booked ticket can't
+                      accidentally erase the flag on the ticket you actually
+                      booked; that one only clears if you open IT and hit
+                      this same button there. Mirrors the single-leg "Clear
+                      booked flag" / "Clear unresolvable flag" buttons below
+                      exactly, just applied to every matching risk at once. */}
+                  {corrRisks.some(r => r.type === "booked") && (
+                    <button onClick={() => {
+                      const targets = corrRisks.filter(r => r.type === "booked");
+                      const updated = loadBookedLegs().filter(b => !targets.some(r =>
+                        b.game === r.game || (b.fixtureId && ticket.legs.find(l => l.game === r.game && l.fixtureId === b.fixtureId))
+                      ));
+                      persistBookedLegs(updated);
+                      setBookedLegsVersion(v => v + 1);
+                    }}
+                      style={{ width:"100%", fontSize:9, fontWeight:800, padding:"7px 9px", borderRadius:7,
+                               cursor:"pointer", marginBottom:8, background:`${C.muted}10`,
+                               border:`1px solid ${C.muted}40`, color:C.muted }}>
+                      Clear booked flag on all {corrRisks.filter(r => r.type === "booked").length} legs here
+                    </button>
+                  )}
+                  {corrRisks.some(r => r.type === "unresolvable") && (
+                    <button onClick={() => {
+                      const targets = corrRisks.filter(r => r.type === "unresolvable");
+                      const updated = loadFailedLegs().filter(f => !targets.some(r =>
+                        f.game === r.game || (f.fixtureId && ticket.legs.find(l => l.game === r.game && l.fixtureId === f.fixtureId))
+                      ));
+                      persistFailedLegs(updated);
+                      setFailedLegsVersion(v => v + 1);
+                    }}
+                      style={{ width:"100%", fontSize:9, fontWeight:800, padding:"7px 9px", borderRadius:7,
+                               cursor:"pointer", marginBottom:8, background:`${C.muted}10`,
+                               border:`1px solid ${C.muted}40`, color:C.muted }}>
+                      Clear unresolvable flag on all {corrRisks.filter(r => r.type === "unresolvable").length} legs here
                     </button>
                   )}
                   {corrRisks.map((r, i) => {
