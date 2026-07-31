@@ -10,6 +10,15 @@ import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
 import { enrichGamesForDate, buildBasketballRolloverPool, buildBasketballRolloverPick } from "./BasketballEngine";
 import { toFixtureShape, getPickFamilies, getMarketStyle, getProgressLabel, getSportConfig } from "./sportConfig";
+// TEMP (2026-07-31): story-first CA verdict resolver + CA-verdict-based
+// parlay system engine. See caStoryVerdict.js's own banner comment for the
+// "steer away only" bug this fixes in computeCAVerdicts' Rule 3 below, and
+// parlaySystemEngine.mjs's for the ledger/occupancy rules behind the new
+// "CA Parlays" tab in ParlayJarvisTab. Both take zero SA input by design —
+// per the plan, this stays a valid subset once the merged CA/SA ensemble
+// architecture lands, not throwaway work.
+import { resolveStoryVerdict } from "./caStoryVerdict.js";
+import { legFromVerdict, runSystems } from "./parlaySystemEngine.mjs";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
@@ -1658,36 +1667,93 @@ export function computeCAVerdicts(caMatches, f) {
   const cleanPositive = positive.filter(c => eligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
   const cleanAvoid = avoid.filter(c => eligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
 
-  const scored = [
-    ...cleanPositive.map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
-    ...cleanAvoid.map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
-  ];
-
-  if (scored.length) {
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored[0];
+  // 2026-07-31 REPLACED (caStoryVerdict.js): the old top-pick here was
+  // `scored` (cleanPositive+cleanAvoid combined, ranked by caSafestScore,
+  // single winner in EITHER direction). Root cause of the "steer away only"
+  // complaint: when the winner happened to be an avoid signal and nothing
+  // positive independently cleared CA_MIN_HOLDOUT_HR, the fixture's
+  // headline verdict was "steer away from X" with nothing stakeable —
+  // insight, not a verdict. caStoryVerdict.js's resolveStoryVerdict fixes
+  // this by grouping evidence into match theses (home/away dominance, open
+  // game, slow game) and walking them best-first through MAIN then
+  // SUBSIDIARY markets until one clears the SAME bettable floor this file
+  // already uses (CA_MIN_HOLDOUT_HR/CA_MIN_ELIGIBLE_LIFT — it mirrors both
+  // constants rather than importing them, see that file's DUPLICATION NOTE
+  // for why). Only when every coherent thesis fails to produce a bettable
+  // market does it fall back to an avoid-direction headline — same
+  // "insight, not verdict" outcome as before, just no longer the FIRST
+  // thing tried. `cleanPositive`/`cleanAvoid` above stay in place — the
+  // second-lean pick below still uses caSafestScore off those pools
+  // unchanged, that's a different, unrelated feature (secondary lean from
+  // a different market family) than the "which is the top pick" bug fixed
+  // here.
+  const storyVerdict = resolveStoryVerdict(caMatches);
+  let topMarket = null;
+  if (storyVerdict.status === "MAIN" || storyVerdict.status === "SUBSIDIARY") {
+    topMarket = storyVerdict.market;
     verdicts.push({
-      type: "strongest-lean", market: top.c.market, holdoutHitRate: top.c.holdoutHitRate,
-      direction: top.isAvoid ? "avoid" : "positive",
-      text: top.isAvoid
-        ? `Steer away from ${CA_MARKET_SHORT(top.c.market)} — holdout only ${top.c.holdoutHitRate}% (${top.c.holdoutLift}pp vs baseline).`
-        : `${CA_MARKET_SHORT(top.c.market)} looks like the strongest clean lean here — holdout ${top.c.holdoutHitRate}% (+${top.c.holdoutLift}pp vs baseline).`,
+      type: "strongest-lean", market: storyVerdict.market, holdoutHitRate: storyVerdict.combo.holdoutHitRate,
+      direction: "positive", thesis: storyVerdict.thesis, confidence: storyVerdict.confidence,
+      text: storyVerdict.status === "MAIN"
+        ? `${CA_MARKET_SHORT(storyVerdict.market)} looks like the strongest clean lean here — holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp vs baseline).`
+        : `${CA_MARKET_SHORT(storyVerdict.market)} — fallback expression of the ${storyVerdict.thesis} story (main market not trusted enough), holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp).`,
     });
-
-    // Optional second lean (1 mandatory + 1 optional, per plan) — only from a
-    // DIFFERENT family than the top pick (otherwise it's the same story
-    // twice) and only if close enough in score to be worth a second line,
-    // rather than padding every fixture out to two leans by default.
-    const topFamily = caFamilyOf(top.c.market);
-    const second = scored.slice(1).find(e => caFamilyOf(e.c.market) !== topFamily && e.score >= top.score * CA_SECOND_LEAN_CLOSENESS);
-    if (second) {
+    if (storyVerdict.avoidNote) {
       verdicts.push({
-        type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
-        direction: second.isAvoid ? "avoid" : "positive",
-        text: second.isAvoid
-          ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
-          : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
+        type: "second-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
+        direction: "avoid",
+        text: `Also worth noting: steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp), a different market family.`,
       });
+    }
+  } else if (storyVerdict.avoidNote) {
+    // Genuine no-verdict: no coherent thesis produced a bettable market.
+    // The avoid note surfaces honestly as the headline (CAVerdictBlock
+    // already renders avoid-direction with no CTA — "insight, not a
+    // verdict" is a UI-level fact here, not something this function needs
+    // to encode further).
+    topMarket = storyVerdict.avoidNote.market;
+    verdicts.push({
+      type: "strongest-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
+      direction: "avoid",
+      text: `Steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout only ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp vs baseline). No positive story clears the floor on this fixture.`,
+    });
+  }
+
+  // Second lean (unchanged feature, re-scoped to exclude whatever market
+  // just became the headline above so the same market can't appear twice).
+  // Closeness gate preserved: only worth a second line if it scores within
+  // CA_SECOND_LEAN_CLOSENESS of the headline's own caSafestScore. The
+  // headline no longer comes from a caSafestScore ranking (it comes from
+  // resolveStoryVerdict), so its score is looked up here instead of reused
+  // from a prior sort — same floors (cleanPositive/cleanAvoid), so the
+  // headline's combo is found there whenever it cleared this function's
+  // own unclear-origin exclusion (the one case computeCAVerdicts checks
+  // that caStoryVerdict's own marketPasses doesn't). If it isn't found
+  // there, skip the closeness gate rather than guess — no second lean.
+  if (topMarket) {
+    const headlineInPositive = cleanPositive.find(c => c.market === topMarket);
+    const headlineInAvoid = !headlineInPositive ? cleanAvoid.find(c => c.market === topMarket) : null;
+    const headlineCombo = headlineInPositive || headlineInAvoid;
+    const topScore = headlineCombo
+      ? caSafestScore(headlineCombo, !!headlineInAvoid, cleanPositive, cleanAvoid, f)
+      : null;
+    const scored = [
+      ...cleanPositive.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
+      ...cleanAvoid.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
+    ];
+    if (scored.length && topScore != null && !verdicts.some(v => v.type === "second-lean")) {
+      scored.sort((a, b) => b.score - a.score);
+      const topFamily = caFamilyOf(topMarket);
+      const second = scored.find(e => caFamilyOf(e.c.market) !== topFamily && e.score >= topScore * CA_SECOND_LEAN_CLOSENESS);
+      if (second) {
+        verdicts.push({
+          type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
+          direction: second.isAvoid ? "avoid" : "positive",
+          text: second.isAvoid
+            ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
+            : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
+        });
+      }
     }
   }
 
@@ -14032,6 +14098,185 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
+// ── JARVIS CA SLATE (temp, 2026-07-31) — "CA Parlays" tab ──────────────────
+// Unlike JarvisTASlate above, this is NOT server-fetched. matchCAConditions,
+// caOddsFor, and `fixtures` are all already live in the browser at render
+// time (the CA Mix view a few thousand lines up computes the exact same
+// way), so recomputing here avoids porting CA matching logic into
+// server.js just to serve it back over an endpoint — that duplication is
+// exactly what several comments elsewhere in this file already flag as a
+// hand-sync burden ("has to be kept in sync by hand"). If this outgrows a
+// useMemo (needs scheduling, historical logging, cross-session caching —
+// the same reasons the TA engine lives server-side), move it there then.
+//
+// Pipeline: fixtures -> matchCAConditions -> resolveStoryVerdict ->
+// legFromVerdict -> runSystems(CA_PARLAY_SYSTEMS, legs). Zero SA input,
+// same as caStoryVerdict.js itself.
+//
+// CA_PARLAY_SYSTEMS below is a starting point, NOT validated — unlike the
+// TA engine's tiered/replay-tested configs (sweep -> learn-best -> replay
+// against the 801 fresh set, per the Parlay Engine devlog), these
+// thresholds haven't been swept against calibration or out-of-sample data.
+// Tune once there's enough CA Parlay outcome history to judge them by.
+const CA_PARLAY_SYSTEMS = [
+  // marketExclude here is belt-and-suspenders, not the primary control: with
+  // caStoryVerdict.js's STORY_MARKET_MAP already demoting TB:Home Over 1.5
+  // and TB:1X2-Away to SUBSIDIARY (801-fixture holdout: 60.3% n=68, 61.8%
+  // n=55 — thin, weak), tierScope: ["MAIN"] alone already keeps them out of
+  // this tier. This exclusion is a second, independent layer so that if
+  // STORY_MARKET_MAP is edited again later and one of these two gets
+  // reintroduced to a `main` list without the context of why it was pulled,
+  // CA Safe still won't admit it silently.
+  { name: "CA Safe", mode: "tier", priority: 1, tierScope: ["MAIN"],
+    marketExclude: ["TB:Home Over 1.5", "TB:1X2-Away"],
+    tiers: [{ name: "safe", minConfidence: 60, legsPerTicket: 2, maxTickets: 3 }] },
+  { name: "CA Balanced", mode: "tier", priority: 2,
+    tiers: [{ name: "balanced", minConfidence: 40, legsPerTicket: 3, maxTickets: 2 }] },
+  { name: "CA Longshot", mode: "stack", targetOddsMin: 5, targetOddsMax: 25, maxLegs: 6 },
+];
+
+function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTicket }) {
+  const [expanded, setExpanded] = useState(null);
+  const [usedIds, setUsedIds]   = useState(new Set());
+
+  const { caTickets, legCount } = useMemo(() => {
+    if (!appCaPatterns || !fixtures?.length) return { caTickets: [], legCount: 0 };
+    const legs = [];
+    for (const f of fixtures) {
+      const caMatches = matchCAConditions(f, appCaPatterns);
+      const verdict = resolveStoryVerdict(caMatches);
+      const leg = legFromVerdict(f, verdict, caOddsFor(f, verdict.market));
+      if (leg) legs.push(leg);
+    }
+    if (!legs.length) return { caTickets: [], legCount: 0 };
+    const { results } = runSystems(CA_PARLAY_SYSTEMS, legs);
+    const flat = results.flatMap(r => r.tickets.map(t => ({ ...t, systemName: r.systemName })));
+    return { caTickets: flat, legCount: legs.length };
+  }, [fixtures, appCaPatterns]);
+
+  if (!appCaPatterns || !fixtures?.length) {
+    return (
+      <div style={{ padding:"32px 0",textAlign:"center" }}>
+        <div style={{ fontSize:9,color:C.muted,letterSpacing:".1em" }}><span className="pu">Loading CA patterns…</span></div>
+      </div>
+    );
+  }
+
+  if (!caTickets.length) {
+    return (
+      <div style={{ padding:"32px 20px", textAlign:"center", display:"flex",
+                    flexDirection:"column", alignItems:"center", gap:10 }}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={C.muted}
+          strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity:.5 }}>
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <div style={{ fontSize:10, fontWeight:700, color:C.muted }}>No CA parlay tickets today</div>
+        <div style={{ fontSize:9, color:C.muted, opacity:.7, lineHeight:1.6, maxWidth:240 }}>
+          {legCount
+            ? `${legCount} fixture${legCount!==1?"s":""} cleared a bettable CA story, but none filled a full system ticket yet.`
+            : "No fixture cleared a bettable CA story for today."}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
+        <span style={{ fontSize:8, color:C.muted, letterSpacing:".06em" }}>
+          {caTickets.length} CA parlay{caTickets.length!==1?"s":""} · tap any to see legs
+        </span>
+        <span style={{ fontSize:7, fontWeight:800, color:C.accent, background:`${C.accent}15`,
+                       border:`1px solid ${C.accent}35`, borderRadius:5, padding:"2px 7px",
+                       letterSpacing:".06em", textTransform:"uppercase" }}>
+          CA
+        </span>
+      </div>
+
+      {caTickets.map((t) => {
+        const isOpen    = expanded === t.ticketId;
+        const isUsed    = usedIds.has(t.ticketId);
+        const legCountT = t.legs.length;
+        const mkts      = [...new Set(t.legs.map(l => l.market.replace(/^TB:/, "")))];
+        const mktStr    = mkts.length <= 2 ? mkts.join(" · ") : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
+        const avgConf   = Math.round(t.legs.reduce((s,l) => s + (l.confidence||0), 0) / legCountT);
+
+        return (
+          <div key={t.ticketId} style={{
+            background: C.surface,
+            border: `1px solid ${isOpen ? `${C.accent}80` : isUsed ? `${C.green}40` : C.border}`,
+            borderRadius: 10, overflow: "hidden", transition: "border-color .15s",
+          }}>
+            <div onClick={() => setExpanded(isOpen ? null : t.ticketId)} style={{ padding:"14px 16px", cursor:"pointer" }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+                <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                  <span style={{ fontSize:26, fontWeight:900, lineHeight:1, color: isUsed ? C.green : C.text }}>
+                    {t.combinedOdds ? `${(+t.combinedOdds).toFixed(2)}×` : "—"}
+                  </span>
+                  <span style={{ fontSize:9, color: avgConf>=60?C.green:avgConf>=40?C.gold:C.muted, fontWeight:700 }}>
+                    {avgConf}% conf
+                  </span>
+                </div>
+                {isUsed && (
+                  <span style={{ fontSize:7, fontWeight:700, color:C.green, background:`${C.green}12`,
+                                 border:`1px solid ${C.green}30`, borderRadius:4, padding:"2px 7px" }}>Added</span>
+                )}
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
+                <span style={{ fontSize:8, fontWeight:800, letterSpacing:".05em", color:C.accent, textTransform:"uppercase" }}>
+                  CA · {t.systemName}{t.tier ? ` (${t.tier})` : ""}
+                </span>
+                <span style={{ fontSize:7, color:C.muted, marginLeft:"auto" }}>
+                  {legCountT} leg{legCountT!==1?"s":""} · {mktStr}
+                </span>
+              </div>
+            </div>
+
+            {isOpen && (
+              <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
+                <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
+                  {t.legs.map((leg, li) => {
+                    const canOpen = !!(onFullModel && leg.fixtureId);
+                    return (
+                      <div key={li}
+                        onClick={canOpen ? () => onFullModel(leg.fixtureId) : undefined}
+                        style={{
+                          display:"flex", justifyContent:"space-between", alignItems:"center",
+                          padding:"7px 10px", background:C.bg, borderRadius:7,
+                          border:`1px solid ${C.border}`, cursor: canOpen ? "pointer" : "default",
+                        }}>
+                        <div style={{ minWidth:0, flex:1 }}>
+                          <div style={{ fontSize:9, color:C.text, fontWeight:700,
+                                        whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                            {leg.homeTeam || "?"} vs {leg.awayTeam || "?"}
+                          </div>
+                          <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
+                            {leg.market.replace(/^TB:/,"")}{leg.league ? ` · ${leg.league}` : ""} · {leg.tier}
+                          </div>
+                        </div>
+                        <div style={{ textAlign:"right", flexShrink:0, marginLeft:10 }}>
+                          {leg.odds
+                            ? <span style={{ fontSize:11, fontWeight:800, color:C.gold }}>{leg.odds}×</span>
+                            : <span style={{ fontSize:9, color:C.muted }}>—</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => { onUseTicket(t); setUsedIds(prev => new Set([...prev, t.ticketId])); setExpanded(null); }}
+                  className="gb-primary" style={{ width:"100%", padding:"11px 0", fontSize:11, fontWeight:800 }}>
+                  {isUsed ? "Re-add to Builder" : "Use This CA Parlay →"}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0, appSaPatterns = null, appCaPatterns = null }) {
   // Only the first ticket card (in render order) that actually has a leg-risk
   // flag should auto-open its explainer on entry — otherwise every flagged
@@ -15256,6 +15501,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                             border:`1px solid ${C.border}` }}>
                 {[
                   { id:"jarvis", label:"Jarvis",     desc:"AI-built ticket" },
+                  { id:"ca",     label:"CA Parlays", desc:"Story-based" },
                   { id:"custom", label:"Custom",     desc:"Your rules" },
                 ].map(m => {
                   const active = builderMode === m.id;
@@ -15333,6 +15579,55 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     // Replace any existing ticket from same strategy, else append
                     setTickets(prev => [
                       ...prev.filter(t => t._taStrategy !== strategy.id),
+                      newTicket,
+                    ]);
+                  }}
+                />
+              )}
+
+              {/* ── CA TAB — CA Parlays (story-first resolver + system engine) ── */}
+              {builderMode === "ca" && (
+                <JarvisCASlate
+                  fixtures={fixtures}
+                  appCaPatterns={appCaPatterns}
+                  date={date}
+                  C={C}
+                  onFullModel={onFullModel ? (fixtureId) => {
+                    const f = fixtures.find(x => x.id === fixtureId || String(x.id) === String(fixtureId));
+                    if (f) onFullModel(f);
+                  } : null}
+                  onUseTicket={(caTicket) => {
+                    // parlaySystemEngine leg shape -> ticket shape TicketCard expects
+                    // (fixtureId/market/odds/homeTeam/awayTeam/league/confidence, not
+                    // the TA engine's game/home/away/conf naming — mapped here rather
+                    // than changed upstream in the temp module, per its own "don't
+                    // rename my leg shape, wire against it" scope).
+                    const legs = caTicket.legs.map(l => ({
+                      fixtureId: l.fixtureId,
+                      game:      `${l.homeTeam || "?"} vs ${l.awayTeam || "?"}`,
+                      home:      l.homeTeam,
+                      away:      l.awayTeam,
+                      pick:      (l.market || "").replace(/^TB:/, ""),
+                      market:    (l.market || "").replace(/^TB:/, ""),
+                      league:    l.league || null,
+                      odds:      l.odds != null ? parseFloat(l.odds) : null,
+                      conf:      l.confidence != null ? parseFloat(l.confidence) : null,
+                    }));
+                    const totalOdds = parseFloat(
+                      legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2)
+                    );
+                    const newTicket = {
+                      id:          Date.now() + Math.random(),
+                      legs,
+                      totalOdds,
+                      isAuto:      true,
+                      slotLabel:   `CA · ${caTicket.systemName}${caTicket.tier ? ` (${caTicket.tier})` : ""}`,
+                      slotId:      caTicket.ticketId,
+                      jarvisMode:  "ca",
+                      _caSystem:   caTicket.ticketId,
+                    };
+                    setTickets(prev => [
+                      ...prev.filter(t => t.slotId !== caTicket.ticketId),
                       newTicket,
                     ]);
                   }}
