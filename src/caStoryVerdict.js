@@ -173,6 +173,22 @@ function familyGate(family) {
   return b ? computeGate(b.hr, b.n) : null;
 }
 
+// Minimum sample size for the SPECIFIC matched combo/pattern behind a pick
+// — independent of the gate above, which only knows the MARKET's aggregate
+// n (e.g. Away Over 0.5: n=232 from the table). A combo reporting 100% can
+// only mean its own underlying sample is tiny (2-3 fixtures) — the market
+// gate has no way to catch that, since it never looks at this specific
+// combo's own n at all. Below this floor, a combo is rejected regardless of
+// how good its hit rate looks, full stop. If a combo doesn't carry
+// holdoutSample at all, this can't check it and lets it through — that's a
+// data-completeness question for matchCAConditions, not this file's to fix.
+const CA_MIN_COMBO_SAMPLE = 10;
+
+function comboSampleTooThin(combo) {
+  const n = combo?.holdoutSample;
+  return n != null && n < CA_MIN_COMBO_SAMPLE;
+}
+
 // ── Step: does a single market clear, for THIS fixture? ────────────────────
 function bestComboFor(market, list) {
   return list.find(c => c.market === market) || null; // list is already best-first
@@ -183,6 +199,7 @@ function marketPasses(market, caMatches) {
   if (contradictoryMarkets.includes(market)) return null;
   const combo = bestComboFor(market, positive);
   if (!combo) return null;
+  if (comboSampleTooThin(combo)) return null; // e.g. "100%" on a 2-fixture sample — reject before it ever reaches the gate math
 
   // SCALE NOTE: this compares combo.holdoutHitRate (raw) against the RAW
   // market baseline, not the recalibrated rate. recalibratedHR() corrects a
