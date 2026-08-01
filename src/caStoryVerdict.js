@@ -85,11 +85,32 @@ const SHORT = m => (m || "").replace(/^TB:/, "");
 
 // ── Story <-> market map (Sterling's final architecture, 2026-07-31) ───────
 const STORY_MARKET_MAP = {
-  homeDominance: { main: ["TB:1X2-Home", "TB:Home Over 1.5"], subsidiary: ["TB:Home Over 0.5", "TB:DC1X"] },
-  awayDominance: { main: ["TB:1X2-Away", "TB:Away Over 1.5"], subsidiary: ["TB:Away Over 0.5", "TB:DCX2"] },
+  homeDominance:  { main: ["TB:1X2-Home", "TB:Home Over 1.5"], subsidiary: ["TB:DC1X"] },
+  awayDominance:  { main: ["TB:1X2-Away", "TB:Away Over 1.5"], subsidiary: ["TB:DCX2"] },
+  // Split out 2026-07-31: Home/Away Over 0.5 ("scores at least once") isn't
+  // a dominance signal — a team can go 5-for-5 losing and still clear it
+  // most weeks. This mirrors server.js's existing getGoalRadar concept
+  // (same "which team is likely to score" framing, already a real product
+  // feature under that name) — kept as its own thesis instead of folded
+  // into dominance's subsidiary pool, where it used to structurally win by
+  // default just for being an easy market. No subsidiary: Over 0.5 doesn't
+  // have a "safer fallback" version of itself in this taxonomy.
+  homeGoalRadar:  { main: ["TB:Home Over 0.5"], subsidiary: [] },
+  awayGoalRadar:  { main: ["TB:Away Over 0.5"], subsidiary: [] },
   openGame:      { main: ["TB:Over 2.5", "TB:BTTS"],          subsidiary: ["TB:Over 1.5"] },
   slowGame:      { main: ["TB:Under 3.5"],                    subsidiary: ["TB:Under 4.5"] },
 };
+
+// Theses that require independent confirmation the fixture is a genuine
+// strength mismatch before ANY of their markets — main or subsidiary — can
+// even be evaluated. Added 2026-07-31 per Sterling: 1X2/Over 1.5 clearing
+// their statistical gate isn't enough on its own to call "dominance" — a
+// cup-tie thrashing or a friendly against a weakened side can produce the
+// same market numbers as genuine quality gap. Gate is supplied by the
+// caller (App.jsx has xgHomeDominant/xgAwayDominant + f.competitionRisk
+// already) via the `dominanceGate` context field — see resolveThesisWinner.
+const DOMINANCE_GATED_THESES = new Set(["homeDominance", "awayDominance"]);
+const DOMINANCE_GATE_SIDE = { homeDominance: "home", awayDominance: "away" };
 
 // Which of the 4 direction buckets each market belongs to, for the
 // direction-level gate (step 5 above). Same grouping as App.jsx's
@@ -276,9 +297,24 @@ function modelAgreementFor(pass, getModelProb) {
 // corrob x modelAgreement) — not a lexicographic tie-break chain, which
 // would leave corroboration/direction/model-prob deciding almost nothing in
 // practice since margin is a continuous number that rarely ties exactly.
-function resolveThesisWinner(thesisName, caMatches, getModelProb) {
+function resolveThesisWinner(thesisName, caMatches, ctx = {}) {
   const map = STORY_MARKET_MAP[thesisName];
   if (!map) return null;
+
+  // Dominance gate: for homeDominance/awayDominance, the caller-supplied
+  // dominanceGate must confirm this is a genuine strength mismatch (xG gap)
+  // on an ordinary league fixture (not cup/friendly/international) BEFORE
+  // any market — main or subsidiary — is even evaluated. No gate supplied
+  // at all = not restricted (keeps this file usable/testable without every
+  // caller having to wire fixture-level xG data through); gate supplied and
+  // false = thesis produces nothing, full stop, regardless of how well
+  // 1X2/Over 1.5/DC clear their own statistical bar. A clean market gate on
+  // a cup-tie mismatch proves the RESULT was lopsided, not that it's a
+  // repeatable signal.
+  if (DOMINANCE_GATED_THESES.has(thesisName) && ctx.dominanceGate) {
+    const side = DOMINANCE_GATE_SIDE[thesisName];
+    if (!ctx.dominanceGate[side]) return null;
+  }
 
   const mainPasses = map.main.map(m => marketPasses(m, caMatches)).filter(Boolean);
   const subPasses  = map.subsidiary.map(m => marketPasses(m, caMatches)).filter(Boolean);
@@ -293,7 +329,7 @@ function resolveThesisWinner(thesisName, caMatches, getModelProb) {
 
   const candidates = pool.map(pass => {
     const corroboration = corrobFor(pass);
-    const modelAgreement = modelAgreementFor(pass, getModelProb);
+    const modelAgreement = modelAgreementFor(pass, ctx.getModelProb);
     const finalScore = pass.margin
       * (1 + CA_FAMILY_CORROB_BONUS * corroboration)
       * (1 + CA_DIRECTION_BONUS * (pass.directionClear ? 1 : 0))
@@ -325,34 +361,39 @@ function resolveThesisWinner(thesisName, caMatches, getModelProb) {
     note: `${SHORT(pass.market)} — ${thesisName} story, holdout ${pass.combo.holdoutHitRate}% vs its own ${gateR}% gate (+${marginR}pp clear)`
       + (winner.corroboration ? `, corroborated by ${winner.corroboration} other market${winner.corroboration !== 1 ? "s" : ""}` : "")
       + (pass.directionClear ? ", also clears its direction-level bar" : "")
-      + (getModelProb ? `, model agreement ${winner.modelAgreement >= 0 ? "+" : ""}${Math.round(winner.modelAgreement * 100) / 100}` : "")
+      + (ctx.getModelProb ? `, model agreement ${winner.modelAgreement >= 0 ? "+" : ""}${Math.round(winner.modelAgreement * 100) / 100}` : "")
       + ".",
   };
 }
 
-function allThesisWinners(caMatches, getModelProb) {
+function allThesisWinners(caMatches, ctx) {
   return Object.keys(STORY_MARKET_MAP)
-    .map(t => resolveThesisWinner(t, caMatches, getModelProb))
+    .map(t => resolveThesisWinner(t, caMatches, ctx))
     .filter(Boolean)
     .sort((a, b) => b.finalScore - a.finalScore); // strongest story overall — everything already spoke into finalScore
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────
-// getModelProb: optional (market) => number|null, bound by the caller to a
-// specific fixture (App.jsx: market => caModelProbFor(f, market)). Omit it
-// and model agreement is simply neutral (0) for every candidate — everything
-// else in the gate/corroboration/direction chain still runs.
+// ctx (optional): { getModelProb, dominanceGate }
+//   getModelProb: (market) => number|null, bound by the caller to a specific
+//     fixture (App.jsx: market => caModelProbFor(f, market)). Omit it and
+//     model agreement is neutral (0) for every candidate.
+//   dominanceGate: { home: bool, away: bool } — whether homeDominance/
+//     awayDominance are even eligible to fire for this fixture (App.jsx:
+//     xgHomeDominant(f) && !f.competitionRisk, same for away). Omit it and
+//     dominance theses are NOT restricted — see resolveThesisWinner's
+//     comment on why that's the deliberate default, not an oversight.
 // Returns exactly one of:
 //   { status: "MAIN"|"SUBSIDIARY", market, thesis, confidence, combo,
 //     recalHR, gate, margin, corroboration, directionClear, modelAgreement,
 //     finalScore, note, avoidNote }
 //   { status: "NO_VERDICT", reason, avoidNote }
-export function resolveStoryVerdict(caMatches, getModelProb) {
+export function resolveStoryVerdict(caMatches, ctx) {
   if (!caMatches || (!caMatches.positive?.length && !caMatches.avoid?.length)) {
     return { status: "NO_VERDICT", reason: "NO_EVIDENCE", avoidNote: null };
   }
   const avoidNote = strongestAvoidNote(caMatches);
-  const winners = allThesisWinners(caMatches, getModelProb);
+  const winners = allThesisWinners(caMatches, ctx);
   if (!winners.length) {
     return { status: "NO_VERDICT", reason: "NO_MARKET_CLEARED_ITS_GATE", avoidNote };
   }
@@ -370,7 +411,7 @@ export function resolveStoryVerdict(caMatches, getModelProb) {
 // stacked into one parlay as if they were independent evidence —
 // combinedOdds() in parlaySystemEngine.mjs multiplies odds assuming
 // independence, which same-story markets are not.
-export function resolveAllStoryVerdicts(caMatches, getModelProb) {
+export function resolveAllStoryVerdicts(caMatches, ctx) {
   if (!caMatches || (!caMatches.positive?.length && !caMatches.avoid?.length)) return [];
-  return allThesisWinners(caMatches, getModelProb);
+  return allThesisWinners(caMatches, ctx);
 }

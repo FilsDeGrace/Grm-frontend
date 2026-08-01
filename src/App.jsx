@@ -1687,7 +1687,18 @@ export function computeCAVerdicts(caMatches, f) {
   // unchanged, that's a different, unrelated feature (secondary lean from
   // a different market family) than the "which is the top pick" bug fixed
   // here.
-  const storyVerdict = resolveStoryVerdict(caMatches, market => caModelProbFor(f, market));
+  // 2026-07-31: dominanceGate reuses xgHomeDominant/xgAwayDominant (already
+  // defined for the SA filter list — home/away xG at least 2x the other side
+  // AND a >=1.0 gap) plus f.competitionRisk (server.js's existing cup/
+  // friendly/international classifier, newly exposed on the fixture object)
+  // — a market clearing its statistical gate on a cup-tie mismatch or a
+  // weakened-squad friendly isn't the same signal as clearing it in a normal
+  // league fixture with a real quality gap behind it.
+  const caStoryCtx = {
+    getModelProb: market => caModelProbFor(f, market),
+    dominanceGate: { home: xgHomeDominant(f) && !f.competitionRisk, away: xgAwayDominant(f) && !f.competitionRisk },
+  };
+  const storyVerdict = resolveStoryVerdict(caMatches, caStoryCtx);
   let topMarket = null;
   if (storyVerdict.status === "MAIN" || storyVerdict.status === "SUBSIDIARY") {
     topMarket = storyVerdict.market;
@@ -14153,7 +14164,10 @@ function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTic
       // winner, so a fixture with (say) both a homeDominance and a slowGame
       // story can offer two distinct-market legs, matching
       // parlaySystemEngine's existing "up to 3 markets per fixture" rule.
-      const verdicts = resolveAllStoryVerdicts(caMatches, market => caModelProbFor(f, market));
+      const verdicts = resolveAllStoryVerdicts(caMatches, {
+        getModelProb: market => caModelProbFor(f, market),
+        dominanceGate: { home: xgHomeDominant(f) && !f.competitionRisk, away: xgAwayDominant(f) && !f.competitionRisk },
+      });
       for (const verdict of verdicts) {
         const leg = legFromVerdict(f, verdict, caOddsFor(f, verdict.market));
         if (leg) { legs.push(leg); fixturesWithLegs.add(f.id); }
