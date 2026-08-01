@@ -27,9 +27,11 @@
 // left — they're unbounded by design (stack until exhausted), so running
 // them first would starve every tiered system behind them.
 
-// ── Leg shape ────────────────────────────────────────────────────────────
-// { fixtureId, market, tier: "MAIN"|"SUBSIDIARY", thesis, confidence,
-//   recalHR, odds, league, kickoff, homeTeam, awayTeam }
+// FIXED 2026-07-31: was reading fixture.homeTeam / fixture.home, which
+// don't exist on your fixture objects — every leg rendered "? vs ?" as a
+// result. Real shape (confirmed against 40+ usages elsewhere in App.jsx) is
+// fixture.teams.home / fixture.teams.away. Old guesses kept as fallback in
+// case a caller ever passes a differently-shaped fixture object.
 export function legFromVerdict(fixture, verdict, odds) {
   if (!verdict || (verdict.status !== "MAIN" && verdict.status !== "SUBSIDIARY")) return null;
   return {
@@ -42,8 +44,8 @@ export function legFromVerdict(fixture, verdict, odds) {
     odds: odds ?? null,
     league: fixture.league ?? null,
     kickoff: fixture.kickoff ?? fixture.date ?? null,
-    homeTeam: fixture.homeTeam ?? fixture.home ?? null,
-    awayTeam: fixture.awayTeam ?? fixture.away ?? null,
+    homeTeam: fixture.teams?.home ?? fixture.homeTeam ?? fixture.home ?? null,
+    awayTeam: fixture.teams?.away ?? fixture.awayTeam ?? fixture.away ?? null,
   };
 }
 

@@ -17,7 +17,7 @@ import { toFixtureShape, getPickFamilies, getMarketStyle, getProgressLabel, getS
 // "CA Parlays" tab in ParlayJarvisTab. Both take zero SA input by design —
 // per the plan, this stays a valid subset once the merged CA/SA ensemble
 // architecture lands, not throwaway work.
-import { resolveStoryVerdict } from "./caStoryVerdict.js";
+import { resolveStoryVerdict, resolveAllStoryVerdicts } from "./caStoryVerdict.js";
 import { legFromVerdict, runSystems } from "./parlaySystemEngine.mjs";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
@@ -1687,7 +1687,7 @@ export function computeCAVerdicts(caMatches, f) {
   // unchanged, that's a different, unrelated feature (secondary lean from
   // a different market family) than the "which is the top pick" bug fixed
   // here.
-  const storyVerdict = resolveStoryVerdict(caMatches);
+  const storyVerdict = resolveStoryVerdict(caMatches, market => caModelProbFor(f, market));
   let topMarket = null;
   if (storyVerdict.status === "MAIN" || storyVerdict.status === "SUBSIDIARY") {
     topMarket = storyVerdict.market;
@@ -14119,16 +14119,16 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 // thresholds haven't been swept against calibration or out-of-sample data.
 // Tune once there's enough CA Parlay outcome history to judge them by.
 const CA_PARLAY_SYSTEMS = [
-  // marketExclude here is belt-and-suspenders, not the primary control: with
-  // caStoryVerdict.js's STORY_MARKET_MAP already demoting TB:Home Over 1.5
-  // and TB:1X2-Away to SUBSIDIARY (801-fixture holdout: 60.3% n=68, 61.8%
-  // n=55 — thin, weak), tierScope: ["MAIN"] alone already keeps them out of
-  // this tier. This exclusion is a second, independent layer so that if
-  // STORY_MARKET_MAP is edited again later and one of these two gets
-  // reintroduced to a `main` list without the context of why it was pulled,
-  // CA Safe still won't admit it silently.
+  // NOTE (2026-07-31): the marketExclude patch that used to sit here
+  // (blocking TB:Home Over 1.5 / TB:1X2-Away from CA Safe outright) is
+  // removed — it was compensating for caStoryVerdict.js v1's flat-floor bug,
+  // which let those two win on a bar too easy for their thin samples. v2
+  // gives every market its own statistically-sized gate (baseline + SE
+  // buffer, bigger buffer for thinner samples), so those two now only clear
+  // MAIN when they've genuinely earned it on THIS fixture — no separate
+  // exclusion needed, and keeping one would have wrongly blocked a
+  // legitimately-cleared pick.
   { name: "CA Safe", mode: "tier", priority: 1, tierScope: ["MAIN"],
-    marketExclude: ["TB:Home Over 1.5", "TB:1X2-Away"],
     tiers: [{ name: "safe", minConfidence: 60, legsPerTicket: 2, maxTickets: 3 }] },
   { name: "CA Balanced", mode: "tier", priority: 2,
     tiers: [{ name: "balanced", minConfidence: 40, legsPerTicket: 3, maxTickets: 2 }] },
@@ -14139,19 +14139,30 @@ function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTic
   const [expanded, setExpanded] = useState(null);
   const [usedIds, setUsedIds]   = useState(new Set());
 
-  const { caTickets, legCount } = useMemo(() => {
-    if (!appCaPatterns || !fixtures?.length) return { caTickets: [], legCount: 0 };
+  const { caTickets, legCount, fixtureCount } = useMemo(() => {
+    if (!appCaPatterns || !fixtures?.length) return { caTickets: [], legCount: 0, fixtureCount: 0 };
     const legs = [];
+    const fixturesWithLegs = new Set();
     for (const f of fixtures) {
       const caMatches = matchCAConditions(f, appCaPatterns);
-      const verdict = resolveStoryVerdict(caMatches);
-      const leg = legFromVerdict(f, verdict, caOddsFor(f, verdict.market));
-      if (leg) legs.push(leg);
+      // FIXED 2026-07-31: was resolveStoryVerdict (single best market per
+      // fixture), which meant a fixture could contribute at most ONE leg to
+      // the whole pool no matter how many stories cleared the floor — the
+      // reason 70+ CA-pattern fixtures were only ever producing a couple of
+      // tickets. resolveAllStoryVerdicts returns every coherent thesis's
+      // winner, so a fixture with (say) both a homeDominance and a slowGame
+      // story can offer two distinct-market legs, matching
+      // parlaySystemEngine's existing "up to 3 markets per fixture" rule.
+      const verdicts = resolveAllStoryVerdicts(caMatches, market => caModelProbFor(f, market));
+      for (const verdict of verdicts) {
+        const leg = legFromVerdict(f, verdict, caOddsFor(f, verdict.market));
+        if (leg) { legs.push(leg); fixturesWithLegs.add(f.id); }
+      }
     }
-    if (!legs.length) return { caTickets: [], legCount: 0 };
+    if (!legs.length) return { caTickets: [], legCount: 0, fixtureCount: 0 };
     const { results } = runSystems(CA_PARLAY_SYSTEMS, legs);
     const flat = results.flatMap(r => r.tickets.map(t => ({ ...t, systemName: r.systemName })));
-    return { caTickets: flat, legCount: legs.length };
+    return { caTickets: flat, legCount: legs.length, fixtureCount: fixturesWithLegs.size };
   }, [fixtures, appCaPatterns]);
 
   if (!appCaPatterns || !fixtures?.length) {
@@ -14174,7 +14185,7 @@ function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTic
         <div style={{ fontSize:10, fontWeight:700, color:C.muted }}>No CA parlay tickets today</div>
         <div style={{ fontSize:9, color:C.muted, opacity:.7, lineHeight:1.6, maxWidth:240 }}>
           {legCount
-            ? `${legCount} fixture${legCount!==1?"s":""} cleared a bettable CA story, but none filled a full system ticket yet.`
+            ? `${fixtureCount} fixture${fixtureCount!==1?"s":""} cleared a bettable CA story (${legCount} leg${legCount!==1?"s":""} total), but none filled a full system ticket yet.`
             : "No fixture cleared a bettable CA story for today."}
         </div>
       </div>
