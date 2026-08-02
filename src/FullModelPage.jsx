@@ -34,6 +34,7 @@ import {
   copyToClipboard,
   matchCAConditions,
   computeCAVerdicts,
+  resolveCAVerdictHeadline,
   caPatternStrength,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
@@ -1411,12 +1412,11 @@ function CAVerdictBlock({ verdicts }) {
   // there's a positive lean to show instead — it becomes a smaller insight
   // note (its own red color, not the headline), and the positive lean takes
   // the headline + CTA in its place.
-  let headline = top;
-  let demotedAvoid = null;
-  if (top && top.direction === "avoid") {
-    const promoted = verdicts.find(v => v !== top && (v.direction === "positive" || v.type === "best-value"));
-    if (promoted) { headline = promoted; demotedAvoid = top; }
-  }
+  // 2026-08-02: promotion rule itself now lives in resolveCAVerdictHeadline
+  // (App.jsx) — shared with the Custom List Verdict row so the two surfaces
+  // can never pick a different headline for the same fixture.
+  const headline = resolveCAVerdictHeadline(verdicts);
+  const demotedAvoid = (headline && headline !== top) ? top : null;
   const rest = verdicts.filter(v => v !== headline && v !== demotedAvoid);
   const scrollToCustomPick = () => {
     document.getElementById("grm-custom-pick-anchor")?.scrollIntoView({ behavior: "smooth", block: "center" });
