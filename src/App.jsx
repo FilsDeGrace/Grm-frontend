@@ -20207,7 +20207,7 @@ function GRMProInner() {
           engineFixtureIds={engineFixtureIds}
           onAddLegToDraft={addLegToDraft}
           adminToken={adminToken}
-          onFullModel={f => { setParlayJarvisOpen(false); setFullModelReturnTab("parlay"); setMainFocusFixture(f); }}
+          onFullModel={onFullModelFromParlay}
           jarvisBuiltTicket={jarvisBuiltTicket}
           onJarvisBuiltTicketConsumed={() => setJarvisBuiltTicket(null)}
           grmInboundCode={grmInboundCode}
