@@ -2906,6 +2906,24 @@ async function fetchServerDate() {
 }
 const todayStr = () => window.__grmServerDate || _serverDateCache || new Date().toISOString().split("T")[0];
 
+// KICK-DATE-FIX (2026-08-02): f.time is a localized "HH:MM" string (WAT, UTC+1,
+// fixed offset — no DST) but carries no date, and f.date is the snapshot bucket
+// a fixture was grouped under, which is not always the fixture's true local
+// calendar date — e.g. a 00:00-03:00 local kickoff can get bucketed into the
+// previous day's snapshot by the data source. Derive the actual local calendar
+// date from the unambiguous startingAt (UTC) timestamp so date-sensitive filters
+// can tell "today, early" apart from "actually tomorrow". WAT_OFFSET_MIN is
+// confirmed empirically (2026-08-02 snapshot: startingAt 00:00:00Z + 60min ->
+// 01:00 local, matching that fixture's f.time exactly) — revisit if a fixture
+// ever surfaces with a different observed offset.
+const WAT_OFFSET_MIN = 60;
+function getFixtureLocalDate(f) {
+  if (!f?.startingAt) return f?.date || null;
+  const utcMs = Date.parse(f.startingAt);
+  if (isNaN(utcMs)) return f.date || null;
+  return new Date(utcMs + WAT_OFFSET_MIN * 60000).toISOString().split("T")[0];
+}
+
 // 49-FIX: single source of truth for league filter matching, used at every
 // leagueFilter application site so include/exclude mode stays consistent
 // everywhere instead of needing the flip applied at 6+ separate call sites.
@@ -3812,7 +3830,7 @@ const IcoCheckSm = ({size=9,col}) => (
   </svg>
 );
 
-export function StatusBadge({ state, time, minute, date }) {
+export function StatusBadge({ state, time, minute, date, startingAt }) {
   const s = (state || "").toLowerCase().replace(/[_\-\s]/g, "");
   // Live / in-play states
   if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
@@ -3849,7 +3867,12 @@ export function StatusBadge({ state, time, minute, date }) {
   // another date (multi-date calendar, FMP deep links, the +/- kickoff-window
   // buffer) looked identical to a same-day one. Only shown when it isn't
   // today, to avoid cluttering the common single-date case.
-  const dateLabel = date && date !== todayStr() ? fmtDateLabel(date) : null;
+  // KICK-DATE-FIX (2026-08-02): compare against the fixture's true local
+  // kickoff date, not just its snapshot bucket date — same fix as the kickoff
+  // filter, applied here so an early-hours spillover fixture (bucketed under
+  // today but actually tomorrow) is flagged too, on both the main list and FMP.
+  const trueDate  = startingAt ? (getFixtureLocalDate({ startingAt, date }) || date) : date;
+  const dateLabel = trueDate && trueDate !== todayStr() ? fmtDateLabel(trueDate) : null;
   return (
     <span style={{ display:"inline-flex",alignItems:"center",gap:3,fontSize:9,color:C.text }}>
       <IcoClock col={C.muted} size={8}/>
@@ -5073,7 +5096,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
               In Draft
             </span>
           )}
-          <StatusBadge state={displayF.state} time={f.time} minute={displayF.minute} date={f.date} />
+          <StatusBadge state={displayF.state} time={f.time} minute={displayF.minute} date={f.date} startingAt={f.startingAt} />
           {displayF.hGoals != null && (
             <span style={{ fontSize:12, fontWeight:800, color:C.text,
                            padding:"1px 8px", background:C.surface, borderRadius:5 }}>
@@ -5401,7 +5424,7 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
                 <div style={{ fontSize:8,color:C.text }}>{f.teams.home} vs {f.teams.away} · {f.league}</div>
               </div>
               <div style={{ fontSize:8,color:C.text,textAlign:"center" }}>
-                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} startingAt={f.startingAt} />
               </div>
               <span style={{ fontSize:13,fontWeight:800,color:C.radar }}>{Math.round(e.prob)}%</span>
               <span style={{ fontSize:10,fontWeight:700,color:C.text,textAlign:"right" }}>
@@ -5438,8 +5461,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [selected,       setSelected]       = useState(null);
   const [activeStrategy, setActiveStrategyState] = useState(() => loadSS("activeStrategy", null));
   const [advancedOpen,   setAdvancedOpen]   = useState(false);
-  // Kickoff time filter — "before" (≤ HH:MM) or "after" (≥ HH:MM)
-  const [kickoffFilter, setKickoffFilter] = useState(null); // null | { mode:"before"|"after", hour:number }
+  // Kickoff time filter — before (≤ HH:00) and after (≥ HH:00) are independent
+  // and combinable, forming a window when both are set (e.g. after 14:00 AND
+  // before 20:00). KICK-RANGE-FIX (2026-08-02): previously mutually exclusive.
+  const [kickoffFilter, setKickoffFilter] = useState(null); // null | { before:number|null, after:number|null }
   // PROB-FIX (2026-07-08): Pick-probability threshold filter — mirrors the kickoff
   // filter's UX exactly (mode toggle + value buttons, not persisted to sessionStorage,
   // same as kickoffFilter). Requested by Sterling to solve two related problems:
@@ -6098,9 +6123,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (kickoffFilter && row.f.time) {
           const [hh, mm] = row.f.time.split(":").map(Number);
           const mins = hh * 60 + (mm || 0);
-          const filterMins = kickoffFilter.hour * 60;
-          if (kickoffFilter.mode === "before" && mins > filterMins) return false;
-          if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+          // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+          // differs from the snapshot date it's bucketed under (early-morning
+          // spillover into the next calendar day) shouldn't satisfy either side
+          // of a same-day kickoff-time window.
+          const crossesDay = getFixtureLocalDate(row.f) !== row.f.date;
+          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) return false
+          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) return false
         }
         // PROB-FIX: pick probability threshold — floor (above) or ceiling (below)
         // on the actually-displayed pick's prob, so Select All can be scoped safely.
@@ -6188,9 +6217,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (kickoffFilter && f.time) {
           const [hh, mm] = f.time.split(":").map(Number);
           const mins = hh * 60 + (mm || 0);
-          const filterMins = kickoffFilter.hour * 60;
-          if (kickoffFilter.mode === "before" && mins > filterMins) continue;
-          if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+          // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+          // differs from the snapshot date it's bucketed under (early-morning
+          // spillover into the next calendar day) shouldn't satisfy either side
+          // of a same-day kickoff-time window.
+          const crossesDay = getFixtureLocalDate(f) !== f.date;
+          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue
+          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue
         }
         if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
         if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
@@ -6270,9 +6303,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (kickoffFilter && row.f.time) {
           const [hh, mm] = row.f.time.split(":").map(Number);
           const mins = hh * 60 + (mm || 0);
-          const filterMins = kickoffFilter.hour * 60;
-          if (kickoffFilter.mode === "before" && mins > filterMins) return false;
-          if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+          // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+          // differs from the snapshot date it's bucketed under (early-morning
+          // spillover into the next calendar day) shouldn't satisfy either side
+          // of a same-day kickoff-time window.
+          const crossesDay = getFixtureLocalDate(row.f) !== row.f.date;
+          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) return false
+          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) return false
         }
         // PROB-FIX: pick probability threshold, same semantics as Pick-market rows
         if (probFilter && row.pick?.prob != null) {
@@ -6400,9 +6437,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       if (kickoffFilter && row.f.time) {
         const [hh, mm] = row.f.time.split(":").map(Number);
         const mins = hh * 60 + (mm || 0);
-        const filterMins = kickoffFilter.hour * 60;
-        if (kickoffFilter.mode === "before" && mins > filterMins) return false;
-        if (kickoffFilter.mode === "after"  && mins < filterMins) return false;
+        // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+        // differs from the snapshot date it's bucketed under (early-morning
+        // spillover into the next calendar day) shouldn't satisfy either side
+        // of a same-day kickoff-time window.
+        const crossesDay = getFixtureLocalDate(row.f) !== row.f.date;
+        if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) return false
+        if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) return false
       }
       // PROB-FIX: pick probability threshold — narrows the lift-sorted list to a
       // probability floor/ceiling without changing the lift sort order itself.
@@ -6485,9 +6526,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (kickoffFilter && f.time) {
           const [hh, mm] = f.time.split(":").map(Number);
           const mins = hh * 60 + (mm || 0);
-          const filterMins = kickoffFilter.hour * 60;
-          if (kickoffFilter.mode === "before" && mins > filterMins) continue;
-          if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+          // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+          // differs from the snapshot date it's bucketed under (early-morning
+          // spillover into the next calendar day) shouldn't satisfy either side
+          // of a same-day kickoff-time window.
+          const crossesDay = getFixtureLocalDate(f) !== f.date;
+          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue
+          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue
         }
         if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
         if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
@@ -6628,9 +6673,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       if (kickoffFilter && f.time) {
         const [hh, mm] = f.time.split(":").map(Number);
         const mins = hh * 60 + (mm || 0);
-        const filterMins = kickoffFilter.hour * 60;
-        if (kickoffFilter.mode === "before" && mins > filterMins) continue;
-        if (kickoffFilter.mode === "after"  && mins < filterMins) continue;
+        // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
+        // differs from the snapshot date it's bucketed under (early-morning
+        // spillover into the next calendar day) shouldn't satisfy either side
+        // of a same-day kickoff-time window.
+        const crossesDay = getFixtureLocalDate(f) !== f.date;
+        if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue
+        if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue
       }
       if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
       if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
@@ -6744,16 +6793,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // Uses text inputMode="decimal" to avoid Android keyboard-close bug.
   // Issue 9 fix: commits value on Enter key AND via 600ms debounce so users don't
   // have to tap the screen after typing — the filter activates automatically.
-  const ThrChip = ({ label, id, value, setValue, min, max, step=1, col=C.gold }) => {
+  const ThrChip = ({ label, id, value, setValue, min, max, step=1, col=C.gold, defaultValue }) => {
     const [localVal, setLocalVal] = useState("");
     const debounceRef = useRef(null);
 
     const isOn = statFilters.includes(id) && value != null;
     const currentDir = dir(id); // "gte" | "lte" from parent thrDirs state
+    const startVal = defaultValue ?? min;
 
     useEffect(() => { if (value != null) setLocalVal(String(value)); }, [value]);
 
-    const activate   = () => { setValue(min); activateStat(id); setLocalVal(String(min)); };
+    const activate   = () => { setValue(startVal); activateStat(id); setLocalVal(String(startVal)); };
     const deactivate = () => { deactivateStat(id); setValue(null); setLocalVal(""); };
 
     const commitVal = () => {
@@ -7548,7 +7598,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             );
           })}
         </div>
-        {/* Kickoff time filter */}
+        {/* Kickoff time filter — KICK-RANGE-FIX (2026-08-02): Before and After
+            are now independent toggles that can both be active at once, forming
+            a window (e.g. after 14:00 AND before 20:00). Each also excludes any
+            fixture whose true local kickoff date differs from its snapshot
+            bucket date (see getFixtureLocalDate) so a "before 09:00" filter no
+            longer picks up 00:00-03:00 games that actually belong to tomorrow. */}
         <div style={{ marginTop:9 }}>
           <div style={{ fontSize:8,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>
             Kickoff time
@@ -7559,42 +7614,50 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </button>
             )}
           </div>
-          <div style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
-            {/* Mode toggle: Before / After */}
-            {["before","after"].map(mode => {
-              const isActive = kickoffFilter?.mode === mode;
-              return (
-                <button key={mode} onClick={() => setKickoffFilter(prev =>
-                  prev?.mode === mode ? null : { mode, hour: prev?.hour ?? 18 }
-                )} className="gb"
+          {["after","before"].map(side => {
+            const isActive = kickoffFilter?.[side] != null;
+            const toggle = () => setKickoffFilter(prev => {
+              if (isActive) {
+                // Turning this side off — keep the other side if it's set, else clear entirely
+                const other = side === "before" ? prev?.after : prev?.before;
+                return other != null ? { before: side === "before" ? null : prev.before,
+                                          after:  side === "after"  ? null : prev.after } : null;
+              }
+              return { before: prev?.before ?? null, after: prev?.after ?? null, [side]: 18 };
+            });
+            const setHour = (h) => setKickoffFilter(prev => ({ before: prev?.before ?? null, after: prev?.after ?? null, [side]: h }));
+            return (
+              <div key={side} style={{ display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:4 }}>
+                <button onClick={toggle} className="gb"
                   style={{ padding:"4px 10px",fontSize:9,textTransform:"none",flexShrink:0,
                            ...(isActive ? chipOn(C.accent) : chipOff) }}>
-                  {mode === "before" ? "≤ Before" : "≥ After"}
+                  {side === "before" ? "≤ Before" : "≥ After"}
                 </button>
-              );
-            })}
-            {/* Hour selector — only shown when a mode is active */}
-            {kickoffFilter && (
-              <div style={{ display:"flex",gap:4,flexWrap:"wrap" }}>
-                {[9,12,14,15,16,17,18,19,20,21,22].map(h => {
-                  const isOn = kickoffFilter.hour === h;
-                  return (
-                    <button key={h} onClick={() => setKickoffFilter(prev => ({ ...prev, hour: h }))}
-                      className="gb"
-                      style={{ padding:"4px 8px",fontSize:9,textTransform:"none",flexShrink:0,
-                               ...(isOn ? chipOn(C.gold) : chipOff) }}>
-                      {String(h).padStart(2,"0")}:00
-                    </button>
-                  );
-                })}
+                {isActive && (
+                  <div style={{ display:"flex",gap:4,flexWrap:"wrap" }}>
+                    {[9,12,14,15,16,17,18,19,20,21,22].map(h => {
+                      const isOn = kickoffFilter[side] === h;
+                      return (
+                        <button key={h} onClick={() => setHour(h)}
+                          className="gb"
+                          style={{ padding:"4px 8px",fontSize:9,textTransform:"none",flexShrink:0,
+                                   ...(isOn ? chipOn(C.gold) : chipOff) }}>
+                          {String(h).padStart(2,"0")}:00
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          {kickoffFilter && (
+            );
+          })}
+          {kickoffFilter && (kickoffFilter.before != null || kickoffFilter.after != null) && (
             <div style={{ fontSize:8,color:C.muted,marginTop:4,lineHeight:1.5 }}>
-              {kickoffFilter.mode === "before"
-                ? `Showing games kicking off at or before ${String(kickoffFilter.hour).padStart(2,"0")}:00`
-                : `Showing games kicking off at or after ${String(kickoffFilter.hour).padStart(2,"0")}:00`}
+              {kickoffFilter.after != null && kickoffFilter.before != null
+                ? `Showing today's games kicking off between ${String(kickoffFilter.after).padStart(2,"0")}:00 and ${String(kickoffFilter.before).padStart(2,"0")}:00`
+                : kickoffFilter.before != null
+                ? `Showing today's games kicking off at or before ${String(kickoffFilter.before).padStart(2,"0")}:00`
+                : `Showing today's games kicking off at or after ${String(kickoffFilter.after).padStart(2,"0")}:00`}
             </div>
           )}
         </div>
@@ -7751,8 +7814,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             <div>
               <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>Clean Sheet</div>
               <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
-                <ThrChip label="Home CS" id="cs_home" value={thrHCS} setValue={setThrHCS} min={15} max={70} step={5} col={C.green} />
-                <ThrChip label="Away CS" id="cs_away" value={thrACS} setValue={setThrACS} min={15} max={70} step={5} col={C.green} />
+                {/* CS-MIN-FIX (2026-08-02): floor was 15, which silently clamped any
+                    typed value below it (e.g. entering 5 got forced back up to 15) —
+                    blocked filtering for weak-defense fixtures in "≤" direction too. */}
+                <ThrChip label="Home CS" id="cs_home" value={thrHCS} setValue={setThrHCS} min={0} max={70} step={5} defaultValue={15} col={C.green} />
+                <ThrChip label="Away CS" id="cs_away" value={thrACS} setValue={setThrACS} min={0} max={70} step={5} defaultValue={15} col={C.green} />
               </div>
             </div>
             <div>
@@ -7956,7 +8022,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ minWidth:0 }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
                 <div style={{ fontSize:8,color:C.text,marginTop:1,display:"flex",gap:5,alignItems:"center" }}>
-                  <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
+                  <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} startingAt={f.startingAt} />
                   {f.league && <span style={{ overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{f.league}</span>}
                 </div>
                 <div style={{ fontSize:9,fontWeight:700,color:pick.color||C.text,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:4 }}>
@@ -8042,7 +8108,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 </div>
               </div>
               <div style={{ alignSelf:"center",fontSize:9,color:C.text }}>
-                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} />
+                <StatusBadge state={f.state} time={f.time} minute={f.minute} date={f.date} startingAt={f.startingAt} />
               </div>
               <div style={{ alignSelf:"center" }}>
                 <div style={{ fontSize:10,fontWeight:700,color:C.text,lineHeight:1.3 }}>{f.teams.home} <span style={{ color:C.text,opacity:.3 }}>vs</span> {f.teams.away}</div>
