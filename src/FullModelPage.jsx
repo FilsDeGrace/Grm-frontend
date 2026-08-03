@@ -36,6 +36,7 @@ import {
   computeCAVerdicts,
   resolveCAVerdictHeadline,
   caPatternStrength,
+  SC_MARKET_LABELS,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
@@ -1667,6 +1668,61 @@ function pickCATopSlots(list, isAvoid) {
   return picked;
 }
 
+// SettlementConditionsSection — deliberately much simpler than
+// ConditionStrategySection above: no pill-per-market drilldown, no
+// top-slots/emerging/traps machinery to reproduce, because scFlags is
+// already the finished answer (one flag per market, computed server-side).
+// Just lists every market that got a flag, favorable ones first.
+function SettlementConditionsSection({ scFlags, scError, scModeEnabled, scLoading }) {
+  if (!scModeEnabled) return null;
+  if (scLoading) return (
+    <SectionPanel label="Settlement Conditions">
+      <div style={{ padding: "12px 16px", fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+        <span className="pu">Checking settlement conditions…</span>
+      </div>
+    </SectionPanel>
+  );
+  if (scError) return (
+    <SectionPanel label="Settlement Conditions">
+      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted }}>{scError}</div>
+    </SectionPanel>
+  );
+  const entries = Object.entries(scFlags || {});
+  if (!entries.length) return (
+    <SectionPanel label="Settlement Conditions">
+      <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
+        <CAIconNone color={C.muted} />
+        No settlement-condition pattern matches this fixture right now.
+      </div>
+    </SectionPanel>
+  );
+  const order = { favorable: 0, conflicted: 1, unfavorable: 2 };
+  entries.sort((a, b) => (order[a[1].status] ?? 3) - (order[b[1].status] ?? 3));
+  return (
+    <SectionPanel label="Settlement Conditions">
+      <div style={{ padding: "4px 0" }}>
+        {entries.map(([marketKey, flag]) => {
+          const label = SC_MARKET_LABELS.find(m => m.id === marketKey)?.label || marketKey;
+          const color = flag.status === "favorable" ? C.purple : flag.status === "conflicted" ? C.amber : C.red;
+          const Icon = flag.status === "favorable" ? CAIconCheck : flag.status === "conflicted" ? CAIconVerdict : CAIconAvoid;
+          return (
+            <div key={marketKey} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 14px" }}>
+              <Icon size={12} color={color} />
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{label}
+                  <span style={{ marginLeft: 6, fontSize: 8, color, textTransform: "uppercase", letterSpacing: ".05em" }}>{flag.status}</span>
+                </div>
+                <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 2 }}>{flag.reason}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </SectionPanel>
+  );
+}
+
+
 function ConditionStrategySection({ f, caMatches, caError, caModeEnabled, caLoading }) {
   const [selectedMarket, setSelectedMarket] = useState("__top__");
   const selectMarket = (m) => setSelectedMarket(m);
@@ -2258,7 +2314,7 @@ function ExternalPredictions({ fixture, onAddToParlay }) {
   );
 }
 
-export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLegs, backtestSummary, caModeEnabled }) {
+export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLegs, backtestSummary, caModeEnabled, scModeEnabled }) {
   const m         = f.markets;
   const scrollRef = useRef(null);
 
@@ -2368,6 +2424,30 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
     return () => { cancelled = true; };
   }, [caModeEnabled]);
   const caMatches = caModeEnabled && caPatterns ? matchCAConditions(f, caPatterns) : { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [], traps: [] };
+
+  // ── SETTLEMENT CONDITIONS (SC) ────────────────────────────────────────────
+  // Unlike CA above, there's no client-side matching call here at all —
+  // POST /api/sc-match already returns the final per-market flags
+  // (favorable/unfavorable/conflicted). Same isolation pattern as CA:
+  // fetches once per mount, only when scModeEnabled is on, one-fixture array
+  // since FMP only ever needs this one game's flags.
+  const [scFlags, setScFlags] = useState(null);
+  const [scError, setScError] = useState(null);
+  const [scLoading, setScLoading] = useState(false);
+  useEffect(() => {
+    if (!scModeEnabled) { setScFlags(null); setScError(null); setScLoading(false); return; }
+    let cancelled = false;
+    setScLoading(true);
+    fetch(`${SERVER}/api/sc-match`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: [{ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds }] }),
+    })
+      .then(r => r.json())
+      .then(d => { if (!cancelled) { const r = d?.results?.[f.id]; if (r) setScFlags(r.flags); else setScError(d?.error || "No settlement-condition data"); } })
+      .catch(e => { if (!cancelled) setScError(e.message); })
+      .finally(() => { if (!cancelled) setScLoading(false); });
+    return () => { cancelled = true; };
+  }, [scModeEnabled, f.id]);
 
   // All explainers computed once
   const isBBSport = f._sport === "basketball";
@@ -3473,6 +3553,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             Self-gates on caModeEnabled and renders nothing at all when off or
             when there are no matches, so it never adds empty visual clutter. */}
         <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} caLoading={caLoading} />
+        <SettlementConditionsSection scFlags={scFlags} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (

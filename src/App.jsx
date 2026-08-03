@@ -1613,6 +1613,33 @@ export function computeCAVerdicts(caMatches, f) {
   return verdicts;
 }
 
+// ── SC (Settlement Conditions) — third pattern engine (2026-08-03) ─────────
+// Matching + verdict logic moved server-side (Davies's call) — see
+// server.js's POST /api/sc-match: it ports settlement-conditions-miner.mjs's
+// actual extractDims() verbatim (not a re-derived client guess) and applies
+// a reliability-FLAG model per market (favorable/unfavorable/conflicted),
+// not a CA-style competing-picks verdict — SC diagnoses whether conditions
+// favor trusting a market's existing SA/CA signal, it isn't picking bets of
+// its own. The frontend just POSTs the fixtures it already has in memory and
+// gets back { [fixtureId]: { flags: { [marketKey]: { status, holdoutHitRate,
+// holdoutLift, reason } } } } — no mined-pattern JSON on the client at all.
+export const SC_MARKET_LABELS = Object.entries({
+  homeWin: "1X2-Home", awayWin: "1X2-Away", draw: "1X2-Draw", dc1X: "DC1X", dcX2: "DCX2",
+  over15: "Over 1.5", over25: "Over 2.5", under35: "Under 3.5", under45: "Under 4.5",
+  bttsYes: "BTTS", homeOver05: "Home Over 0.5", homeOver15: "Home Over 1.5",
+  awayOver05: "Away Over 0.5", awayOver15: "Away Over 1.5",
+}).map(([id, label]) => ({ id, label }));
+// Same family ids SA_TO_FAMILY_ID's values already use (over15/under35/
+// bttsyes/dc1x/dc2x/homewin/draw/awaywin/homeo05/homeo15/awayo05/awayo15) —
+// SC's pool keys just differ in case/spelling, not in what they mean, so
+// this is a direct translation, not a new set of ids.
+export const SC_MARKET_TO_FAMILY_ID = {
+  homeWin: "homewin", awayWin: "awaywin", draw: "draw", dc1X: "dc1x", dcX2: "dc2x",
+  over15: "over15", over25: "over25", under35: "under35", under45: "under45",
+  bttsYes: "bttsyes", homeOver05: "homeo05", homeOver15: "homeo15",
+  awayOver05: "awayo05", awayOver15: "awayo15",
+};
+
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
 // Single source of truth for "which verdict is THE headline" — same
 // promotion rule FullModelPage's CAVerdictBlock uses (an avoid-direction
@@ -3665,6 +3692,13 @@ const IcoCheckSm = ({size=9,col}) => (
 
 export function StatusBadge({ state, time, minute, date, startingAt }) {
   const s = (state || "").toLowerCase().replace(/[_\-\s]/g, "");
+  // Computed once, reused by every branch below — was previously only
+  // computed inside the default (scheduled) branch, so LIVE fixtures showed
+  // no kickoff date/time at all, just "LIVE 45'" with nothing to say which
+  // date or what time it actually kicked off (2026-08-03, Davies's request —
+  // matters when browsing a non-today date or across timezones).
+  const trueDate  = startingAt ? (getFixtureLocalDate({ startingAt, date }) || date) : date;
+  const dateLabel = trueDate && trueDate !== todayStr() ? fmtDateLabel(trueDate) : null;
   // Live / in-play states
   if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
     const label = (s === "halftime" || s === "ht") ? "HT"
@@ -3678,6 +3712,11 @@ export function StatusBadge({ state, time, minute, date, startingAt }) {
       <span style={{ display:"inline-flex",alignItems:"center",gap:4,fontSize:8,fontWeight:800,color:C.green,letterSpacing:".1em" }}>
         <IcoLiveDot col={C.green}/>
         {label}{showMinute ? ` ${minute}'` : ""}
+        {(dateLabel || time) && (
+          <span style={{ color:C.muted, fontWeight:700, letterSpacing:"normal", marginLeft:2 }}>
+            &nbsp;·&nbsp;{dateLabel ? `${dateLabel} ` : ""}{time}
+          </span>
+        )}
       </span>
     );
   }
@@ -3704,8 +3743,7 @@ export function StatusBadge({ state, time, minute, date, startingAt }) {
   // kickoff date, not just its snapshot bucket date — same fix as the kickoff
   // filter, applied here so an early-hours spillover fixture (bucketed under
   // today but actually tomorrow) is flagged too, on both the main list and FMP.
-  const trueDate  = startingAt ? (getFixtureLocalDate({ startingAt, date }) || date) : date;
-  const dateLabel = trueDate && trueDate !== todayStr() ? fmtDateLabel(trueDate) : null;
+  // trueDate/dateLabel now computed once at the top of the function (2026-08-03).
   return (
     <span style={{ display:"inline-flex",alignItems:"center",gap:3,fontSize:9,color:C.text }}>
       <IcoClock col={C.muted} size={8}/>
@@ -5559,6 +5597,34 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .finally(() => setCaLoadingRow(false));
   }, [caExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── SC ROW — mirrors CA's state shape structurally, but fetches nothing
+  // upfront. CA fetches its whole mined-pattern payload once (can be several
+  // MB) and matches client-side; SC POSTs the fixtures it already has and
+  // gets back small, pre-matched per-fixture flags — no local matching, no
+  // mined JSON on the client. Re-fetches whenever the visible fixture set
+  // changes (date navigation, search doesn't change the underlying set so
+  // this doesn't refetch on every keystroke).
+  const [scExpanded,   setScExpanded]   = useState(false);
+  const [scMarket,     setScMarket]     = useState(null); // one of SC_MARKET_LABELS ids, or null = off
+  const [scResults,    setScResults]    = useState(null); // { [fixtureId]: { flags } }
+  const [scLoading,    setScLoading]    = useState(false);
+  const [scError,      setScError]      = useState(null);
+  useEffect(() => {
+    if (!scExpanded) return;
+    if (!fixtures?.length) return;
+    if (scLoading) return;
+    setScLoading(true);
+    setScError(null);
+    fetch(`${SERVER}/api/sc-match`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+    })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (d?.results) setScResults(d.results); else setScError(d?.error || "No settlement-condition data"); })
+      .catch(e => setScError(e.message))
+      .finally(() => setScLoading(false));
+  }, [scExpanded, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
   const setActiveStrategy = v => { setActiveStrategyState(v); saveSS({ activeStrategy: v }); };
@@ -6470,6 +6536,85 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     return out;
   }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
 
+  // scRows — deliberately much shorter than caRows: no mode/floor-gate
+  // machinery to reproduce, the server already decided favorable/
+  // unfavorable/conflicted per market per fixture (POST /api/sc-match).
+  // Reuses the exact same tail filters (search/live-scheduled/statFilters/
+  // excludedMarkets/probFilter/kickoffFilter/sortActive) as caRows above so
+  // SC behaves identically to SA/CA for every filter that isn't
+  // pattern-specific.
+  const scRows = useMemo(() => {
+    if (!scMarket || !scResults) return [];
+    const s = search.toLowerCase();
+    const hasLiveFilter      = statFilters.includes("live");
+    const hasScheduledFilter = statFilters.includes("scheduled");
+    const bothOrNeither      = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
+    const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
+    const scFamily = SC_MARKET_TO_FAMILY_ID[scMarket];
+
+    const out = [];
+    for (const f of fixtures) {
+      if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+      if (!bothOrNeither) {
+        const st = (f.state||"").toLowerCase();
+        if (hasLiveFilter && !liveStates.has(st)) continue;
+        if (hasScheduledFilter && !isScheduledState(st)) continue;
+      }
+      if (statFilters.some(id => {
+        if (["live","scheduled"].includes(id)) return false;
+        const sf = STAT_FILTERS.find(x => x.id === id);
+        return sf ? !sf.fn(f) : false;
+      })) continue;
+
+      const flag = scResults[f.id]?.flags?.[scMarket];
+      if (!flag) continue; // no settlement-condition pattern matched either way — nothing to show for this market
+
+      const flagged = flag.status !== "favorable"; // unfavorable and conflicted both flag red — neither is a clean lean
+      const primaryPick = getCustomPick(f, scFamily, C);
+      const marketLabel = SC_MARKET_LABELS.find(m => m.id === scMarket)?.label || scMarket;
+      const pick = primaryPick
+        ? { ...primaryPick, color: flagged ? C.red : C.purple }
+        : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.purple };
+      if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
+      if (probFilter && pick.prob != null) {
+        if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
+        if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
+      }
+      if (kickoffFilter && f.time) {
+        const [hh, mm] = f.time.split(":").map(Number);
+        const mins = hh * 60 + (mm || 0);
+        const crossesDay = getFixtureLocalDate(f) !== f.date;
+        if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue
+        if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue
+      }
+      if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
+      if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
+      if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
+
+      out.push({ f, pick, _scFlag: flag, _scFlagged: flagged });
+    }
+    out.sort((a, b) => {
+      if (bothOrNeither) {
+        const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+        const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+        if (aLive !== bLive) return aLive - bLive;
+      }
+      if (a._scFlagged !== b._scFlagged) return a._scFlagged ? 1 : -1;
+      return a._scFlagged
+        ? (a._scFlag?.holdoutHitRate ?? 101) - (b._scFlag?.holdoutHitRate ?? 101)
+        : (b._scFlag?.holdoutHitRate ?? -1) - (a._scFlag?.holdoutHitRate ?? -1);
+    });
+    if (sortActive.has("strong_first")) {
+      out.sort((a, b) => {
+        const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+        const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+        return aS - bS;
+      });
+    }
+    return out;
+  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
   // market (given whatever Mode/Direction each row currently has set; this is
@@ -6511,7 +6656,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   }, [combineMode, saMarket, caMarket, saRows, caRows]);
 
   const bothCombined = combineMode && saMarket && caMarket && saMarket === caMarket;
-  const displayRows = bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : rows));
+  const displayRows = bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : (scMarket ? scRows : rows)));
 
   const saveListToJSON = () => {
     const payload = {
@@ -6887,6 +7032,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       setCaMarket(turningOn ? mk.id : null);
                     } else if (turningOn) {
                       setCaMarket(null); // mutually exclusive with the CA row below (unchanged default behavior)
+                      setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
                     }
                     if (turningOn && SA_TO_FAMILY_ID[mk.id]) {
                       setFamily(SA_TO_FAMILY_ID[mk.id]);
@@ -7075,6 +7221,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       setSaMarket(turningOn ? mk.id : null);
                     } else if (turningOn) {
                       setSaMarket(null); // mutually exclusive with the SA row above (unchanged default behavior)
+                      setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
                     }
                     if (turningOn && !isMix && SA_TO_FAMILY_ID[mk.id]) {
                       setFamily(SA_TO_FAMILY_ID[mk.id]);
@@ -7239,6 +7386,84 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     {caLogStatus.error ? caLogStatus.error : `${caLogStatus.added} rows logged for ${date} (${caLogStatus.count} total on file)`}
                   </span>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── SETTLEMENT CONDITIONS (SC) ROW — third pattern engine, mirrors
+           CA's row shell but deliberately simpler: no Strong/Emerging
+           pattern-quality modes (v1 — those can be added later the same way
+           CA got them), no Mix (needs its own ranking pass; the scoring
+           primitive exists server-side already if this gets added). Flags
+           come back from POST /api/sc-match, keyed by fixture id then
+           market — rendered per-fixture in the list rows, not fetched into
+           one big client-side payload the way CA's is. ── */}
+      <div style={{ marginBottom:10 }}>
+        <button
+          onClick={() => { setScExpanded(v => !v); if (scMarket && !scExpanded) setScMarket(null); }}
+          style={{ width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",
+                   background: scExpanded ? `${C.purple}10` : (scMarket ? `${C.purple}08` : C.surface),
+                   border:`1px solid ${scExpanded ? `${C.purple}40` : (scMarket ? `${C.purple}30` : C.border)}`,
+                   borderRadius: scExpanded ? "8px 8px 0 0" : 8,
+                   cursor:"pointer",padding:"9px 13px",transition:"all .15s" }}>
+          <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+            <span style={{ fontSize:9,color: scMarket ? C.purple : C.text,textTransform:"uppercase",letterSpacing:".12em",fontWeight:700 }}>
+              Settlement Conditions
+            </span>
+            {scMarket && (
+              <span style={{ fontSize:8,background:`${C.purple}20`,color:C.purple,border:`1px solid ${C.purple}40`,
+                             borderRadius:4,padding:"1px 6px",fontWeight:800 }}>
+                {SC_MARKET_LABELS.find(m => m.id === scMarket)?.label || scMarket}
+              </span>
+            )}
+            {scLoading && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
+            {scError && <span style={{ fontSize:8,color:C.red }}>{scError}</span>}
+          </div>
+          <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{scExpanded ? "▲" : "▼"}</span>
+        </button>
+
+        {!scExpanded && (
+          <div style={{ fontSize:8,color:C.muted,padding:"5px 4px 0",lineHeight:1.5 }}>
+            Flags whether current match conditions favor trusting each market's signal — not a pick engine, a reliability check on the ones you already have.
+          </div>
+        )}
+
+        {scExpanded && (
+          <div style={{ border:`1px solid ${C.purple}30`,borderTop:"none",borderRadius:"0 0 8px 8px",
+                        padding:"10px 12px 12px",background:`${C.purple}04` }}>
+            <div style={{ fontSize:8,color:C.text,opacity:.65,marginBottom:10,lineHeight:1.6 }}>
+              Filters fixtures where settlement conditions flag a market favorable or unfavorable. Unfavorable-flagged games are marked ⚑.
+            </div>
+            <div className="cscroll" style={{ marginBottom:6 }}>
+              {scMarket && (
+                <button onClick={() => setScMarket(null)} className="gb"
+                  style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                           background:"transparent",color:C.red,border:`1px solid ${C.red}40` }}>
+                  ✕ Off
+                </button>
+              )}
+              {SC_MARKET_LABELS.map(mk => {
+                const isOn = scMarket === mk.id;
+                return (
+                  <button key={mk.id} onClick={() => {
+                    const turningOn = !isOn;
+                    setScMarket(turningOn ? mk.id : null);
+                    if (turningOn) { setSaMarket(null); setCaMarket(null); }
+                  }} className="gb"
+                    style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                             background:isOn ? C.purple : "transparent",
+                             color:isOn ? "#fff" : C.muted,
+                             border:`1px solid ${isOn ? C.purple : C.faint}` }}>
+                    {mk.label}
+                  </button>
+                );
+              })}
+            </div>
+            {scMarket && (
+              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
+                Showing fixtures where <strong>{SC_MARKET_LABELS.find(m => m.id === scMarket)?.label}</strong> has a settlement-condition flag. Unfavorable-only games (⚑) sort to the bottom.
               </div>
             )}
           </div>
@@ -7698,7 +7923,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Rows */}
       <div style={{ display:"flex",flexDirection:"column",gap:2,paddingBottom:selectedIds.size > 0 ? 60 : 0 }}>
-        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged }) => {
+        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged, _scFlag, _scFlagged }) => {
           const probColor = pick.prob >= 75 ? C.green : pick.prob >= 60 ? C.gold : C.muted;
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
@@ -7779,6 +8004,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       ✓ CA {_caPositive[0].holdoutHitRate}%
                     </span>
                   )}
+                  {_scFlagged && (
+                    <span title={_scFlag?.reason || ""}
+                      style={{ marginLeft:5,fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ SC {_scFlag?.status === "conflicted" ? "conflicted" : "unfavorable"}
+                    </span>
+                  )}
+                  {!_scFlagged && _scFlag && (
+                    <span title={_scFlag.reason || ""}
+                      style={{ marginLeft:5,fontSize:7,color:C.purple,background:`${C.purple}15`,
+                               border:`1px solid ${C.purple}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ SC {_scFlag.holdoutHitRate}%
+                    </span>
+                  )}
                 </div>
                 <div className="cb" style={{ marginTop:3 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
@@ -7852,6 +8091,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       style={{ fontSize:7,color:C.amber,background:`${C.amber}15`,
                                border:`1px solid ${C.amber}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
                       ✓ CA {_caPositive[0].holdoutHitRate}%
+                    </span>
+                  )}
+                  {_scFlagged && (
+                    <span title={_scFlag?.reason || ""}
+                      style={{ fontSize:7,color:C.red,background:`${C.red}15`,
+                               border:`1px solid ${C.red}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ⚠ SC {_scFlag?.status === "conflicted" ? "conflicted" : "unfavorable"}
+                    </span>
+                  )}
+                  {!_scFlagged && _scFlag && (
+                    <span title={_scFlag.reason || ""}
+                      style={{ fontSize:7,color:C.purple,background:`${C.purple}15`,
+                               border:`1px solid ${C.purple}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      ✓ SC {_scFlag.holdoutHitRate}%
                     </span>
                   )}
                 </div>
@@ -17750,6 +18003,15 @@ function GRMProInner() {
   useEffect(() => {
     try { localStorage.setItem("grm_ca_mode_v1", caModeEnabled ? "1" : "0"); } catch {}
   }, [caModeEnabled]);
+  // scModeEnabled — mirrors caModeEnabled exactly, but gates a server round-
+  // trip (POST /api/sc-match) instead of a client-side match, since SC
+  // matching moved server-side (2026-08-03).
+  const [scModeEnabled, setScModeEnabled] = useState(() => {
+    try { return localStorage.getItem("grm_sc_mode_v1") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("grm_sc_mode_v1", scModeEnabled ? "1" : "0"); } catch {}
+  }, [scModeEnabled]);
   const DRAFT_KEY = "grm_draft_legs";
   const [draftLegs, setDraftLegs] = useState(() => {
     try {
@@ -19300,6 +19562,46 @@ function GRMProInner() {
                   </div>
                 </button>
               </FilterSection>
+              {/* SC (Settlement Conditions) toggle — mirrors CA's exactly.
+                  When on, FullModelPage POSTs to /api/sc-match and shows its
+                  own "Settlement Conditions" section; same "doesn't touch the
+                  main list" scoping as CA. */}
+              <FilterSection title="Analysis" summary={`Settlement Conditions ${scModeEnabled ? "on" : "off"}`} badge={scModeEnabled?1:0}>
+                <button onClick={() => setScModeEnabled(v => !v)}
+                  style={{
+                    width:"100%", padding:"10px 14px",
+                    borderRadius:10, cursor:"pointer", fontFamily:C.font,
+                    background: scModeEnabled ? `${C.purple}12` : "transparent",
+                    border:`1px solid ${scModeEnabled ? C.purple : C.border}`,
+                    display:"flex", alignItems:"center", gap:10,
+                    transition:"all .15s",
+                  }}>
+                  <div style={{
+                    width:34, height:20, borderRadius:10, flexShrink:0,
+                    background: scModeEnabled ? C.purple : C.faint,
+                    border:`1px solid ${scModeEnabled ? C.purple : C.border}`,
+                    position:"relative", transition:"background .2s",
+                  }}>
+                    <div style={{
+                      position:"absolute", top:2,
+                      left: scModeEnabled ? 16 : 2,
+                      width:14, height:14, borderRadius:"50%",
+                      background: scModeEnabled ? C.accentText : C.muted,
+                      transition:"left .2s",
+                      boxShadow:"0 1px 3px rgba(0,0,0,.2)",
+                    }}/>
+                  </div>
+                  <div style={{ textAlign:"left", flex:1 }}>
+                    <div style={{ fontSize:10, fontWeight:800,
+                      color: scModeEnabled ? C.purple : C.text }}>
+                      Settlement Conditions
+                    </div>
+                    <div style={{ fontSize:8, color:C.muted, marginTop:2, lineHeight:1.4 }}>
+                      Show whether current match conditions favor or work against trusting each market's signal, in its Full Model page.
+                    </div>
+                  </div>
+                </button>
+              </FilterSection>
 
               {/* Admin controls */}
               {adminMode && (
@@ -19872,6 +20174,7 @@ function GRMProInner() {
           f={mainFocusFixture}
           date={date}
           caModeEnabled={caModeEnabled}
+          scModeEnabled={scModeEnabled}
           onBack={() => {
             setMainFocusFixture(null);
             // Return to wherever user came from
