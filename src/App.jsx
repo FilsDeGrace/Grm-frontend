@@ -13692,7 +13692,7 @@ function ParlayExplainer() {
         {tab === "modes" && (
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
             <div style={{ fontSize:9, color:C.muted, lineHeight:1.65, marginBottom:4 }}>
-              Jarvis tickets are <span style={{ color:C.accent, fontWeight:700 }}>pre-built by the TA engine</span> before kickoff — not generated on demand. The engine uses learned patterns from Deep Analyst (DA) and Strategy Analyst (SA) to select and rank legs. You see the result when you open the Jarvis tab.
+              Jarvis tickets are <span style={{ color:C.accent, fontWeight:700 }}>pre-built by the TA engine</span> before kickoff — not generated on demand. The engine uses learned patterns from Strategy Analyst (SA) to select and rank legs. You see the result when you open the Jarvis tab.
             </div>
             <div style={{ fontSize:8, color:C.muted, marginTop:4, lineHeight:1.6 }}>
               The engine exports one ticket per mode each day. Past dates show WIN/LOSS/PENDING per leg once results are in.
@@ -13743,7 +13743,7 @@ function ParlayExplainer() {
 //   • Combined odds (e.g. "2.76×") — the only "label" users need
 //   • Parlay probability % (from TA parlayProb)
 //   • Leg count and markets summary
-//   • DA historical HR if available
+//   • SA historical HR if available
 //   • Legs list (game, pick, odds)
 //   • "Use This Ticket" CTA
 // C is passed as a prop — useTheme() does not exist as a standalone hook in this codebase
@@ -13854,30 +13854,22 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   }
 
   // ── Strategy label + rationale — derived from TA signal data ───────────────
-  // DA  = Deep Analyst: how often this exact market+context has landed
-  //        historically in GRM's learned data. High DA = pattern has real backing.
-  // SA  = Strategy Analyst: separate pattern engine that checks team form,
-  //        fixture context, and market behaviour. SA patterns confirm the pick
-  //        from a different angle. DA + SA together = two independent signals agree.
+  // SA = Strategy Analyst: pattern engine that checks team form, fixture
+  //      context, and market behaviour.
+  // (DA/"Deep Analyst" removed 2026-08-03 — learnedHR has been hardcoded
+  //  null server-side since PE was retired in favor of BE; the hasDA
+  //  branches below were unreachable, not just unused.)
   const getStrategyLabel = (strat, idx) => {
     const legs    = strat.legs || [];
     const mkts    = [...new Set(legs.map(l => l.market).filter(Boolean))];
     const dom     = (mkts[0] || "").toLowerCase();
-    const hasDA   = (strat.learnedHR || 0) > 0;
     const hasSA   = (strat.saPositive || 0) > 0;
     const isGoals = dom.includes("over") || dom.includes("under");
     const isDC    = dom.includes("dc");
-    const isTB    = dom.includes("tb:");
 
     // Name — short, user-facing (no internal engine codes)
     let name;
-    if (hasDA && hasSA && isGoals) name = "Goals Momentum";
-    else if (hasDA && hasSA && isDC) name = "Covered Value";
-    else if (hasDA && hasSA)         name = "Converging Signal";
-    else if (hasDA && isTB)          name = "Team Goals";
-    else if (hasDA && isGoals)       name = "Goals Backed";
-    else if (hasDA)                  name = "Pattern Backed";
-    else if (hasSA && isDC)          name = "Draw Cover";
+    if (hasSA && isDC)               name = "Draw Cover";
     else if (hasSA)                  name = "Strategy Pick";
     else if (isDC)                   name = "Safety Net";
     else if (dom.includes("under"))  name = "Under Pick";
@@ -13886,11 +13878,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 
     // One-line rationale — explain what the signals mean in plain English
     let rationale;
-    if (hasDA && hasSA)
-      rationale = `${strat.learnedHR}% historical hit rate · ${strat.saPositive} pattern${strat.saPositive!==1?"s":""} confirm`;
-    else if (hasDA)
-      rationale = `${strat.learnedHR}% historical hit rate on this market`;
-    else if (hasSA)
+    if (hasSA)
       rationale = `${strat.saPositive} situational pattern${strat.saPositive!==1?"s":""} aligned`;
     else
       rationale = mkts.slice(0, 2).join(" · ") || "Mixed markets";
@@ -13929,13 +13917,9 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
         const { name, rationale } = getStrategyLabel(strat, idx);
 
         // N41-FIX: richer signal badges
-        const hasDA   = (strat.learnedHR || 0) > 0;
+        // (hasDA/hrGrade removed 2026-08-03 — same dead learnedHR field as
+        // getStrategyLabel above; hrGrade was always null, badge never rendered)
         const hasSA   = (strat.saPositive || 0) > 0;
-        const hrGrade = hasDA
-          ? strat.learnedHR >= 70 ? { col:C.green, label:`${strat.learnedHR}% HR` }
-          : strat.learnedHR >= 55 ? { col:C.gold,  label:`${strat.learnedHR}% HR` }
-          : { col:C.muted, label:`${strat.learnedHR}% HR` }
-          : null;
 
         // N36-FIX: verdict derived from server-enriched parlayResult
         const parlayResult = strat.parlayResult || null;
@@ -14019,11 +14003,6 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
               <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
                 <span style={{ fontSize:8, fontWeight:800, letterSpacing:".05em",
                                color:C.accent, textTransform:"uppercase" }}>{name}</span>
-                {hrGrade && (
-                  <span style={{ fontSize:7, color:hrGrade.col,
-                                 background:`${hrGrade.col}10`, border:`1px solid ${hrGrade.col}25`,
-                                 borderRadius:4, padding:"1px 5px" }}>{hrGrade.label}</span>
-                )}
                 {hasSA && (
                   <span style={{ fontSize:7, color:C.edge,
                                  background:`${C.edge}10`, border:`1px solid ${C.edge}25`,
@@ -14042,15 +14021,10 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
               <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
 
                 {/* Signal explainer blurb */}
-                {(hasDA || hasSA) && (
+                {hasSA && (
                   <div style={{ borderLeft:`2px solid ${C.accent}40`, paddingLeft:8,
                                 marginBottom:10, fontSize:8, color:C.muted, lineHeight:1.6 }}>
-                    {hasDA && hasSA
-                      ? `${strat.learnedHR}% hit rate on this pattern · ${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} agree`
-                      : hasDA
-                      ? `Landed ${strat.learnedHR}% historically — picks drawn from highest-confidence games`
-                      : `${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} aligned across form, context, and market behaviour`
-                    }
+                    {`${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} aligned across form, context, and market behaviour`}
                   </div>
                 )}
 
@@ -19522,11 +19496,14 @@ function GRMProInner() {
                 </button>
               </FilterSection>
 
-              {/* Condition Analyst (CA) — off by default. Only gates whether
-                  FullModelPage fetches /api/ca-patterns and shows its own
-                  "Condition Analyst" section; does not touch the main list,
-                  strategyTags, or any existing fixture-card badge. */}
-              <FilterSection title="Analysis" summary={`Condition Analyst ${caModeEnabled ? "on" : "off"}`} badge={caModeEnabled?1:0}>
+              {/* Condition Analyst (CA) + Settlement Conditions (SC) — both
+                  off by default, live in one "Analysis" drawer (2026-08-03:
+                  was two separate FilterSection drawers, Davies's call to
+                  merge). Each only gates its own fetch/section in
+                  FullModelPage; neither touches the main list, strategyTags,
+                  or any existing fixture-card badge. */}
+              <FilterSection title="Analysis" summary={`CA ${caModeEnabled ? "on" : "off"} · SC ${scModeEnabled ? "on" : "off"}`} badge={(caModeEnabled?1:0) + (scModeEnabled?1:0)}>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
                 <button onClick={() => setCaModeEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -19561,12 +19538,6 @@ function GRMProInner() {
                     </div>
                   </div>
                 </button>
-              </FilterSection>
-              {/* SC (Settlement Conditions) toggle — mirrors CA's exactly.
-                  When on, FullModelPage POSTs to /api/sc-match and shows its
-                  own "Settlement Conditions" section; same "doesn't touch the
-                  main list" scoping as CA. */}
-              <FilterSection title="Analysis" summary={`Settlement Conditions ${scModeEnabled ? "on" : "off"}`} badge={scModeEnabled?1:0}>
                 <button onClick={() => setScModeEnabled(v => !v)}
                   style={{
                     width:"100%", padding:"10px 14px",
@@ -19601,6 +19572,7 @@ function GRMProInner() {
                     </div>
                   </div>
                 </button>
+                </div>
               </FilterSection>
 
               {/* Admin controls */}
