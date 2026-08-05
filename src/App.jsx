@@ -1240,21 +1240,28 @@ function caModelAgreementFactor(c, isAvoid, f) {
   return Math.max(-1, Math.min(1, agreement / room));
 }
 
-// Gap-stability shrink (2026-07-19, ported from Alden's verdict-ca-select.mjs
-// — his own data-tested formula, run against real fresh-pool backtests, not
-// a fresh guess). CA already computes `gap` (trainHitRate − holdoutHitRate)
-// on every combo and, until now, only used it as a binary VALID/OVERFIT
-// switch upstream — two VALID combos with gap=0.3pp and gap=4.8pp scored
-// identically. This applies the same shrinkage shape already used for
-// sample size (k/(k+x)), just to instability instead of to n — the bigger
-// the train→holdout swing, the more the combo's score gets discounted,
-// continuously rather than only at the binary gate.
-// CA_GAP_SHRINK_K is the one genuinely new tunable this brings in (not
-// derived from anything already in config.js) — 5pp, the tested script's
-// own value, copied not re-guessed.
+// Gap-stability — CA_GAP_SHRINK_K (2026-07-19, ported from Alden's
+// verdict-ca-select.mjs) still the reused constant, but per
+// CA_Ranking_Merge_Spec.md (2026-08-04) it no longer multiplies in as a
+// separate discount factor (caStabilityFactor removed) — instead it shrinks
+// the effective sample size Wilson sees below, so gap and n combine into one
+// honest "how much do we trust this rate" number instead of two independent
+// discounts stacked on top of each other.
 export const CA_GAP_SHRINK_K = 5;
-function caStabilityFactor(gap) {
-  return CA_GAP_SHRINK_K / (CA_GAP_SHRINK_K + Math.abs(gap ?? 0));
+function effectiveN(n, gap, gapShrinkK) {
+  return (n ?? 0) / (1 + Math.abs(gap ?? 0) / gapShrinkK);
+}
+// Standard Wilson score-interval lower bound, in 0-100 scale. Used on
+// recalibrated HR with gap-adjusted n (not raw HR/raw n) — see
+// CA_Ranking_Merge_Spec.md for why plain Wilson-on-raw-data was rejected
+// (raw HR is systematically biased ~10-17pp high; gap is a stronger
+// overfitting signal than n alone).
+function wilsonLowerBound(p, n, z = 1.96) {
+  if (!n || n <= 0) return 0;
+  const denom = 1 + (z * z) / n;
+  const center = p + (z * z) / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return Math.max(0, (center - margin) / denom) * 100;
 }
 
 // Absolute hit-rate scaling (2026-07-19, same port). caShrinkScore only
@@ -1268,34 +1275,45 @@ function caStabilityFactor(gap) {
 // this formula was tested, but its whole point ("don't trust the raw
 // claimed rate") applies here exactly as much as it already does to
 // shrink's lift input just below.
-export const CA_HITRATE_SCALE_P_EXP = 2.0; // == POOL_SCORE_P_EXP, reused not reguessed
-function caHitRateFactor(recalHR, isAvoid) {
-  const hr = recalHR ?? (isAvoid ? 100 : 0);
-  const base = isAvoid ? (100 - hr) / 100 : hr / 100;
-  return Math.pow(Math.max(base, 0), CA_HITRATE_SCALE_P_EXP);
-}
+// (caHitRateFactor removed 2026-08-04 — CA_Ranking_Merge_Spec.md's formula
+// doesn't call it; HR scaling now happens via Wilson lower bound on
+// gap-adjusted n instead. CA_HITRATE_SCALE_P_EXP stays exported since
+// SC's server-side mirror still uses the same exponent shape independently.)
+export const CA_HITRATE_SCALE_P_EXP = 2.0; // == POOL_SCORE_P_EXP
 
-// "Safest lean" score (2026-07-13 plan, +model agreement 2026-07-14,
-// +stability/HR-scaling 2026-07-19 port from verdict-ca-select.mjs) — shrunk
-// lift × gap-stability × absolute-HR-scaling × family corroboration × model
-// agreement. This is the always-computable lean (no odds required) — `f` is
-// optional so existing callers that can't supply a fixture (there currently
-// are none, but kept defensive) degrade to no model-agreement term rather
-// than throwing.
+// "Safest lean" ranking — CA_Ranking_Merge_Spec.md (2026-08-04): three
+// separate, labeled outputs instead of one opaque multiplied number, so two
+// combos landing near the same rank can be told apart (one on stability, one
+// on raw hit rate). Recalibration and family/model corroboration are kept
+// exactly as before — real backtest signal, per the spec's explicit
+// "do not touch" instruction — only the collapsing-into-one-number part
+// changes.
+//   predictiveStrength — recalHR itself, "how good does it look" (not
+//     flipped for avoid — a LOW number IS what looks good there, same as
+//     displaying any other rate)
+//   reliability — Wilson lower bound of the FAVORABLE-direction probability
+//     (recalHR flipped to 100-recalHR for avoid, so "lower bound" always
+//     means "worst case still confidently in the direction this combo
+//     argues for," for both positive and avoid — same flip-for-avoid
+//     convention caHitRateFactor already uses just above)
+//   verifiedEdge — reliability minus the same-direction baseline; the field
+//     to actually rank/threshold on, since it already folds in both
+//     recalibration and gap-adjusted sample size
 function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
-  // 2026-07-16: shrink now runs on RECALIBRATED lift (recalibrated HR minus
-  // the same mined baseline), not the raw claimed lift — this is the actual
-  // fix for the result/dominance-family collapse (see recalibration layer
-  // comment above): an inflated large-n combo gets pulled back toward its
-  // real fresh-data performance before shrinkage/ranking ever sees it.
-  const recalHR = caRecalibratedHR(c.holdoutHitRate, isAvoid);
-  const recalLift = recalHR != null && c.holdoutBaselineHR != null ? (recalHR - c.holdoutBaselineHR) : c.holdoutLift;
-  const shrink = caShrinkScore(recalLift, c.holdoutSample);
-  const stability = caStabilityFactor(c.gap);
-  const hrFactor = caHitRateFactor(recalHR, isAvoid);
-  const corrob = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
-  const modelAgreement = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
-  return shrink * stability * hrFactor * (1 + CA_FAMILY_CORROB_BONUS * corrob) * (1 + CA_MODEL_AGREEMENT_BONUS * modelAgreement);
+  const recalHR = caRecalibratedHR(c.holdoutHitRate, isAvoid) ?? c.holdoutHitRate;
+  const nEff = effectiveN(c.holdoutSample, c.gap, CA_GAP_SHRINK_K);
+  const favP = isAvoid ? (100 - recalHR) / 100 : recalHR / 100;
+  const favBaseline = isAvoid ? (100 - (c.holdoutBaselineHR ?? 50)) : (c.holdoutBaselineHR ?? 50);
+  const reliability = wilsonLowerBound(favP, nEff);
+  const familyCorrobCount = caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid);
+  const modelAgreementFactor = f ? caModelAgreementFactor(c, isAvoid, f) : 0;
+  return {
+    predictiveStrength: recalHR,
+    reliability,
+    verifiedEdge: reliability - favBaseline,
+    familyCorrobCount,
+    modelAgreementFactor,
+  };
 }
 
 
@@ -1515,17 +1533,22 @@ export function computeCAVerdicts(caMatches, f) {
   let topMarket = null;
   if (storyVerdict.status === "MAIN" || storyVerdict.status === "SUBSIDIARY") {
     topMarket = storyVerdict.market;
+    const topTripletMS = caSafestScore(storyVerdict.combo, false, cleanPositive, cleanAvoid, f);
     verdicts.push({
       type: "strongest-lean", market: storyVerdict.market, holdoutHitRate: storyVerdict.combo.holdoutHitRate,
       direction: "positive", thesis: storyVerdict.thesis, confidence: storyVerdict.confidence,
+      predictiveStrength: topTripletMS.predictiveStrength, reliability: topTripletMS.reliability, verifiedEdge: topTripletMS.verifiedEdge,
       text: storyVerdict.status === "MAIN"
         ? `${CA_MARKET_SHORT(storyVerdict.market)} looks like the strongest clean lean here — holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp vs baseline).`
         : `${CA_MARKET_SHORT(storyVerdict.market)} — fallback expression of the ${storyVerdict.thesis} story (main market not trusted enough), holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp).`,
     });
     if (storyVerdict.avoidNote) {
+      const avoidCombo = cleanAvoid.find(c => c.market === storyVerdict.avoidNote.market);
+      const avoidTriplet = avoidCombo ? caSafestScore(avoidCombo, true, cleanPositive, cleanAvoid, f) : null;
       verdicts.push({
         type: "second-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
         direction: "avoid",
+        ...(avoidTriplet ? { predictiveStrength: avoidTriplet.predictiveStrength, reliability: avoidTriplet.reliability, verifiedEdge: avoidTriplet.verifiedEdge } : {}),
         text: `Also worth noting: steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp), a different market family.`,
       });
     }
@@ -1536,9 +1559,12 @@ export function computeCAVerdicts(caMatches, f) {
     // verdict" is a UI-level fact here, not something this function needs
     // to encode further).
     topMarket = storyVerdict.avoidNote.market;
+    const headlineAvoidCombo = cleanAvoid.find(c => c.market === storyVerdict.avoidNote.market);
+    const headlineAvoidTriplet = headlineAvoidCombo ? caSafestScore(headlineAvoidCombo, true, cleanPositive, cleanAvoid, f) : null;
     verdicts.push({
       type: "strongest-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
       direction: "avoid",
+      ...(headlineAvoidTriplet ? { predictiveStrength: headlineAvoidTriplet.predictiveStrength, reliability: headlineAvoidTriplet.reliability, verifiedEdge: headlineAvoidTriplet.verifiedEdge } : {}),
       text: `Steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout only ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp vs baseline). No positive story clears the floor on this fixture.`,
     });
   }
@@ -1558,21 +1584,31 @@ export function computeCAVerdicts(caMatches, f) {
     const headlineInPositive = cleanPositive.find(c => c.market === topMarket);
     const headlineInAvoid = !headlineInPositive ? cleanAvoid.find(c => c.market === topMarket) : null;
     const headlineCombo = headlineInPositive || headlineInAvoid;
-    const topScore = headlineCombo
+    const topTriplet = headlineCombo
       ? caSafestScore(headlineCombo, !!headlineInAvoid, cleanPositive, cleanAvoid, f)
       : null;
     const scored = [
-      ...cleanPositive.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: false, score: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
-      ...cleanAvoid.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: true, score: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
+      ...cleanPositive.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: false, triplet: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
+      ...cleanAvoid.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: true, triplet: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
     ];
-    if (scored.length && topScore != null && !verdicts.some(v => v.type === "second-lean")) {
-      scored.sort((a, b) => b.score - a.score);
+    if (scored.length && topTriplet != null && !verdicts.some(v => v.type === "second-lean")) {
+      // Rank by verifiedEdge (spec Step 5) — already folds in recalibration
+      // and gap-adjusted sample size. familyCorrobCount/modelAgreementFactor
+      // only break ties within ~1pp, not used as primary sort keys.
+      scored.sort((a, b) => {
+        const d = b.triplet.verifiedEdge - a.triplet.verifiedEdge;
+        if (Math.abs(d) > 1) return d;
+        const tieA = a.triplet.familyCorrobCount + a.triplet.modelAgreementFactor;
+        const tieB = b.triplet.familyCorrobCount + b.triplet.modelAgreementFactor;
+        return tieB - tieA;
+      });
       const topFamily = caFamilyOf(topMarket);
-      const second = scored.find(e => caFamilyOf(e.c.market) !== topFamily && e.score >= topScore * CA_SECOND_LEAN_CLOSENESS);
+      const second = scored.find(e => caFamilyOf(e.c.market) !== topFamily && e.triplet.verifiedEdge >= topTriplet.verifiedEdge * CA_SECOND_LEAN_CLOSENESS);
       if (second) {
         verdicts.push({
           type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
           direction: second.isAvoid ? "avoid" : "positive",
+          predictiveStrength: second.triplet.predictiveStrength, reliability: second.triplet.reliability, verifiedEdge: second.triplet.verifiedEdge,
           text: second.isAvoid
             ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
             : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
@@ -1719,6 +1755,7 @@ export function buildCAVerdictLogRows(f, caPatterns) {
     const clearsFloor = eligibleLog(c, isAvoid) &&
       (isAvoid ? caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR : caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
     const odds = !isAvoid ? caOddsFor(f, c.market) : null;
+    const triplet = clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) : null;
     return {
       fixtureId, date: f.date || null, league: f.league || null,
       home: f.teams?.home || null, away: f.teams?.away || null,
@@ -1727,11 +1764,16 @@ export function buildCAVerdictLogRows(f, caPatterns) {
       holdoutBaselineHR: c.holdoutBaselineHR ?? null, holdoutSample: c.holdoutSample ?? null,
       trainHitRate: c.trainHitRate ?? null, gap: c.gap ?? null,
       conflictFlag: conflict, clearsFloor,
-      familyCorrobCount: clearsFloor ? caFamilyCorroborationCount(c.market, isAvoid, cleanPositive, cleanAvoid) : 0,
+      familyCorrobCount: triplet ? triplet.familyCorrobCount : 0,
       shrinkScore: caShrinkScore(c.holdoutLift, c.holdoutSample),
       modelProb: caModelProbFor(f, c.market),
-      modelAgreement: clearsFloor ? caModelAgreementFactor(c, isAvoid, f) : null,
-      safestScore: clearsFloor ? caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) : null,
+      modelAgreement: triplet ? triplet.modelAgreementFactor : null,
+      // 2026-08-04: safestScore (single collapsed number) replaced with the
+      // three separate CA_Ranking_Merge_Spec.md fields — same underlying
+      // computation, just no longer hidden inside one multiplied product.
+      predictiveStrength: triplet ? triplet.predictiveStrength : null,
+      reliability:        triplet ? triplet.reliability : null,
+      verifiedEdge:       triplet ? triplet.verifiedEdge : null,
       odds, valueEdgePP: odds ? +((caRecalibratedHR(c.holdoutHitRate, false) ?? 0) - (100 / odds)).toFixed(1) : null, // 2026-07-17: recalibrated, was raw
       valueScore: !isAvoid ? caValueScore(c, f) : null,
       isTopLean: !!topLean && topLean.market === c.market,
@@ -5365,7 +5407,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // by both engines — not two independently-picked markets. Default OFF so
   // existing single-engine behavior (and the mutual-exclusivity toggle) is
   // completely unchanged unless a user explicitly opts in.
-  const [combineMode, setCombineMode] = useState(false);
+  // combineEngines — generalized 2026-08-04 from the old SA+CA-only boolean
+  // to a Set of whichever of 'sa'/'ca'/'sc' the person wants cross-validated
+  // on one shared market. combineMode (derived) is kept as a plain boolean
+  // for every existing "is combining active at all" check below — only the
+  // *which engines* question needed to change, not every call site that just
+  // asks "are we combining."
+  const [combineEngines, setCombineEngines] = useState(() => new Set());
+  const combineMode = combineEngines.size >= 2;
   const [saPatterns,  setSaPatterns]  = useState(null); // raw sa-patterns.json payload
   const [saLoading,   setSaLoading]   = useState(false);
   const [saError,     setSaError]     = useState(null);
@@ -5606,9 +5655,18 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // this doesn't refetch on every keystroke).
   const [scExpanded,   setScExpanded]   = useState(false);
   const [scMarket,     setScMarket]     = useState(null); // one of SC_MARKET_LABELS ids, or null = off
-  const [scResults,    setScResults]    = useState(null); // { [fixtureId]: { flags } }
+  const [scResults,    setScResults]    = useState(null); // { [fixtureId]: { flags, verdicts, emergingPositive, emergingAvoid } }
   const [scLoading,    setScLoading]    = useState(false);
   const [scError,      setScError]      = useState(null);
+  // scMode — mirrors caMode, but two-way (Standard/Emerging) not three —
+  // no "Strong" tier for SC, wasn't asked for and CA's Strong gate
+  // (isStrongCA/caStrongThresholds) is its own separate feature, not part of
+  // what "does SC show emerging like CA" meant. Emerging arrays already come
+  // back from POST /api/sc-match with every fetch (small, per-fixture — no
+  // separate round-trip needed when switching modes or the threshold below,
+  // same instant-switch UX as CA gets from holding its payload client-side).
+  const [scMode,          setScMode]          = useState("standard"); // "standard" | "emerging"
+  const [scEmergingMinHR, setScEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — same tiers as CA
   useEffect(() => {
     if (!scExpanded) return;
     if (!fixtures?.length) return;
@@ -6435,7 +6493,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // back this lean, or fight it). See caSafestScore's own comment for
       // the full breakdown, including why this replaced the old
       // Holdout-HR-dominant composite entirely rather than tuning its caps.
-      const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f);
+      // 2026-08-04: caSafestScore returns the three-field
+      // CA_Ranking_Merge_Spec.md triplet now, not a single number — scoreOf
+      // extracts verifiedEdge specifically for these best-of comparisons
+      // (the field the spec says to actually rank on).
+      const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f).verifiedEdge;
       let bestPositive, bestAvoid, marketLabel, family;
       if (isMix) {
         // Floor gates already applied above — cleanPositive/cleanAvoid ARE
@@ -6567,8 +6629,30 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return sf ? !sf.fn(f) : false;
       })) continue;
 
-      const flag = scResults[f.id]?.flags?.[scMarket];
-      if (!flag) continue; // no settlement-condition pattern matched either way — nothing to show for this market
+      // Standard vs Emerging — mirrors CA's caMode split. Standard reads the
+      // pre-computed flag (VALID tier, server-shrink-ranked). Emerging reads
+      // the raw emergingPositive/emergingAvoid arrays already included in
+      // scResults (small, per-fixture) and filters by scEmergingMinHR
+      // client-side — same instant-switch UX as CA's threshold picker, no
+      // extra round-trip on every click. A synthetic flag-shaped object is
+      // built so the same _scFlag/_scFlagged badge rendering downstream
+      // works unchanged regardless of mode.
+      let flag;
+      if (scMode === "emerging") {
+        const avoidCeiling = 100 - scEmergingMinHR;
+        const ePos = (scResults[f.id]?.emergingPositive || []).filter(c => c.market === scMarket && (c.holdoutHitRate ?? 0) >= scEmergingMinHR);
+        const eAvoid = (scResults[f.id]?.emergingAvoid || []).filter(c => c.market === scMarket && (c.holdoutHitRate ?? 100) <= avoidCeiling);
+        const best = ePos[0] || eAvoid[0];
+        if (!best) continue;
+        flag = ePos[0]
+          ? { status: "favorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Emerging (small-sample) settlement pattern favors this market — holdout ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (+${best.holdoutLift}pp), n=${best.holdoutSample}.` }
+          : { status: "unfavorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Emerging (small-sample) settlement pattern works against this market — holdout only ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (${best.holdoutLift}pp), n=${best.holdoutSample}.` };
+      } else {
+        flag = scResults[f.id]?.flags?.[scMarket];
+        if (!flag) continue; // no settlement-condition pattern matched either way — nothing to show for this market
+      }
 
       const flagged = flag.status !== "favorable"; // unfavorable and conflicted both flag red — neither is a clean lean
       const primaryPick = getCustomPick(f, scFamily, C);
@@ -6613,7 +6697,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scEmergingMinHR]);
 
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
@@ -6624,38 +6708,64 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // applied inside saRows/caRows individually) rather than re-deriving any of
   // that here, so nothing about single-engine filtering can drift out of sync.
   const combinedRows = useMemo(() => {
-    if (!combineMode || !saMarket || !caMarket || saMarket !== caMarket) return [];
-    const caByFixture = new Map(caRows.map(r => [r.f.id, r]));
+    // Which engines are actually part of the combine AND have a market set
+    // (combineEngines can include an engine before its market picker has
+    // been touched — the lock-on-select logic in the toggle handles the
+    // common case, but this stays defensive rather than assuming).
+    const activeEngines = ["sa", "ca", "sc"].filter(e => combineEngines.has(e) && (e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket));
+    if (activeEngines.length < 2) return [];
+    const marketOf = e => e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket;
+    if (!activeEngines.every(e => marketOf(e) === marketOf(activeEngines[0]))) return []; // must all share one market
+    const rowSets = { sa: saRows, ca: caRows, sc: scRows };
+    const byFixture = {};
+    for (const e of activeEngines) byFixture[e] = new Map(rowSets[e].map(r => [r.f.id, r]));
+    const baseEngine = activeEngines[0];
     const out = [];
-    for (const saRow of saRows) {
-      const caRow = caByFixture.get(saRow.f.id);
-      if (!caRow) continue; // must match BOTH engines
-      // CA's pick is built off getCustomPick/family (richer — real odds+prob
-      // per the app's actionable-pick pipeline used for ticket legs); SA's own
-      // pick object is a plainer computeProb-derived stand-in. Since it's the
-      // same market either way, prefer CA's for anything that gets booked.
-      const combinedFlagged = saRow._saFlagged || caRow._caFlagged;
-      out.push({
-        f: saRow.f,
-        pick: { ...caRow.pick, color: combinedFlagged ? C.red : C.green },
-        _saPositive: saRow._saPositive, _saAvoid: saRow._saAvoid, _saFlagged: saRow._saFlagged,
-        _caPositive: caRow._caPositive, _caAvoid: caRow._caAvoid, _caFlagged: caRow._caFlagged,
+    for (const baseRow of rowSets[baseEngine]) {
+      const rowsPerEngine = { [baseEngine]: baseRow };
+      let allMatch = true;
+      for (const e of activeEngines) {
+        if (e === baseEngine) continue;
+        const r = byFixture[e].get(baseRow.f.id);
+        if (!r) { allMatch = false; break; } // must match EVERY active engine
+        rowsPerEngine[e] = r;
+      }
+      if (!allMatch) continue;
+      // Pick priority CA > SC > SA — CA and SC both use getCustomPick's
+      // richer odds+prob pipeline; SA's own pick object is a plainer
+      // computeProb-derived stand-in (same reasoning the original SA+CA-only
+      // version used, just extended now that SC is a third option).
+      const pickSourceRow = rowsPerEngine.ca || rowsPerEngine.sc || rowsPerEngine.sa;
+      const combinedFlagged = activeEngines.some(e => {
+        const r = rowsPerEngine[e];
+        return e === "sc" ? r._scFlagged : e === "sa" ? r._saFlagged : r._caFlagged;
       });
+      const merged = { f: baseRow.f, pick: { ...pickSourceRow.pick, color: combinedFlagged ? C.red : C.green }, _combinedFlagged: combinedFlagged };
+      if (rowsPerEngine.sa) { merged._saPositive = rowsPerEngine.sa._saPositive; merged._saAvoid = rowsPerEngine.sa._saAvoid; merged._saFlagged = rowsPerEngine.sa._saFlagged; }
+      if (rowsPerEngine.ca) { merged._caPositive = rowsPerEngine.ca._caPositive; merged._caAvoid = rowsPerEngine.ca._caAvoid; merged._caFlagged = rowsPerEngine.ca._caFlagged; }
+      if (rowsPerEngine.sc) { merged._scFlag = rowsPerEngine.sc._scFlag; merged._scFlagged = rowsPerEngine.sc._scFlagged; }
+      out.push(merged);
     }
-    // Both-flagged sorts to the very bottom; otherwise SA's lift order wins
-    // ties since Standard-mode SA is lift-ranked by definition — CA's own
-    // sort (holdout hit-rate) only matters as the secondary key.
+    // Any-engine-flagged sorts to the bottom; tie-break prefers SA's lift
+    // ordering when SA is part of the combine (Standard-mode SA is
+    // lift-ranked by definition, same as the original SA+CA behavior), else
+    // falls back to CA's or SC's holdoutHitRate — whichever richer engine is
+    // actually active.
+    const tieKey = row => {
+      if (row._saPositive) return row._saFlagged ? -(row._saAvoid?.[0]?.lift || 0) : (row._saPositive?.[0]?.lift || 0);
+      if (row._caPositive) return row._caFlagged ? -(100 - (row._caAvoid?.[0]?.holdoutHitRate || 0)) : (row._caPositive?.[0]?.holdoutHitRate || 0);
+      if (row._scFlag) return row._scFlagged ? -(100 - (row._scFlag?.holdoutHitRate || 0)) : (row._scFlag?.holdoutHitRate || 0);
+      return 0;
+    };
     out.sort((a, b) => {
-      if (a._saFlagged !== b._saFlagged) return a._saFlagged ? 1 : -1;
-      if (a._caFlagged !== b._caFlagged) return a._caFlagged ? 1 : -1;
-      const aLift = a._saFlagged ? (a._saAvoid[0]?.lift || 0) : (a._saPositive[0]?.lift || 0);
-      const bLift = b._saFlagged ? (b._saAvoid[0]?.lift || 0) : (b._saPositive[0]?.lift || 0);
-      return a._saFlagged ? aLift - bLift : bLift - aLift;
+      if (a._combinedFlagged !== b._combinedFlagged) return a._combinedFlagged ? 1 : -1;
+      return tieKey(b) - tieKey(a);
     });
     return out;
-  }, [combineMode, saMarket, caMarket, saRows, caRows]);
+  }, [combineMode, combineEngines, saMarket, caMarket, scMarket, saRows, caRows, scRows]);
 
-  const bothCombined = combineMode && saMarket && caMarket && saMarket === caMarket;
+  const activeCombineEngines = ["sa", "ca", "sc"].filter(e => combineEngines.has(e) && (e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket));
+  const bothCombined = combineMode && activeCombineEngines.length >= 2;
   const displayRows = bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : (scMarket ? scRows : rows)));
 
   const saveListToJSON = () => {
@@ -6924,33 +7034,48 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         </div>
       </div>
 
-      {/* ── COMBINE SA+CA (2026-07-19, Davies request #4) — SA and CA validate
-           the same 13 TB: markets, so combining means locking both rows to one
-           market rather than picking two. Off by default; turning it on while
-           only one row is active locks the other to match automatically. ── */}
-      <div style={{ marginBottom:10,display:"flex",alignItems:"center",gap:8 }}>
-        <button onClick={() => {
-          const turningOn = !combineMode;
-          setCombineMode(turningOn);
-          if (turningOn) {
-            // Lock whichever market is already active onto both rows. If both
-            // were already set to different markets (leftover from before
-            // combine was ever turned on), SA wins — arbitrary but consistent.
-            const shared = saMarket || caMarket || null;
-            setSaMarket(shared);
-            setCaMarket(shared);
-          }
-        }} className="gb"
-          style={{ padding:"6px 12px",fontSize:10,textTransform:"none",
-                   background:combineMode ? C.accent : "transparent",
-                   color:combineMode ? "#fff" : C.muted,
-                   border:`1px solid ${combineMode ? C.accent : C.faint}`,
-                   fontWeight:combineMode ? 800 : undefined }}>
-          {combineMode ? "✓ " : ""}Combine SA + CA
-        </button>
+      {/* ── COMBINE ENGINES (2026-07-19, Davies request #4; generalized to
+           any 2-or-3-way combo 2026-08-04) — SA/CA/SC all validate the same
+           14 TB: markets, so combining means locking the selected engines'
+           rows to one shared market rather than picking separately. Off by
+           default; checking a second (or third) engine while one is already
+           active locks it onto that market automatically. ── */}
+      <div style={{ marginBottom:10,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+        <span style={{ fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:".08em",fontWeight:700 }}>Combine:</span>
+        {[
+          { id: "sa", label: "SA", color: C.red },
+          { id: "ca", label: "CA", color: C.amber },
+          { id: "sc", label: "SC", color: C.purple },
+        ].map(eng => {
+          const isOn = combineEngines.has(eng.id);
+          return (
+            <button key={eng.id} onClick={() => {
+              const next = new Set(combineEngines);
+              if (isOn) next.delete(eng.id); else next.add(eng.id);
+              setCombineEngines(next);
+              // Once 2+ are selected, lock every selected engine onto whichever
+              // market is already active (SA, then CA, then SC — first one
+              // found wins, arbitrary but consistent), same bootstrapping the
+              // old SA+CA-only toggle did.
+              if (next.size >= 2) {
+                const shared = (next.has("sa") && saMarket) || (next.has("ca") && caMarket) || (next.has("sc") && scMarket) || null;
+                if (next.has("sa")) setSaMarket(shared);
+                if (next.has("ca")) setCaMarket(shared);
+                if (next.has("sc")) setScMarket(shared);
+              }
+            }} className="gb"
+              style={{ padding:"6px 12px",fontSize:10,textTransform:"none",
+                       background:isOn ? eng.color : "transparent",
+                       color:isOn ? "#fff" : C.muted,
+                       border:`1px solid ${isOn ? eng.color : C.faint}`,
+                       fontWeight:isOn ? 800 : undefined }}>
+              {isOn ? "✓ " : ""}{eng.label}
+            </button>
+          );
+        })}
         {combineMode && (
           <div style={{ fontSize:8,color:C.text,opacity:.6,lineHeight:1.4 }}>
-            One market, both engines must match — SA Mix / CA Mix hidden while combined.
+            One market, all checked engines must match — Mix hidden while combined.
           </div>
         )}
       </div>
@@ -7027,9 +7152,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     const turningOn = !isOn;
                     setSaMarket(turningOn ? mk.id : null);
                     if (combineMode) {
-                      // COMBINE-MODE (#4): CA locks to the same market instead
-                      // of being nulled — SA and CA both validate ONE market.
-                      setCaMarket(turningOn ? mk.id : null);
+                      // Mirror onto whichever OTHER engines are actually part
+                      // of the combine set (2026-08-04, generalized from a
+                      // hardcoded SA<->CA pair to any 2-or-3-way selection).
+                      if (combineEngines.has("ca")) setCaMarket(turningOn ? mk.id : null);
+                      if (combineEngines.has("sc")) setScMarket(turningOn ? mk.id : null);
                     } else if (turningOn) {
                       setCaMarket(null); // mutually exclusive with the CA row below (unchanged default behavior)
                       setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
@@ -7216,9 +7343,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     const turningOn = !isOn;
                     setCaMarket(turningOn ? mk.id : null);
                     if (combineMode) {
-                      // COMBINE-MODE (#4): SA locks to the same market instead
-                      // of being nulled — SA and CA both validate ONE market.
-                      setSaMarket(turningOn ? mk.id : null);
+                      if (combineEngines.has("sa")) setSaMarket(turningOn ? mk.id : null);
+                      if (combineEngines.has("sc")) setScMarket(turningOn ? mk.id : null);
                     } else if (turningOn) {
                       setSaMarket(null); // mutually exclusive with the SA row above (unchanged default behavior)
                       setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
@@ -7450,7 +7576,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
                     setScMarket(turningOn ? mk.id : null);
-                    if (turningOn) { setSaMarket(null); setCaMarket(null); }
+                    if (combineMode) {
+                      if (combineEngines.has("sa")) setSaMarket(turningOn ? mk.id : null);
+                      if (combineEngines.has("ca")) setCaMarket(turningOn ? mk.id : null);
+                    } else if (turningOn) {
+                      setSaMarket(null);
+                      setCaMarket(null);
+                    }
                   }} className="gb"
                     style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
                              background:isOn ? C.purple : "transparent",
@@ -7464,6 +7596,58 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {scMarket && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing fixtures where <strong>{SC_MARKET_LABELS.find(m => m.id === scMarket)?.label}</strong> has a settlement-condition flag. Unfavorable-only games (⚑) sort to the bottom.
+              </div>
+            )}
+            {/* ── STANDARD / EMERGING (2026-08-04) — mirrors CA's Pattern
+                 Quality mode, two-way not three (no Strong tier for SC). ── */}
+            {scMarket && (
+              <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.purple}20` }}>
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                  Pattern Quality
+                </div>
+                <div className="cscroll" style={{ marginBottom:6 }}>
+                  {[
+                    { id:"standard", label:"Standard" },
+                    { id:"emerging", label:"Emerging" },
+                  ].map(m => {
+                    const isOn = scMode === m.id;
+                    return (
+                      <button key={m.id} onClick={() => setScMode(m.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? C.purple : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? C.purple : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {scMode === "emerging" && (
+                  <>
+                    <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:6,lineHeight:1.5 }}>
+                      Small-sample, unproven patterns (below the holdout test-size floor) — filtered by minimum holdout hit rate.
+                    </div>
+                    <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
+                      Min Hit Rate
+                    </div>
+                    <div className="cscroll">
+                      {[100, 99, 95, 90].map(pct => {
+                        const isOn = scEmergingMinHR === pct;
+                        return (
+                          <button key={pct} onClick={() => setScEmergingMinHR(pct)} className="gb"
+                            style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                     background:isOn ? C.purple : "transparent",
+                                     color:isOn ? "#fff" : C.muted,
+                                     border:`1px solid ${isOn ? C.purple : C.faint}`,
+                                     fontWeight:isOn ? 800 : undefined }}>
+                            {pct}%
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>

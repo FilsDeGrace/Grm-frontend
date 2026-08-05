@@ -1673,7 +1673,7 @@ function pickCATopSlots(list, isAvoid) {
 // top-slots/emerging/traps machinery to reproduce, because scFlags is
 // already the finished answer (one flag per market, computed server-side).
 // Just lists every market that got a flag, favorable ones first.
-function SettlementConditionsSection({ scFlags, scError, scModeEnabled, scLoading }) {
+function SettlementConditionsSection({ scFlags, scEmerging, scError, scModeEnabled, scLoading }) {
   if (!scModeEnabled) return null;
   if (scLoading) return (
     <SectionPanel label="Settlement Conditions">
@@ -1688,7 +1688,13 @@ function SettlementConditionsSection({ scFlags, scError, scModeEnabled, scLoadin
     </SectionPanel>
   );
   const entries = Object.entries(scFlags || {});
-  if (!entries.length) return (
+  // Top 2 per direction — same informational (not verdict-engine) treatment
+  // CA gives emerging patterns in ConditionStrategySection above: small-
+  // sample, unproven, shown as FYI text, not ranked/scored the way the
+  // flags above are.
+  const emergingPositive = (scEmerging?.positive || []).slice(0, 2);
+  const emergingAvoid = (scEmerging?.avoid || []).slice(0, 2);
+  if (!entries.length && !emergingPositive.length && !emergingAvoid.length) return (
     <SectionPanel label="Settlement Conditions">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
         <CAIconNone color={C.muted} />
@@ -1717,6 +1723,28 @@ function SettlementConditionsSection({ scFlags, scError, scModeEnabled, scLoadin
             </div>
           );
         })}
+        {(emergingPositive.length > 0 || emergingAvoid.length > 0) && (
+          <div style={{ borderTop: `1px solid ${C.border}`, marginTop: entries.length ? 6 : 0, paddingTop: 8 }}>
+            <div style={{ fontSize: 8, color: C.muted, textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 700, padding: "0 14px 6px" }}>
+              Emerging (small-sample)
+            </div>
+            {[...emergingPositive.map(c => ({ c, isAvoid: false })), ...emergingAvoid.map(c => ({ c, isAvoid: true }))].map(({ c, isAvoid }, i) => {
+              const label = SC_MARKET_LABELS.find(m => m.id === c.market)?.label || c.market;
+              const color = isAvoid ? C.red : C.purple;
+              return (
+                <div key={`${c.market}-${isAvoid}-${i}`} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 14px", opacity: 0.85 }}>
+                  {isAvoid ? <CAIconAvoid size={11} color={color} /> : <CAIconCheck size={11} color={color} />}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.text }}>{label}</div>
+                    <div style={{ fontSize: 8, color: C.text, opacity: 0.65, lineHeight: 1.5, marginTop: 1 }}>
+                      Holdout {c.holdoutHitRate}% vs {c.holdoutBaselineHR}% baseline ({c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp), n={c.holdoutSample} — below the test-size floor, not yet a validated pattern.
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </SectionPanel>
   );
@@ -2432,10 +2460,11 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
   // fetches once per mount, only when scModeEnabled is on, one-fixture array
   // since FMP only ever needs this one game's flags.
   const [scFlags, setScFlags] = useState(null);
+  const [scEmerging, setScEmerging] = useState({ positive: [], avoid: [] });
   const [scError, setScError] = useState(null);
   const [scLoading, setScLoading] = useState(false);
   useEffect(() => {
-    if (!scModeEnabled) { setScFlags(null); setScError(null); setScLoading(false); return; }
+    if (!scModeEnabled) { setScFlags(null); setScEmerging({ positive: [], avoid: [] }); setScError(null); setScLoading(false); return; }
     let cancelled = false;
     setScLoading(true);
     fetch(`${SERVER}/api/sc-match`, {
@@ -2443,7 +2472,12 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       body: JSON.stringify({ fixtures: [{ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds }] }),
     })
       .then(r => r.json())
-      .then(d => { if (!cancelled) { const r = d?.results?.[f.id]; if (r) setScFlags(r.flags); else setScError(d?.error || "No settlement-condition data"); } })
+      .then(d => {
+        if (cancelled) return;
+        const r = d?.results?.[f.id];
+        if (r) { setScFlags(r.flags); setScEmerging({ positive: r.emergingPositive || [], avoid: r.emergingAvoid || [] }); }
+        else setScError(d?.error || "No settlement-condition data");
+      })
       .catch(e => { if (!cancelled) setScError(e.message); })
       .finally(() => { if (!cancelled) setScLoading(false); });
     return () => { cancelled = true; };
@@ -3553,7 +3587,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             Self-gates on caModeEnabled and renders nothing at all when off or
             when there are no matches, so it never adds empty visual clutter. */}
         <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} caLoading={caLoading} />
-        <SettlementConditionsSection scFlags={scFlags} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
+        <SettlementConditionsSection scFlags={scFlags} scEmerging={scEmerging} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (
