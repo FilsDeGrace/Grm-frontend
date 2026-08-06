@@ -1675,6 +1675,17 @@ export const SC_MARKET_TO_FAMILY_ID = {
   bttsYes: "bttsyes", homeOver05: "homeo05", homeOver15: "homeo15",
   awayOver05: "awayo05", awayOver15: "awayo15",
 };
+// Client-side mirror of server.js's SC_MARKET_ODDS_FIELDS — that table only
+// ever existed server-side (SC matching moved there 2026-08-03), but ticket
+// generation (2026-08-04) needs to price SC legs off f.odds directly, same
+// as it already does for SA/CA via SA_MARKETS' oddsKey. Same confirmed
+// subset as the server-side version — markets without a confirmed odds key
+// just don't produce a priceable leg from SC, same graceful-skip as
+// everywhere else this gap shows up.
+export const SC_MARKET_ODDS_FIELD = {
+  homeWin: "o1", awayWin: "o2", under35: "under35odds", under45: "under45odds",
+  bttsYes: "bttsYesOdds", homeOver05: "over05odds", awayOver05: "over05odds",
+};
 
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
 // Single source of truth for "which verdict is THE headline" — same
@@ -5665,8 +5676,31 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // back from POST /api/sc-match with every fetch (small, per-fixture — no
   // separate round-trip needed when switching modes or the threshold below,
   // same instant-switch UX as CA gets from holding its payload client-side).
-  const [scMode,          setScMode]          = useState("standard"); // "standard" | "emerging"
+  const [scMode,          setScMode]          = useState("standard"); // "standard" | "strong" | "emerging"
   const [scEmergingMinHR, setScEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — same tiers as CA
+  // Strong tier (2026-08-04) — reuses isStrongCA/CA_STRONG_DEFAULTS directly,
+  // not a duplicated isStrongSC: isStrongCA is already generic over any
+  // combo with trainHitRate/holdoutHitRate/trainLift/holdoutLift/
+  // trainSample/holdoutSample, which SC's mined combos have too (same
+  // settlement-conditions-miner.mjs output schema as everything else in this
+  // file). Single input set, not CA's pos/avoid split — SC has no direction
+  // selector to begin with, so it always runs in the equivalent of CA's
+  // "both" mode (avoid mirrors around 100 automatically inside isStrongCA).
+  const strongDefaultStringsSC = d => ({
+    trainHR: String(d.trainHR), holdoutHR: String(d.holdoutHR),
+    lift: String(d.lift), minSample: String(d.minSample),
+  });
+  const [scStrongInputs, setScStrongInputs] = useState(strongDefaultStringsSC(CA_STRONG_DEFAULTS));
+  const resetScStrongInputs = () => setScStrongInputs(strongDefaultStringsSC(CA_STRONG_DEFAULTS));
+  const scStrongParsed = useMemo(() => {
+    const num = (raw, def) => { const v = parseFloat(raw); return Number.isFinite(v) ? v : def; };
+    return {
+      trainHR: num(scStrongInputs.trainHR, CA_STRONG_DEFAULTS.trainHR),
+      holdoutHR: num(scStrongInputs.holdoutHR, CA_STRONG_DEFAULTS.holdoutHR),
+      lift: num(scStrongInputs.lift, CA_STRONG_DEFAULTS.lift),
+      minSample: num(scStrongInputs.minSample, CA_STRONG_DEFAULTS.minSample),
+    };
+  }, [scStrongInputs]);
   useEffect(() => {
     if (!scExpanded) return;
     if (!fixtures?.length) return;
@@ -6629,16 +6663,30 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return sf ? !sf.fn(f) : false;
       })) continue;
 
-      // Standard vs Emerging — mirrors CA's caMode split. Standard reads the
-      // pre-computed flag (VALID tier, server-shrink-ranked). Emerging reads
-      // the raw emergingPositive/emergingAvoid arrays already included in
-      // scResults (small, per-fixture) and filters by scEmergingMinHR
+      // Standard vs Strong vs Emerging — mirrors CA's caMode split (minus the
+      // pos/avoid direction split CA has, since SC has no direction
+      // selector to begin with). Strong reads the full positive/avoid combo
+      // arrays (needed for isStrongCA's trainHitRate/trainLift/trainSample
+      // fields, which the simplified flags object doesn't carry) and filters
+      // through isStrongCA directly — reused, not reimplemented. Emerging
+      // reads the raw emergingPositive/emergingAvoid arrays already included
+      // in scResults (small, per-fixture) and filters by scEmergingMinHR
       // client-side — same instant-switch UX as CA's threshold picker, no
-      // extra round-trip on every click. A synthetic flag-shaped object is
-      // built so the same _scFlag/_scFlagged badge rendering downstream
+      // extra round-trip on every click. Both build a synthetic flag-shaped
+      // object so the same _scFlag/_scFlagged badge rendering downstream
       // works unchanged regardless of mode.
       let flag;
-      if (scMode === "emerging") {
+      if (scMode === "strong") {
+        const sPos = (scResults[f.id]?.positive || []).filter(c => c.market === scMarket && isStrongCA(c, false, scStrongParsed));
+        const sAvoid = (scResults[f.id]?.avoid || []).filter(c => c.market === scMarket && isStrongCA(c, true, scStrongParsed));
+        const best = sPos[0] || sAvoid[0];
+        if (!best) continue;
+        flag = sPos[0]
+          ? { status: "favorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Strong settlement-condition pattern favors this market — holdout ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (+${best.holdoutLift}pp).` }
+          : { status: "unfavorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Strong settlement-condition pattern works against this market — holdout only ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (${best.holdoutLift}pp).` };
+      } else if (scMode === "emerging") {
         const avoidCeiling = 100 - scEmergingMinHR;
         const ePos = (scResults[f.id]?.emergingPositive || []).filter(c => c.market === scMarket && (c.holdoutHitRate ?? 0) >= scEmergingMinHR);
         const eAvoid = (scResults[f.id]?.emergingAvoid || []).filter(c => c.market === scMarket && (c.holdoutHitRate ?? 100) <= avoidCeiling);
@@ -6697,7 +6745,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scEmergingMinHR]);
+  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scEmergingMinHR, scStrongParsed]);
 
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
@@ -7598,8 +7646,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 Showing fixtures where <strong>{SC_MARKET_LABELS.find(m => m.id === scMarket)?.label}</strong> has a settlement-condition flag. Unfavorable-only games (⚑) sort to the bottom.
               </div>
             )}
-            {/* ── STANDARD / EMERGING (2026-08-04) — mirrors CA's Pattern
-                 Quality mode, two-way not three (no Strong tier for SC). ── */}
+            {/* ── STANDARD / STRONG / EMERGING (2026-08-04) — now mirrors
+                 CA's full 3-way Pattern Quality mode. Strong reuses
+                 isStrongCA/CA_STRONG_DEFAULTS directly rather than
+                 duplicating the gate — single input set, not CA's pos/avoid
+                 split, since SC has no direction selector to begin with
+                 (avoid mirrors around 100 automatically, same as CA's
+                 "both" mode). ── */}
             {scMarket && (
               <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.purple}20` }}>
                 <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
@@ -7608,6 +7661,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 <div className="cscroll" style={{ marginBottom:6 }}>
                   {[
                     { id:"standard", label:"Standard" },
+                    { id:"strong", label:"Strong" },
                     { id:"emerging", label:"Emerging" },
                   ].map(m => {
                     const isOn = scMode === m.id;
@@ -7623,6 +7677,38 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     );
                   })}
                 </div>
+                {scMode === "strong" && (
+                  <>
+                    <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                      Only patterns with a high train hit rate, a high holdout hit rate, and a strong lift vs. that market's own baseline. Avoid mirrors this automatically (ceilings mirrored around 100%).
+                    </div>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5 }}>
+                      <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,opacity:.75 }}>
+                        Thresholds
+                      </div>
+                      <button onClick={resetScStrongInputs} className="gb-ghost"
+                        style={{ padding:"2px 8px",fontSize:8,textTransform:"none",color:C.muted,border:`1px solid ${C.faint}` }}>
+                        Reset to defaults
+                      </button>
+                    </div>
+                    <div style={{ display:"flex",gap:6,marginBottom:8,flexWrap:"wrap" }}>
+                      {[
+                        { key:"trainHR",   label:"Min Train HR %",   placeholder:String(CA_STRONG_DEFAULTS.trainHR) },
+                        { key:"holdoutHR", label:"Min Holdout HR %", placeholder:String(CA_STRONG_DEFAULTS.holdoutHR) },
+                        { key:"lift",      label:"Min Lift (pp)",    placeholder:String(CA_STRONG_DEFAULTS.lift) },
+                        { key:"minSample", label:"Min Sample (n)",   placeholder:String(CA_STRONG_DEFAULTS.minSample) },
+                      ].map(fld => (
+                        <div key={fld.key} style={{ flex:"1 1 100px",minWidth:100 }}>
+                          <div style={{ fontSize:7,color:C.muted,marginBottom:3 }}>{fld.label}</div>
+                          <input type="number" value={scStrongInputs[fld.key]}
+                            onChange={e => { const v = e.target.value; setScStrongInputs(prev => ({ ...prev, [fld.key]: v })); }}
+                            placeholder={fld.placeholder} className="gb-ghost"
+                            style={{ width:"100%",padding:"6px 8px",fontSize:11,color:C.text,background:C.faint,borderColor:C.border }} />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
                 {scMode === "emerging" && (
                   <>
                     <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:6,lineHeight:1.5 }}>
@@ -14476,6 +14562,313 @@ function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTic
     </div>
   );
 }
+// ── TICKET GEN (2026-08-04, side project, Davies's call on shape) ──────────
+// Stacks whichever legs clear the bar across any combination of SA/CA/SC —
+// three strategies (pure-ladder: one market, every qualifying fixture;
+// mixed-ladder: best qualifying leg per fixture, any market; random:
+// shuffled sample), and two outputs per run (Full Stack: everything that
+// qualifies; Optimal Trim: greedy top-N by score). Deliberately not deep —
+// no odds-curve optimization, no correlation checking between legs, just
+// "does it qualify, stack it, optionally cap it." Client-side: SA and CA's
+// own matching (matchSAPatterns/matchCAConditions) already only exist
+// client-side (never ported server-side, unlike SC), so this reuses that
+// existing infrastructure directly rather than re-deriving it server-side —
+// the same reasoning liveSaMatchCache/liveCaMatchCache above already runs
+// on, just generalized across ALL markets per fixture instead of one.
+function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFullModel, onUseTicket }) {
+  const [sources, setSources] = useState(() => new Set(["sa", "ca"]));
+  const [strategy, setStrategy] = useState("mixed-ladder"); // "pure-ladder" | "mixed-ladder" | "random"
+  const [ladderMarket, setLadderMarket] = useState(null);
+  const [trimLegCount, setTrimLegCount] = useState(6);
+  const [modelMinProb, setModelMinProb] = useState(65); // floor for the standalone "Model" source
+  const [scResults, setScResults] = useState(null);
+  const [scLoading, setScLoading] = useState(false);
+
+  const needsSC = sources.has("sc") || sources.has("sc-verdict");
+  useEffect(() => {
+    if (!needsSC || !fixtures?.length || scResults || scLoading) return;
+    setScLoading(true);
+    fetch(`${SERVER}/api/sc-match`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+    })
+      .then(r => r.json())
+      .then(d => setScResults(d?.results || {}))
+      .catch(() => setScResults({}))
+      .finally(() => setScLoading(false));
+  }, [needsSC, fixtures, scResults, scLoading]);
+
+  // Model probability — the base model's own predicted probability for a
+  // market, independent of any pattern-mining engine. "TB:..." labeled
+  // markets (SA/CA) resolve via SA_MARKETS' own probKey/computeProb; SC's
+  // raw pool-key markets (homeWin, over25, etc.) map directly onto the same
+  // f.markets field names — same confirmed direct-field mapping used
+  // throughout the SC integration.
+  const modelProbFor = (f, market) => {
+    const m = f.markets || {};
+    const def = SA_MARKETS[market];
+    if (def) return def.computeProb ? def.computeProb(m) : (m[def.probKey] ?? null);
+    return m[market] ?? null;
+  };
+
+  // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
+  // LEAST ONE selected source (OR across sources, not AND — requiring every
+  // engine to agree at once would leave most days with an almost-empty
+  // pool). No odds -> not priceable -> skipped, same as everywhere else in
+  // this app that builds a leg off live odds.
+  const qualifyingLegs = useMemo(() => {
+    const legs = [];
+    const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source) => {
+      const oddsNum = parseFloat(odds);
+      if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
+      legs.push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league,
+        market, marketLabel, odds: oddsNum, hitRate: hitRate ?? null, lift: lift ?? 0,
+        modelProb: modelProbFor(f, market), source });
+    };
+    for (const f of fixtures || []) {
+      if (sources.has("sa") && appSaPatterns?.length) {
+        for (const mkt of Object.keys(SA_MARKETS)) {
+          if (mkt === "PE:Mix") continue;
+          const { positive } = matchSAPatterns(f, mkt, appSaPatterns);
+          if (!positive.length) continue;
+          const def = SA_MARKETS[mkt];
+          const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
+          pushLeg(f, mkt, mkt.replace(/^TB:/, ""), odds, positive[0].hitRate ?? positive[0].trainHitRate ?? null, positive[0].lift, "SA");
+        }
+      }
+      if (sources.has("ca") && appCaPatterns) {
+        const { positive } = matchCAConditions(f, appCaPatterns);
+        for (const c of positive) {
+          const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
+          pushLeg(f, c.market, c.market.replace(/^TB:/, ""), odds, c.holdoutHitRate, c.holdoutLift, "CA");
+        }
+      }
+      if (sources.has("ca-verdict") && appCaPatterns) {
+        const caMatches = matchCAConditions(f, appCaPatterns);
+        const lean = computeCAVerdicts(caMatches, f).find(v => v.type === "strongest-lean" && v.direction === "positive");
+        if (lean) {
+          const odds = SA_MARKETS[lean.market]?.oddsKey ? f.odds?.[SA_MARKETS[lean.market].oddsKey] : caOddsFor(f, lean.market);
+          pushLeg(f, lean.market, lean.market.replace(/^TB:/, ""), odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "CA verdict");
+        }
+      }
+      if (sources.has("sc") && scResults) {
+        for (const [mk, flag] of Object.entries(scResults[f.id]?.flags || {})) {
+          if (flag.status !== "favorable") continue;
+          const label = SC_MARKET_LABELS.find(m => m.id === mk)?.label || mk;
+          const odds = SC_MARKET_ODDS_FIELD[mk] ? f.odds?.[SC_MARKET_ODDS_FIELD[mk]] : null;
+          pushLeg(f, mk, label, odds, flag.holdoutHitRate, flag.holdoutLift, "SC");
+        }
+      }
+      if (sources.has("sc-verdict") && scResults) {
+        const lean = (scResults[f.id]?.verdicts || []).find(v => v.type === "strongest-lean" && v.direction === "positive");
+        if (lean) {
+          const label = SC_MARKET_LABELS.find(m => m.id === lean.market)?.label || lean.market;
+          const odds = SC_MARKET_ODDS_FIELD[lean.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[lean.market]] : null;
+          pushLeg(f, lean.market, label, odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "SC verdict");
+        }
+      }
+      // Model — the raw base model's own probability, no pattern-mining
+      // engine required. Only markets clearing modelMinProb qualify; a leg
+      // from this source has hitRate:null (no engine backs it), so it ranks
+      // purely on modelProb once blended into legScore below.
+      if (sources.has("model")) {
+        for (const mkt of Object.keys(SA_MARKETS)) {
+          if (mkt === "PE:Mix") continue;
+          const mp = modelProbFor(f, mkt);
+          if (mp == null || mp < modelMinProb) continue;
+          const def = SA_MARKETS[mkt];
+          const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
+          pushLeg(f, mkt, mkt.replace(/^TB:/, ""), odds, null, 0, "Model");
+        }
+      }
+    }
+    return legs;
+  }, [fixtures, sources, appSaPatterns, appCaPatterns, scResults, modelMinProb]);
+
+  const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
+  // Ranking now blends model probability in alongside whatever
+  // pattern-mining signal earned the leg its spot (2026-08-05, Davies's
+  // request) — a leg with strong SA/CA/SC support AND a confident base
+  // model reads as more trustworthy than one resting on pattern support
+  // alone. hitRate/modelProb are both already 0-100 scale (directly
+  // averageable); lift stays additive on top, same as before. Model-only
+  // legs (hitRate:null) fall back to modelProb alone.
+  const legScore = l => l.hitRate != null
+    ? ((l.hitRate + (l.modelProb ?? l.hitRate)) / 2) + (l.lift ?? 0)
+    : (l.modelProb ?? 0);
+
+  const stackedLegs = useMemo(() => {
+    if (strategy === "pure-ladder") {
+      const mkt = ladderMarket || availableMarkets[0];
+      if (!mkt) return [];
+      const byFixture = new Map();
+      for (const leg of qualifyingLegs) {
+        if (leg.market !== mkt) continue;
+        const cur = byFixture.get(leg.fixtureId);
+        if (!cur || legScore(leg) > legScore(cur)) byFixture.set(leg.fixtureId, leg);
+      }
+      return [...byFixture.values()];
+    }
+    if (strategy === "random") {
+      const shuffled = [...qualifyingLegs].sort(() => Math.random() - 0.5);
+      const seen = new Set(), out = [];
+      for (const leg of shuffled) {
+        if (seen.has(leg.fixtureId)) continue; // still one leg per fixture — random picks WHICH leg, not duplicate fixtures
+        seen.add(leg.fixtureId); out.push(leg);
+      }
+      return out;
+    }
+    // mixed-ladder (default) — best single leg per fixture, any market/source
+    const byFixture = new Map();
+    for (const leg of qualifyingLegs) {
+      const cur = byFixture.get(leg.fixtureId);
+      if (!cur || legScore(leg) > legScore(cur)) byFixture.set(leg.fixtureId, leg);
+    }
+    return [...byFixture.values()];
+  }, [qualifyingLegs, strategy, ladderMarket, availableMarkets]);
+
+  const trimmedLegs = useMemo(() =>
+    [...stackedLegs].sort((a, b) => legScore(b) - legScore(a)).slice(0, trimLegCount),
+    [stackedLegs, trimLegCount]);
+
+  const buildTicket = (legs, label) => {
+    if (!legs.length) return null;
+    const totalOdds = parseFloat(legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2));
+    return {
+      id: Date.now() + Math.random(),
+      legs: legs.map(l => ({
+        fixtureId: l.fixtureId, game: `${l.home || "?"} vs ${l.away || "?"}`,
+        home: l.home, away: l.away, pick: l.marketLabel, market: l.marketLabel,
+        league: l.league, odds: l.odds, conf: l.hitRate,
+      })),
+      totalOdds, isAuto: true, slotLabel: label,
+      slotId: `ticket-gen-${strategy}-${Date.now()}`, jarvisMode: "gen",
+    };
+  };
+
+  const SOURCE_OPTS = [
+    { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
+    { id: "sc", label: "SC" }, { id: "sc-verdict", label: "SC Verdict" }, { id: "model", label: "Model" },
+  ];
+  const STRATEGY_OPTS = [
+    { id: "mixed-ladder", label: "Mixed Ladder", desc: "Best leg per game" },
+    { id: "pure-ladder", label: "Pure Ladder", desc: "One market" },
+    { id: "random", label: "Random", desc: "Shuffled sample" },
+  ];
+
+  return (
+    <div style={{ padding: "4px 0" }}>
+      <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
+        Stacks whatever qualifies across any combination of SA/CA/SC/Model into a parlay. Ranking always blends the base model's own probability in alongside whatever engine backed the leg. Full Stack takes every qualifying leg; Optimal Trim caps it to the strongest N.
+      </div>
+
+      <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Sources</div>
+      <div className="cscroll" style={{ marginBottom: 6 }}>
+        {SOURCE_OPTS.map(s => {
+          const isOn = sources.has(s.id);
+          return (
+            <button key={s.id} onClick={() => {
+              const next = new Set(sources);
+              if (isOn) next.delete(s.id); else next.add(s.id);
+              setSources(next);
+            }} className="gb" style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
+              background: isOn ? C.accent : "transparent", color: isOn ? "#fff" : C.muted,
+              border: `1px solid ${isOn ? C.accent : C.faint}`, fontWeight: isOn ? 800 : undefined }}>
+              {isOn ? "✓ " : ""}{s.label}
+            </button>
+          );
+        })}
+      </div>
+      {sources.has("model") && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <div style={{ fontSize: 8, color: C.muted }}>Model min probability</div>
+          <input type="number" value={modelMinProb} min={50} max={99}
+            onChange={e => setModelMinProb(Math.max(50, Math.min(99, parseInt(e.target.value) || 65)))}
+            className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
+          <div style={{ fontSize: 8, color: C.muted }}>% — no pattern-mining backing needed, model confidence alone qualifies a leg</div>
+        </div>
+      )}
+      {scLoading && <div style={{ fontSize: 8, color: C.muted, marginBottom: 8 }}>Loading settlement conditions…</div>}
+
+      <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Strategy</div>
+      <div className="cscroll" style={{ marginBottom: strategy === "pure-ladder" ? 8 : 12 }}>
+        {STRATEGY_OPTS.map(s => {
+          const isOn = strategy === s.id;
+          return (
+            <button key={s.id} onClick={() => setStrategy(s.id)} className="gb"
+              style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
+                background: isOn ? C.accent : "transparent", color: isOn ? "#fff" : C.muted,
+                border: `1px solid ${isOn ? C.accent : C.faint}`, fontWeight: isOn ? 800 : undefined }}>
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+      {strategy === "pure-ladder" && (
+        <div className="cscroll" style={{ marginBottom: 12 }}>
+          {availableMarkets.length === 0 && <div style={{ fontSize: 8, color: C.muted }}>No qualifying markets yet.</div>}
+          {availableMarkets.map(mkt => {
+            const isOn = (ladderMarket || availableMarkets[0]) === mkt;
+            return (
+              <button key={mkt} onClick={() => setLadderMarket(mkt)} className="gb"
+                style={{ flexShrink: 0, padding: "5px 10px", fontSize: 9, textTransform: "none",
+                  background: isOn ? C.purple : "transparent", color: isOn ? "#fff" : C.muted,
+                  border: `1px solid ${isOn ? C.purple : C.faint}` }}>
+                {SC_MARKET_LABELS.find(m => m.id === mkt)?.label || mkt.replace(/^TB:/, "")}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+        <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, opacity: .75 }}>Optimal Trim Size</div>
+        <input type="number" value={trimLegCount} min={2} max={20}
+          onChange={e => setTrimLegCount(Math.max(2, parseInt(e.target.value) || 6))}
+          className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
+      </div>
+
+      {[
+        { legs: stackedLegs, label: `Full Stack (${strategy})`, sub: `${stackedLegs.length} legs — every qualifying game` },
+        { legs: trimmedLegs, label: `Optimal Trim (${strategy})`, sub: `${trimmedLegs.length} legs — strongest ${trimLegCount}` },
+      ].map((variant, i) => {
+        const ticket = buildTicket(variant.legs, variant.label);
+        if (!ticket) return (
+          <div key={i} style={{ fontSize: 9, color: C.muted, padding: "10px 4px" }}>
+            {i === 0 ? "No qualifying legs yet — try adding another source." : ""}
+          </div>
+        );
+        return (
+          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{variant.label}</div>
+              <div style={{ fontSize: 9, color: C.accent, fontWeight: 800 }}>×{ticket.totalOdds}</div>
+            </div>
+            <div style={{ fontSize: 8, color: C.muted, marginBottom: 8 }}>{variant.sub}</div>
+            {variant.legs.slice(0, 8).map((l, li) => (
+              <div key={li} onClick={() => onFullModel && onFullModel(l.fixtureId)}
+                style={{ display: "flex", justifyContent: "space-between", padding: "4px 0",
+                  borderTop: li ? `1px solid ${C.faint}` : "none", cursor: onFullModel ? "pointer" : "default" }}>
+                <div style={{ fontSize: 9, color: C.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {l.home} vs {l.away} <span style={{ color: C.muted }}>· {l.marketLabel}</span>
+                </div>
+                <div style={{ fontSize: 8, color: C.muted, flexShrink: 0, marginLeft: 6 }}>
+                  {l.source} · ×{l.odds}{l.modelProb != null ? ` · model ${Math.round(l.modelProb)}%` : ""}
+                </div>
+              </div>
+            ))}
+            {variant.legs.length > 8 && <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>+{variant.legs.length - 8} more</div>}
+            <button onClick={() => onUseTicket && onUseTicket(ticket)} className="gb"
+              style={{ width: "100%", marginTop: 10, padding: "8px", fontSize: 10, textTransform: "none",
+                background: C.accent, color: "#fff", border: "none", fontWeight: 800 }}>
+              Use This Ticket →
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0, appSaPatterns = null, appCaPatterns = null }) {
   // Only the first ticket card (in render order) that actually has a leg-risk
   // flag should auto-open its explainer on entry — otherwise every flagged
@@ -15701,6 +16094,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 {[
                   { id:"jarvis", label:"Jarvis",     desc:"AI-built ticket" },
                   { id:"ca",     label:"CA Parlays", desc:"Story-based" },
+                  { id:"gen",    label:"Multi Gen",  desc:"Stack & ladder" },
                   { id:"custom", label:"Custom",     desc:"Your rules" },
                 ].map(m => {
                   const active = builderMode === m.id;
@@ -15829,6 +16223,27 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       ...prev.filter(t => t.slotId !== caTicket.ticketId),
                       newTicket,
                     ]);
+                  }}
+                />
+              )}
+
+              {/* ── MULTI GEN TAB (2026-08-04) — ticket already comes out of
+                   TicketGenSlate in the final shape TicketCard expects, no
+                   leg-shape conversion needed (unlike CA's temp-module leg
+                   shape above). ── */}
+              {builderMode === "gen" && (
+                <TicketGenSlate
+                  fixtures={fixtures}
+                  date={date}
+                  C={C}
+                  appSaPatterns={appSaPatterns}
+                  appCaPatterns={appCaPatterns}
+                  onFullModel={onFullModel ? (fixtureId) => {
+                    const f = fixtures.find(x => x.id === fixtureId || String(x.id) === String(fixtureId));
+                    if (f) onFullModel(f);
+                  } : null}
+                  onUseTicket={(genTicket) => {
+                    setTickets(prev => [...prev.filter(t => t.slotId !== genTicket.slotId), genTicket]);
                   }}
                 />
               )}

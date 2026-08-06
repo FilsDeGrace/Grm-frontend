@@ -1673,7 +1673,7 @@ function pickCATopSlots(list, isAvoid) {
 // top-slots/emerging/traps machinery to reproduce, because scFlags is
 // already the finished answer (one flag per market, computed server-side).
 // Just lists every market that got a flag, favorable ones first.
-function SettlementConditionsSection({ scFlags, scEmerging, scError, scModeEnabled, scLoading }) {
+function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError, scModeEnabled, scLoading }) {
   if (!scModeEnabled) return null;
   if (scLoading) return (
     <SectionPanel label="Settlement Conditions">
@@ -1694,7 +1694,8 @@ function SettlementConditionsSection({ scFlags, scEmerging, scError, scModeEnabl
   // flags above are.
   const emergingPositive = (scEmerging?.positive || []).slice(0, 2);
   const emergingAvoid = (scEmerging?.avoid || []).slice(0, 2);
-  if (!entries.length && !emergingPositive.length && !emergingAvoid.length) return (
+  const verdicts = scVerdicts || [];
+  if (!entries.length && !emergingPositive.length && !emergingAvoid.length && !verdicts.length) return (
     <SectionPanel label="Settlement Conditions">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
         <CAIconNone color={C.muted} />
@@ -1704,8 +1705,45 @@ function SettlementConditionsSection({ scFlags, scEmerging, scError, scModeEnabl
   );
   const order = { favorable: 0, conflicted: 1, unfavorable: 2 };
   entries.sort((a, b) => (order[a[1].status] ?? 3) - (order[b[1].status] ?? 3));
+  // Verdict headline — computed server-side already (scComputeVerdicts,
+  // CA_Ranking_Merge_Spec.md's triplet) but never actually reached the
+  // screen until now (2026-08-04 fix). Same shape CAVerdictBlock shows for
+  // CA: strongest-lean first, then second-lean/best-value/contradiction/
+  // origin-caveat, with predictiveStrength/reliability/verifiedEdge shown
+  // explicitly rather than one collapsed number.
+  const verdictOrder = { "strongest-lean": 0, "best-value": 1, "second-lean": 2, "contradiction": 3, "unclear-origin": 4, "fragile-origin": 5, "origin-caveat": 6 };
+  const sortedVerdicts = [...verdicts].sort((a, b) => (verdictOrder[a.type] ?? 9) - (verdictOrder[b.type] ?? 9));
   return (
     <SectionPanel label="Settlement Conditions">
+      {sortedVerdicts.length > 0 && (
+        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+          {sortedVerdicts.map((v, i) => {
+            const color = v.type === "strongest-lean" || v.type === "second-lean"
+              ? (v.direction === "avoid" ? C.red : C.purple)
+              : v.type === "best-value" ? C.gold : C.amber;
+            return (
+              <div key={i} style={{ marginBottom: i < sortedVerdicts.length - 1 ? 8 : 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontSize: 8, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: ".06em" }}>
+                    {v.type.replace(/-/g, " ")}
+                  </span>
+                  {v.market && <span style={{ fontSize: 9, color: C.text, fontWeight: 700 }}>
+                    {SC_MARKET_LABELS.find(m => m.id === v.market)?.label || v.market}
+                  </span>}
+                </div>
+                <div style={{ fontSize: 9, color: C.text, opacity: 0.75, lineHeight: 1.5 }}>{v.text}</div>
+                {v.verifiedEdge != null && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 8, color: C.muted }}>
+                    <span>Predictive strength: <strong style={{ color: C.text }}>{v.predictiveStrength?.toFixed(1)}%</strong></span>
+                    <span>Reliability: <strong style={{ color: C.text }}>{v.reliability?.toFixed(1)}%</strong></span>
+                    <span>Verified edge: <strong style={{ color: v.verifiedEdge >= 0 ? C.green : C.red }}>{v.verifiedEdge >= 0 ? "+" : ""}{v.verifiedEdge.toFixed(1)}pp</strong></span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div style={{ padding: "4px 0" }}>
         {entries.map(([marketKey, flag]) => {
           const label = SC_MARKET_LABELS.find(m => m.id === marketKey)?.label || marketKey;
@@ -2460,11 +2498,12 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
   // fetches once per mount, only when scModeEnabled is on, one-fixture array
   // since FMP only ever needs this one game's flags.
   const [scFlags, setScFlags] = useState(null);
+  const [scVerdicts, setScVerdicts] = useState([]);
   const [scEmerging, setScEmerging] = useState({ positive: [], avoid: [] });
   const [scError, setScError] = useState(null);
   const [scLoading, setScLoading] = useState(false);
   useEffect(() => {
-    if (!scModeEnabled) { setScFlags(null); setScEmerging({ positive: [], avoid: [] }); setScError(null); setScLoading(false); return; }
+    if (!scModeEnabled) { setScFlags(null); setScVerdicts([]); setScEmerging({ positive: [], avoid: [] }); setScError(null); setScLoading(false); return; }
     let cancelled = false;
     setScLoading(true);
     fetch(`${SERVER}/api/sc-match`, {
@@ -2475,7 +2514,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       .then(d => {
         if (cancelled) return;
         const r = d?.results?.[f.id];
-        if (r) { setScFlags(r.flags); setScEmerging({ positive: r.emergingPositive || [], avoid: r.emergingAvoid || [] }); }
+        if (r) { setScFlags(r.flags); setScVerdicts(r.verdicts || []); setScEmerging({ positive: r.emergingPositive || [], avoid: r.emergingAvoid || [] }); }
         else setScError(d?.error || "No settlement-condition data");
       })
       .catch(e => { if (!cancelled) setScError(e.message); })
@@ -3587,7 +3626,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             Self-gates on caModeEnabled and renders nothing at all when off or
             when there are no matches, so it never adds empty visual clutter. */}
         <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} caLoading={caLoading} />
-        <SettlementConditionsSection scFlags={scFlags} scEmerging={scEmerging} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
+        <SettlementConditionsSection scFlags={scFlags} scVerdicts={scVerdicts} scEmerging={scEmerging} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (
