@@ -10,15 +10,14 @@ import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
 import { enrichGamesForDate, buildBasketballRolloverPool, buildBasketballRolloverPick } from "./BasketballEngine";
 import { toFixtureShape, getPickFamilies, getMarketStyle, getProgressLabel, getSportConfig } from "./sportConfig";
-// TEMP (2026-07-31): story-first CA verdict resolver + CA-verdict-based
-// parlay system engine. See caStoryVerdict.js's own banner comment for the
-// "steer away only" bug this fixes in computeCAVerdicts' Rule 3 below, and
-// parlaySystemEngine.mjs's for the ledger/occupancy rules behind the new
-// "CA Parlays" tab in ParlayJarvisTab. Both take zero SA input by design —
-// per the plan, this stays a valid subset once the merged CA/SA ensemble
-// architecture lands, not throwaway work.
-import { resolveStoryVerdict, resolveAllStoryVerdicts } from "./caStoryVerdict.js";
-import { legFromVerdict, runSystems } from "./parlaySystemEngine.mjs";
+// TEMP (2026-07-31): story-first CA verdict resolver. See caStoryVerdict.js's
+// own banner comment for the "steer away only" bug this fixes in
+// computeCAVerdicts' Rule 3 below. resolveStoryVerdict is still used by the
+// live CA Mix view (single best market per fixture); resolveAllStoryVerdicts,
+// legFromVerdict, runSystems, and parlaySystemEngine.mjs were only consumed
+// by the removed "CA Parlays" tab (2026-08-06) and have no other caller —
+// dropped rather than left as dead imports.
+import { resolveStoryVerdict } from "./caStoryVerdict.js";
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
@@ -1686,6 +1685,40 @@ export const SC_MARKET_ODDS_FIELD = {
   homeWin: "o1", awayWin: "o2", under35: "under35odds", under45: "under45odds",
   bttsYes: "bttsYesOdds", homeOver05: "over05odds", awayOver05: "over05odds",
 };
+
+// ── Cross-engine market-id translation (2026-08-06 fix) ────────────────────
+// SA and CA share one flat market-id namespace ("TB:Over 2.5" etc — see
+// SA_TO_FAMILY_ID's keys). SC does NOT — its own ids are bare family strings
+// ("over25", "homeWin", ... — see SC_MARKET_LABELS above), a different
+// scheme entirely. Combine mode's "lock every checked engine onto one
+// market" logic used to copy a market id straight from whichever engine was
+// just picked onto the others with zero translation — harmless SA<->CA
+// (same namespace already), but SC<->SA/CA silently handed CA (or SA) an id
+// it has no entry for (e.g. "over25" has no CA_MARKET_LABELS match), which
+// broke that engine's row matching for the rest of the combine — this is
+// the crash from selecting an SC market while CA is checked into Combine.
+// familyOfMarket/marketForEngine round-trip every mirror through the shared
+// family id (SA_TO_FAMILY_ID's values / SC_MARKET_TO_FAMILY_ID's values —
+// already the same vocabulary) instead of a raw string copy.
+const FAMILY_TO_TB_MARKET = Object.fromEntries(
+  Object.entries(SA_TO_FAMILY_ID).map(([tb, fam]) => [fam, tb])
+);
+const FAMILY_TO_SC_MARKET = Object.fromEntries(
+  Object.entries(SC_MARKET_TO_FAMILY_ID).map(([sc, fam]) => [fam, sc])
+);
+function familyOfMarket(engine, marketId) {
+  if (marketId == null) return null;
+  if (engine === "sc") return SC_MARKET_TO_FAMILY_ID[marketId] ?? null;
+  // sa and ca share one namespace; CA:Mix/CA:Verdict/PE:Mix have no
+  // single-family equivalent (they resolve per-fixture), so no translation —
+  // familyOfMarket correctly returns null for those, same as an unknown id.
+  return SA_TO_FAMILY_ID[marketId] ?? null;
+}
+function marketForEngine(engine, familyId) {
+  if (familyId == null) return null;
+  if (engine === "sc") return FAMILY_TO_SC_MARKET[familyId] ?? null;
+  return FAMILY_TO_TB_MARKET[familyId] ?? null; // same TB: id serves both sa and ca
+}
 
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
 // Single source of truth for "which verdict is THE headline" — same
@@ -6763,7 +6796,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const activeEngines = ["sa", "ca", "sc"].filter(e => combineEngines.has(e) && (e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket));
     if (activeEngines.length < 2) return [];
     const marketOf = e => e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket;
-    if (!activeEngines.every(e => marketOf(e) === marketOf(activeEngines[0]))) return []; // must all share one market
+    // FIX (2026-08-06): was raw-id equality (marketOf(e) === marketOf(base)),
+    // which could never be true once SC was one of the active engines — SC's
+    // ids ("over25") never equal SA/CA's ("TB:Over 2.5") even for the exact
+    // same market. Compares by shared family id instead (see familyOfMarket
+    // above); null-guards so two engines both resolving to "no family" (e.g.
+    // a stray CA:Mix) don't get treated as a match.
+    const familyOf = e => familyOfMarket(e, marketOf(e));
+    const baseFamily = familyOf(activeEngines[0]);
+    if (baseFamily == null || !activeEngines.every(e => familyOf(e) === baseFamily)) return []; // must all share one market
     const rowSets = { sa: saRows, ca: caRows, sc: scRows };
     const byFixture = {};
     for (const e of activeEngines) byFixture[e] = new Map(rowSets[e].map(r => [r.f.id, r]));
@@ -7104,12 +7145,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               // Once 2+ are selected, lock every selected engine onto whichever
               // market is already active (SA, then CA, then SC — first one
               // found wins, arbitrary but consistent), same bootstrapping the
-              // old SA+CA-only toggle did.
+              // old SA+CA-only toggle did. FIX (2026-08-06): routes through
+              // familyOfMarket/marketForEngine now instead of copying the
+              // source engine's raw market id onto the others — SC's ids
+              // aren't in the same namespace as SA/CA's (see the comment by
+              // familyOfMarket), so a raw copy handed the other engine(s) an
+              // id they had no entry for.
               if (next.size >= 2) {
-                const shared = (next.has("sa") && saMarket) || (next.has("ca") && caMarket) || (next.has("sc") && scMarket) || null;
-                if (next.has("sa")) setSaMarket(shared);
-                if (next.has("ca")) setCaMarket(shared);
-                if (next.has("sc")) setScMarket(shared);
+                const sourceEngine = next.has("sa") && saMarket ? "sa" : next.has("ca") && caMarket ? "ca" : next.has("sc") && scMarket ? "sc" : null;
+                const sourceMarket = sourceEngine === "sa" ? saMarket : sourceEngine === "ca" ? caMarket : sourceEngine === "sc" ? scMarket : null;
+                const sharedFamily = sourceEngine ? familyOfMarket(sourceEngine, sourceMarket) : null;
+                if (next.has("sa")) setSaMarket(sharedFamily ? marketForEngine("sa", sharedFamily) : null);
+                if (next.has("ca")) setCaMarket(sharedFamily ? marketForEngine("ca", sharedFamily) : null);
+                if (next.has("sc")) setScMarket(sharedFamily ? marketForEngine("sc", sharedFamily) : null);
               }
             }} className="gb"
               style={{ padding:"6px 12px",fontSize:10,textTransform:"none",
@@ -7203,8 +7251,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       // Mirror onto whichever OTHER engines are actually part
                       // of the combine set (2026-08-04, generalized from a
                       // hardcoded SA<->CA pair to any 2-or-3-way selection).
-                      if (combineEngines.has("ca")) setCaMarket(turningOn ? mk.id : null);
-                      if (combineEngines.has("sc")) setScMarket(turningOn ? mk.id : null);
+                      // FIX (2026-08-06): translated through familyOfMarket
+                      // instead of copying mk.id raw — SC's ids aren't in the
+                      // same namespace as SA/CA's TB: ids (see familyOfMarket
+                      // above), so a raw copy broke SC's market matching.
+                      const fam = turningOn ? familyOfMarket("sa", mk.id) : null;
+                      if (combineEngines.has("ca")) setCaMarket(fam ? marketForEngine("ca", fam) : null);
+                      if (combineEngines.has("sc")) setScMarket(fam ? marketForEngine("sc", fam) : null);
                     } else if (turningOn) {
                       setCaMarket(null); // mutually exclusive with the CA row below (unchanged default behavior)
                       setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
@@ -7391,8 +7444,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     const turningOn = !isOn;
                     setCaMarket(turningOn ? mk.id : null);
                     if (combineMode) {
-                      if (combineEngines.has("sa")) setSaMarket(turningOn ? mk.id : null);
-                      if (combineEngines.has("sc")) setScMarket(turningOn ? mk.id : null);
+                      // FIX (2026-08-06): translated, not raw-copied — see
+                      // familyOfMarket's comment. mk.id can also be "CA:Mix"
+                      // or "CA:Verdict" here, which have no single-family
+                      // equivalent; familyOfMarket correctly returns null for
+                      // those, so the mirrored engines get cleared to null
+                      // instead of a nonsense id.
+                      const fam = turningOn ? familyOfMarket("ca", mk.id) : null;
+                      if (combineEngines.has("sa")) setSaMarket(fam ? marketForEngine("sa", fam) : null);
+                      if (combineEngines.has("sc")) setScMarket(fam ? marketForEngine("sc", fam) : null);
                     } else if (turningOn) {
                       setSaMarket(null); // mutually exclusive with the SA row above (unchanged default behavior)
                       setScMarket(null); // and the SC row (2026-08-03, three-way mutual exclusivity)
@@ -7625,8 +7685,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     const turningOn = !isOn;
                     setScMarket(turningOn ? mk.id : null);
                     if (combineMode) {
-                      if (combineEngines.has("sa")) setSaMarket(turningOn ? mk.id : null);
-                      if (combineEngines.has("ca")) setCaMarket(turningOn ? mk.id : null);
+                      // FIX (2026-08-06): this was the actual crash — SC's
+                      // ids ("over25") were being copied raw onto
+                      // setCaMarket/setSaMarket, which only understand
+                      // "TB:Over 2.5"-style ids (see familyOfMarket's
+                      // comment). Now translated through the shared family id.
+                      const fam = turningOn ? familyOfMarket("sc", mk.id) : null;
+                      if (combineEngines.has("sa")) setSaMarket(fam ? marketForEngine("sa", fam) : null);
+                      if (combineEngines.has("ca")) setCaMarket(fam ? marketForEngine("ca", fam) : null);
                     } else if (turningOn) {
                       setSaMarket(null);
                       setCaMarket(null);
@@ -14369,218 +14435,37 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
     </div>
   );
 }
-// ── JARVIS CA SLATE (temp, 2026-07-31) — "CA Parlays" tab ──────────────────
-// Unlike JarvisTASlate above, this is NOT server-fetched. matchCAConditions,
-// caOddsFor, and `fixtures` are all already live in the browser at render
-// time (the CA Mix view a few thousand lines up computes the exact same
-// way), so recomputing here avoids porting CA matching logic into
-// server.js just to serve it back over an endpoint — that duplication is
-// exactly what several comments elsewhere in this file already flag as a
-// hand-sync burden ("has to be kept in sync by hand"). If this outgrows a
-// useMemo (needs scheduling, historical logging, cross-session caching —
-// the same reasons the TA engine lives server-side), move it there then.
-//
-// Pipeline: fixtures -> matchCAConditions -> resolveStoryVerdict ->
-// legFromVerdict -> runSystems(CA_PARLAY_SYSTEMS, legs). Zero SA input,
-// same as caStoryVerdict.js itself.
-//
-// CA_PARLAY_SYSTEMS below is a starting point, NOT validated — unlike the
-// TA engine's tiered/replay-tested configs (sweep -> learn-best -> replay
-// against the 801 fresh set, per the Parlay Engine devlog), these
-// thresholds haven't been swept against calibration or out-of-sample data.
-// Tune once there's enough CA Parlay outcome history to judge them by.
-const CA_PARLAY_SYSTEMS = [
-  // NOTE (2026-07-31): the marketExclude patch that used to sit here
-  // (blocking TB:Home Over 1.5 / TB:1X2-Away from CA Safe outright) is
-  // removed — it was compensating for caStoryVerdict.js v1's flat-floor bug,
-  // which let those two win on a bar too easy for their thin samples. v2
-  // gives every market its own statistically-sized gate (baseline + SE
-  // buffer, bigger buffer for thinner samples), so those two now only clear
-  // MAIN when they've genuinely earned it on THIS fixture — no separate
-  // exclusion needed, and keeping one would have wrongly blocked a
-  // legitimately-cleared pick.
-  { name: "CA Safe", mode: "tier", priority: 1, tierScope: ["MAIN"],
-    tiers: [{ name: "safe", minConfidence: 60, legsPerTicket: 2, maxTickets: 3 }] },
-  { name: "CA Balanced", mode: "tier", priority: 2,
-    tiers: [{ name: "balanced", minConfidence: 40, legsPerTicket: 3, maxTickets: 2 }] },
-  { name: "CA Longshot", mode: "stack", targetOddsMin: 5, targetOddsMax: 25, maxLegs: 6 },
-];
-
-function JarvisCASlate({ fixtures, appCaPatterns, date, C, onFullModel, onUseTicket }) {
-  const [expanded, setExpanded] = useState(null);
-  const [usedIds, setUsedIds]   = useState(new Set());
-
-  const { caTickets, legCount, fixtureCount } = useMemo(() => {
-    if (!appCaPatterns || !fixtures?.length) return { caTickets: [], legCount: 0, fixtureCount: 0 };
-    const legs = [];
-    const fixturesWithLegs = new Set();
-    for (const f of fixtures) {
-      const caMatches = matchCAConditions(f, appCaPatterns);
-      // FIXED 2026-07-31: was resolveStoryVerdict (single best market per
-      // fixture), which meant a fixture could contribute at most ONE leg to
-      // the whole pool no matter how many stories cleared the floor — the
-      // reason 70+ CA-pattern fixtures were only ever producing a couple of
-      // tickets. resolveAllStoryVerdicts returns every coherent thesis's
-      // winner, so a fixture with (say) both a homeDominance and a slowGame
-      // story can offer two distinct-market legs, matching
-      // parlaySystemEngine's existing "up to 3 markets per fixture" rule.
-      const verdicts = resolveAllStoryVerdicts(caMatches, {
-        getModelProb: market => caModelProbFor(f, market),
-        dominanceGate: { home: xgHomeDominant(f) && !f.competitionRisk, away: xgAwayDominant(f) && !f.competitionRisk },
-      });
-      for (const verdict of verdicts) {
-        const leg = legFromVerdict(f, verdict, caOddsFor(f, verdict.market));
-        if (leg) { legs.push(leg); fixturesWithLegs.add(f.id); }
-      }
-    }
-    if (!legs.length) return { caTickets: [], legCount: 0, fixtureCount: 0 };
-    const { results } = runSystems(CA_PARLAY_SYSTEMS, legs);
-    const flat = results.flatMap(r => r.tickets.map(t => ({ ...t, systemName: r.systemName })));
-    return { caTickets: flat, legCount: legs.length, fixtureCount: fixturesWithLegs.size };
-  }, [fixtures, appCaPatterns]);
-
-  if (!appCaPatterns || !fixtures?.length) {
-    return (
-      <div style={{ padding:"32px 0",textAlign:"center" }}>
-        <div style={{ fontSize:9,color:C.muted,letterSpacing:".1em" }}><span className="pu">Loading CA patterns…</span></div>
-      </div>
-    );
-  }
-
-  if (!caTickets.length) {
-    return (
-      <div style={{ padding:"32px 20px", textAlign:"center", display:"flex",
-                    flexDirection:"column", alignItems:"center", gap:10 }}>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={C.muted}
-          strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity:.5 }}>
-          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>
-          <line x1="12" y1="16" x2="12.01" y2="16"/>
-        </svg>
-        <div style={{ fontSize:10, fontWeight:700, color:C.muted }}>No CA parlay tickets today</div>
-        <div style={{ fontSize:9, color:C.muted, opacity:.7, lineHeight:1.6, maxWidth:240 }}>
-          {legCount
-            ? `${fixtureCount} fixture${fixtureCount!==1?"s":""} cleared a bettable CA story (${legCount} leg${legCount!==1?"s":""} total), but none filled a full system ticket yet.`
-            : "No fixture cleared a bettable CA story for today."}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:2 }}>
-        <span style={{ fontSize:8, color:C.muted, letterSpacing:".06em" }}>
-          {caTickets.length} CA parlay{caTickets.length!==1?"s":""} · tap any to see legs
-        </span>
-        <span style={{ fontSize:7, fontWeight:800, color:C.accent, background:`${C.accent}15`,
-                       border:`1px solid ${C.accent}35`, borderRadius:5, padding:"2px 7px",
-                       letterSpacing:".06em", textTransform:"uppercase" }}>
-          CA
-        </span>
-      </div>
-
-      {caTickets.map((t) => {
-        const isOpen    = expanded === t.ticketId;
-        const isUsed    = usedIds.has(t.ticketId);
-        const legCountT = t.legs.length;
-        const mkts      = [...new Set(t.legs.map(l => l.market.replace(/^TB:/, "")))];
-        const mktStr    = mkts.length <= 2 ? mkts.join(" · ") : `${mkts.slice(0,2).join(" · ")} +${mkts.length-2}`;
-        const avgConf   = Math.round(t.legs.reduce((s,l) => s + (l.confidence||0), 0) / legCountT);
-
-        return (
-          <div key={t.ticketId} style={{
-            background: C.surface,
-            border: `1px solid ${isOpen ? `${C.accent}80` : isUsed ? `${C.green}40` : C.border}`,
-            borderRadius: 10, overflow: "hidden", transition: "border-color .15s",
-          }}>
-            <div onClick={() => setExpanded(isOpen ? null : t.ticketId)} style={{ padding:"14px 16px", cursor:"pointer" }}>
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
-                <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
-                  <span style={{ fontSize:26, fontWeight:900, lineHeight:1, color: isUsed ? C.green : C.text }}>
-                    {t.combinedOdds ? `${(+t.combinedOdds).toFixed(2)}×` : "—"}
-                  </span>
-                  <span style={{ fontSize:9, color: avgConf>=60?C.green:avgConf>=40?C.gold:C.muted, fontWeight:700 }}>
-                    {avgConf}% conf
-                  </span>
-                </div>
-                {isUsed && (
-                  <span style={{ fontSize:7, fontWeight:700, color:C.green, background:`${C.green}12`,
-                                 border:`1px solid ${C.green}30`, borderRadius:4, padding:"2px 7px" }}>Added</span>
-                )}
-              </div>
-              <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
-                <span style={{ fontSize:8, fontWeight:800, letterSpacing:".05em", color:C.accent, textTransform:"uppercase" }}>
-                  CA · {t.systemName}{t.tier ? ` (${t.tier})` : ""}
-                </span>
-                <span style={{ fontSize:7, color:C.muted, marginLeft:"auto" }}>
-                  {legCountT} leg{legCountT!==1?"s":""} · {mktStr}
-                </span>
-              </div>
-            </div>
-
-            {isOpen && (
-              <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
-                <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
-                  {t.legs.map((leg, li) => {
-                    const canOpen = !!(onFullModel && leg.fixtureId);
-                    return (
-                      <div key={li}
-                        onClick={canOpen ? () => onFullModel(leg.fixtureId) : undefined}
-                        style={{
-                          display:"flex", justifyContent:"space-between", alignItems:"center",
-                          padding:"7px 10px", background:C.bg, borderRadius:7,
-                          border:`1px solid ${C.border}`, cursor: canOpen ? "pointer" : "default",
-                        }}>
-                        <div style={{ minWidth:0, flex:1 }}>
-                          <div style={{ fontSize:9, color:C.text, fontWeight:700,
-                                        whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-                            {leg.homeTeam || "?"} vs {leg.awayTeam || "?"}
-                          </div>
-                          <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
-                            {leg.market.replace(/^TB:/,"")}{leg.league ? ` · ${leg.league}` : ""} · {leg.tier}
-                          </div>
-                        </div>
-                        <div style={{ textAlign:"right", flexShrink:0, marginLeft:10 }}>
-                          {leg.odds
-                            ? <span style={{ fontSize:11, fontWeight:800, color:C.gold }}>{leg.odds}×</span>
-                            : <span style={{ fontSize:9, color:C.muted }}>—</span>}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <button
-                  onClick={() => { onUseTicket(t); setUsedIds(prev => new Set([...prev, t.ticketId])); setExpanded(null); }}
-                  className="gb-primary" style={{ width:"100%", padding:"11px 0", fontSize:11, fontWeight:800 }}>
-                  {isUsed ? "Re-add to Builder" : "Use This CA Parlay →"}
-                </button>
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-// ── TICKET GEN (2026-08-04, side project, Davies's call on shape) ──────────
-// Stacks whichever legs clear the bar across any combination of SA/CA/SC —
-// three strategies (pure-ladder: one market, every qualifying fixture;
-// mixed-ladder: best qualifying leg per fixture, any market; random:
-// shuffled sample), and two outputs per run (Full Stack: everything that
-// qualifies; Optimal Trim: greedy top-N by score). Deliberately not deep —
-// no odds-curve optimization, no correlation checking between legs, just
-// "does it qualify, stack it, optionally cap it." Client-side: SA and CA's
-// own matching (matchSAPatterns/matchCAConditions) already only exist
-// client-side (never ported server-side, unlike SC), so this reuses that
-// existing infrastructure directly rather than re-deriving it server-side —
-// the same reasoning liveSaMatchCache/liveCaMatchCache above already runs
-// on, just generalized across ALL markets per fixture instead of one.
-function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFullModel, onUseTicket }) {
+// ── PATTERN ENGINE CONTROLS (2026-08-04, formerly "Multi Gen" / "TicketGenSlate")
+// Folded into the Custom tab as an engine toggle (2026-08-06) — this no
+// longer renders its own tickets or lives on its own top-level tab. It now
+// only owns the sources/strategy controls and reports its live-computed
+// qualifying-leg pool up to ParlayJarvisTab via onPoolChange; the actual
+// ticket build (N tickets, target odds, max-same-market) is handleBuildParlay
+// running buildManualParlaysFromPool against that pool — the same builder
+// Manual mode already uses, so both engines share one build path instead of
+// two parallel ones. Client-side: SA and CA's own matching
+// (matchSAPatterns/matchCAConditions) already only exist client-side (never
+// ported server-side, unlike SC), so this reuses that existing
+// infrastructure directly rather than re-deriving it server-side — the same
+// reasoning liveSaMatchCache/liveCaMatchCache above already runs on, just
+// generalized across ALL markets per fixture instead of one.
+function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange }) {
   const [sources, setSources] = useState(() => new Set(["sa", "ca"]));
   const [strategy, setStrategy] = useState("mixed-ladder"); // "pure-ladder" | "mixed-ladder" | "random"
   const [ladderMarket, setLadderMarket] = useState(null);
-  const [trimLegCount, setTrimLegCount] = useState(6);
-  const [modelMinProb, setModelMinProb] = useState(65); // floor for the standalone "Model" source
+  const [modelMinProb, setModelMinProb] = useState(65); // floor value shared by both uses below
+  // FIX (2026-08-06): this floor used to gate ONLY the standalone "Model"
+  // source — a CA/SA/SC leg qualifies on its own hit-rate, which can (by
+  // design — that's what an "edge" is) sit well below the model's own
+  // number. Sterling's screenshot showed exactly that: a CA leg at model
+  // 34% while the floor read 65%, because the floor never touched CA legs
+  // at all. That's not a bug in the filter — but the control sits directly
+  // under the full Sources row with everything checked, so it reads as a
+  // global floor. applyGlobalFloor makes that reading actually true, opt-in
+  // (default off) — turning it on suppresses low-model-confidence legs from
+  // every source, including CA/SA edges that intentionally diverge from the
+  // model. Off preserves the original per-source-only behavior exactly.
+  const [applyGlobalFloor, setApplyGlobalFloor] = useState(false);
   const [scResults, setScResults] = useState(null);
   const [scLoading, setScLoading] = useState(false);
 
@@ -14621,9 +14506,15 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
     const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source) => {
       const oddsNum = parseFloat(odds);
       if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
+      const mp = modelProbFor(f, market);
+      // Global floor (opt-in, see applyGlobalFloor above) — applies to every
+      // source's legs, not just Model's own (which already self-gates below
+      // before ever calling pushLeg, so this is a harmless no-op re-check
+      // for that source specifically).
+      if (applyGlobalFloor && (mp == null || mp < modelMinProb)) return;
       legs.push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league,
         market, marketLabel, odds: oddsNum, hitRate: hitRate ?? null, lift: lift ?? 0,
-        modelProb: modelProbFor(f, market), source });
+        modelProb: mp, source });
     };
     for (const f of fixtures || []) {
       if (sources.has("sa") && appSaPatterns?.length) {
@@ -14683,7 +14574,7 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
       }
     }
     return legs;
-  }, [fixtures, sources, appSaPatterns, appCaPatterns, scResults, modelMinProb]);
+  }, [fixtures, sources, appSaPatterns, appCaPatterns, scResults, modelMinProb, applyGlobalFloor]);
 
   const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
   // Ranking now blends model probability in alongside whatever
@@ -14727,24 +14618,35 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
     return [...byFixture.values()];
   }, [qualifyingLegs, strategy, ladderMarket, availableMarkets]);
 
-  const trimmedLegs = useMemo(() =>
-    [...stackedLegs].sort((a, b) => legScore(b) - legScore(a)).slice(0, trimLegCount),
-    [stackedLegs, trimLegCount]);
-
-  const buildTicket = (legs, label) => {
-    if (!legs.length) return null;
-    const totalOdds = parseFloat(legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2));
-    return {
-      id: Date.now() + Math.random(),
-      legs: legs.map(l => ({
-        fixtureId: l.fixtureId, game: `${l.home || "?"} vs ${l.away || "?"}`,
-        home: l.home, away: l.away, pick: l.marketLabel, market: l.marketLabel,
-        league: l.league, odds: l.odds, conf: l.hitRate,
-      })),
-      totalOdds, isAuto: true, slotLabel: label,
-      slotId: `ticket-gen-${strategy}-${Date.now()}`, jarvisMode: "gen",
-    };
-  };
+  // Reports the live-computed pool up to ParlayJarvisTab on every change —
+  // handleBuildParlay reads this (via patternEnginePool state) when the
+  // Build button is pressed, instead of this component building its own
+  // tickets. Shape matches what buildManualParlaysFromPool expects (same
+  // pool shape Manual mode's buildUniversalPool/buildSignalPool produce),
+  // so both engines share one build path. score is normalized to the
+  // same ~0-1 range Manual's evaluatePick scores land in (legScore here
+  // is roughly 0-100 + lift points), just for the tier-shuffle stratification
+  // inside buildManualParlaysFromPool — not a precision-critical conversion.
+  useEffect(() => {
+    const pool = stackedLegs.map(l => {
+      const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
+      return {
+        fixtureId: l.fixtureId,
+        game: `${l.home || "?"} vs ${l.away || "?"}`,
+        pick: l.marketLabel,
+        odds: l.odds,
+        conf,
+        market: l.marketLabel,
+        league: l.league,
+        score: Math.max(0, Math.min(1, legScore(l) / 100)),
+        empiricalRate: conf,
+        strategyLabel: l.source,
+        strategyTags: [],
+        isVolatile: isLeagueVolatile(l.league || ""),
+      };
+    });
+    onPoolChange(pool);
+  }, [stackedLegs, onPoolChange]);
 
   const SOURCE_OPTS = [
     { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
@@ -14753,13 +14655,13 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
   const STRATEGY_OPTS = [
     { id: "mixed-ladder", label: "Mixed Ladder", desc: "Best leg per game" },
     { id: "pure-ladder", label: "Pure Ladder", desc: "One market" },
-    { id: "random", label: "Random", desc: "Shuffled sample" },
+    { id: "random", label: "Random", desc: "Shuffled, not ranked" },
   ];
 
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Stacks whatever qualifies across any combination of SA/CA/SC/Model into a parlay. Ranking always blends the base model's own probability in alongside whatever engine backed the leg. Full Stack takes every qualifying leg; Optimal Trim caps it to the strongest N.
+        Pulls whatever qualifies across any combination of SA/CA/SC/Model into a shared pool. Ranking always blends the base model's own probability in alongside whatever engine backed the leg — except Random, which ignores ranking entirely and shuffles. Build below uses this pool with your Tickets and Target Odds settings.
       </div>
 
       <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Sources</div>
@@ -14779,17 +14681,27 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
           );
         })}
       </div>
-      {sources.has("model") && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+      {(sources.has("model") || applyGlobalFloor) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
           <div style={{ fontSize: 8, color: C.muted }}>Model min probability</div>
           <input type="number" value={modelMinProb} min={50} max={99}
             onChange={e => setModelMinProb(Math.max(50, Math.min(99, parseInt(e.target.value) || 65)))}
             className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
-          <div style={{ fontSize: 8, color: C.muted }}>% — no pattern-mining backing needed, model confidence alone qualifies a leg</div>
+          <div style={{ fontSize: 8, color: C.muted }}>
+            {applyGlobalFloor
+              ? "% — applied to every source below, including CA/SA/SC (their own qualifying legs can still be dropped if the model disagrees hard enough)"
+              : "% — no pattern-mining backing needed, model confidence alone qualifies a leg from the standalone Model source only"}
+          </div>
         </div>
       )}
-      {scLoading && <div style={{ fontSize: 8, color: C.muted, marginBottom: 8 }}>Loading settlement conditions…</div>}
-
+      <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, cursor: "pointer" }}>
+        <input type="checkbox" checked={applyGlobalFloor} onChange={e => setApplyGlobalFloor(e.target.checked)}
+          style={{ width: 12, height: 12, accentColor: C.accent }} />
+        <span style={{ fontSize: 8, color: C.muted }}>
+          Apply this floor to <strong style={{ color: C.text }}>every</strong> checked source, not just Model
+          {applyGlobalFloor ? "" : " (off — CA/SA/SC legs qualify on their own hit-rate regardless of model confidence, same as before)"}
+        </span>
+      </label>
       <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Strategy</div>
       <div className="cscroll" style={{ marginBottom: strategy === "pure-ladder" ? 8 : 12 }}>
         {STRATEGY_OPTS.map(s => {
@@ -14821,51 +14733,24 @@ function TicketGenSlate({ fixtures, date, C, appSaPatterns, appCaPatterns, onFul
         </div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-        <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, opacity: .75 }}>Optimal Trim Size</div>
-        <input type="number" value={trimLegCount} min={2} max={20}
-          onChange={e => setTrimLegCount(Math.max(2, parseInt(e.target.value) || 6))}
-          className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
+      {/* Live pool size — the actual N-ticket build now happens from the
+          shared Tickets/Target Odds/Max Same Market controls below, via the
+          same builder Manual mode uses. No trim-count input here anymore:
+          how many legs land in each ticket is target-odds-driven, same as
+          Manual, not a fixed N. */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "9px 12px", borderRadius: 8, marginBottom: 4,
+        background: stackedLegs.length ? `${C.accent}0c` : `${C.red}0c`,
+        border: `1px solid ${stackedLegs.length ? C.accent + "30" : C.red + "30"}`,
+      }}>
+        <span style={{ fontSize: 9, color: stackedLegs.length ? C.text : C.red, fontWeight: 700 }}>
+          {stackedLegs.length
+            ? `${stackedLegs.length} qualifying leg${stackedLegs.length !== 1 ? "s" : ""} in pool`
+            : "No qualifying legs yet — try adding another source or lowering the model floor."}
+        </span>
+        {scLoading && <span style={{ fontSize: 8, color: C.muted }}>Loading settlement conditions…</span>}
       </div>
-
-      {[
-        { legs: stackedLegs, label: `Full Stack (${strategy})`, sub: `${stackedLegs.length} legs — every qualifying game` },
-        { legs: trimmedLegs, label: `Optimal Trim (${strategy})`, sub: `${trimmedLegs.length} legs — strongest ${trimLegCount}` },
-      ].map((variant, i) => {
-        const ticket = buildTicket(variant.legs, variant.label);
-        if (!ticket) return (
-          <div key={i} style={{ fontSize: 9, color: C.muted, padding: "10px 4px" }}>
-            {i === 0 ? "No qualifying legs yet — try adding another source." : ""}
-          </div>
-        );
-        return (
-          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{variant.label}</div>
-              <div style={{ fontSize: 9, color: C.accent, fontWeight: 800 }}>×{ticket.totalOdds}</div>
-            </div>
-            <div style={{ fontSize: 8, color: C.muted, marginBottom: 8 }}>{variant.sub}</div>
-            {variant.legs.slice(0, 8).map((l, li) => (
-              <div key={li} onClick={() => onFullModel && onFullModel(l.fixtureId)}
-                style={{ display: "flex", justifyContent: "space-between", padding: "4px 0",
-                  borderTop: li ? `1px solid ${C.faint}` : "none", cursor: onFullModel ? "pointer" : "default" }}>
-                <div style={{ fontSize: 9, color: C.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {l.home} vs {l.away} <span style={{ color: C.muted }}>· {l.marketLabel}</span>
-                </div>
-                <div style={{ fontSize: 8, color: C.muted, flexShrink: 0, marginLeft: 6 }}>
-                  {l.source} · ×{l.odds}{l.modelProb != null ? ` · model ${Math.round(l.modelProb)}%` : ""}
-                </div>
-              </div>
-            ))}
-            {variant.legs.length > 8 && <div style={{ fontSize: 8, color: C.muted, marginTop: 4 }}>+{variant.legs.length - 8} more</div>}
-            <button onClick={() => onUseTicket && onUseTicket(ticket)} className="gb"
-              style={{ width: "100%", marginTop: 10, padding: "8px", fontSize: 10, textTransform: "none",
-                background: C.accent, color: "#fff", border: "none", fontWeight: 800 }}>
-              Use This Ticket →
-            </button>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -15272,6 +15157,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
   const [customPool, setCustomPool]   = useState("all"); // "all" | "engine"
+  // Custom tab engine toggle (2026-08-06) — "manual" is the original pool +
+  // rules builder; "pattern" is the former "Multi Gen" tab, folded in here
+  // instead of living on its own top-level tab. Both engines share the same
+  // Stake/Target Odds/Tickets/Max Same Market controls and the same Build
+  // button — only how the candidate pool gets built differs.
+  const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern"
+  const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
   const [focusFixture, setFocus] = useState(null);
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
@@ -15831,8 +15723,27 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         `${modeLabels} · pool: ${rawPool.length} qualifying${leagueNote}`
       );
       savePoolToServer(rawPool, date);
+    } else if (customEngine === "pattern") {
+      // Pattern Engine mode (former "Multi Gen" tab) — pool is built live by
+      // PatternEngineControls from whatever SA/CA/SC/Model sources + strategy
+      // are selected there, reported up via patternEnginePool. Same builder
+      // (buildManualParlaysFromPool) and the same Tickets/Target Odds/Max
+      // Same Market controls as Manual mode — only the pool differs.
+      if (patternEnginePool.length === 0) {
+        setAutoMessage("No qualifying legs yet — try adding another source or lowering the model probability floor.");
+        setBuilding(false); return;
+      }
+      if (patternEnginePool.length < numParlays * 3) {
+        setAutoMessage(`⚠ Pool has ${patternEnginePool.length} qualifying leg${patternEnginePool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
+        setTimeout(() => setAutoMessage(""), 5000);
+      }
+      const results = buildManualParlaysFromPool(patternEnginePool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity });
+      if (results.length === 0) {
+        setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
+      }
+      setTickets(results);
     } else {
-      // custom mode
+      // Manual mode
       // customPool === "all": every fixture with a Read/Edge/Radar signal, no
       // quality gate — buildSignalPool. customPool === "engine": the strict,
       // empirical-rate-gated pool — buildUniversalPool, restricted to fixtures
@@ -16093,8 +16004,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                             border:`1px solid ${C.border}` }}>
                 {[
                   { id:"jarvis", label:"Jarvis",     desc:"AI-built ticket" },
-                  { id:"ca",     label:"CA Parlays", desc:"Story-based" },
-                  { id:"gen",    label:"Multi Gen",  desc:"Stack & ladder" },
                   { id:"custom", label:"Custom",     desc:"Your rules" },
                 ].map(m => {
                   const active = builderMode === m.id;
@@ -16178,79 +16087,43 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 />
               )}
 
-              {/* ── CA TAB — CA Parlays (story-first resolver + system engine) ── */}
-              {builderMode === "ca" && (
-                <JarvisCASlate
-                  fixtures={fixtures}
-                  appCaPatterns={appCaPatterns}
-                  date={date}
-                  C={C}
-                  onFullModel={onFullModel ? (fixtureId) => {
-                    const f = fixtures.find(x => x.id === fixtureId || String(x.id) === String(fixtureId));
-                    if (f) onFullModel(f);
-                  } : null}
-                  onUseTicket={(caTicket) => {
-                    // parlaySystemEngine leg shape -> ticket shape TicketCard expects
-                    // (fixtureId/market/odds/homeTeam/awayTeam/league/confidence, not
-                    // the TA engine's game/home/away/conf naming — mapped here rather
-                    // than changed upstream in the temp module, per its own "don't
-                    // rename my leg shape, wire against it" scope).
-                    const legs = caTicket.legs.map(l => ({
-                      fixtureId: l.fixtureId,
-                      game:      `${l.homeTeam || "?"} vs ${l.awayTeam || "?"}`,
-                      home:      l.homeTeam,
-                      away:      l.awayTeam,
-                      pick:      (l.market || "").replace(/^TB:/, ""),
-                      market:    (l.market || "").replace(/^TB:/, ""),
-                      league:    l.league || null,
-                      odds:      l.odds != null ? parseFloat(l.odds) : null,
-                      conf:      l.confidence != null ? parseFloat(l.confidence) : null,
-                    }));
-                    const totalOdds = parseFloat(
-                      legs.reduce((acc, l) => acc * (l.odds || 1), 1).toFixed(2)
-                    );
-                    const newTicket = {
-                      id:          Date.now() + Math.random(),
-                      legs,
-                      totalOdds,
-                      isAuto:      true,
-                      slotLabel:   `CA · ${caTicket.systemName}${caTicket.tier ? ` (${caTicket.tier})` : ""}`,
-                      slotId:      caTicket.ticketId,
-                      jarvisMode:  "ca",
-                      _caSystem:   caTicket.ticketId,
-                    };
-                    setTickets(prev => [
-                      ...prev.filter(t => t.slotId !== caTicket.ticketId),
-                      newTicket,
-                    ]);
-                  }}
-                />
-              )}
-
-              {/* ── MULTI GEN TAB (2026-08-04) — ticket already comes out of
-                   TicketGenSlate in the final shape TicketCard expects, no
-                   leg-shape conversion needed (unlike CA's temp-module leg
-                   shape above). ── */}
-              {builderMode === "gen" && (
-                <TicketGenSlate
-                  fixtures={fixtures}
-                  date={date}
-                  C={C}
-                  appSaPatterns={appSaPatterns}
-                  appCaPatterns={appCaPatterns}
-                  onFullModel={onFullModel ? (fixtureId) => {
-                    const f = fixtures.find(x => x.id === fixtureId || String(x.id) === String(fixtureId));
-                    if (f) onFullModel(f);
-                  } : null}
-                  onUseTicket={(genTicket) => {
-                    setTickets(prev => [...prev.filter(t => t.slotId !== genTicket.slotId), genTicket]);
-                  }}
-                />
-              )}
-
-              {/* ── CUSTOM TAB controls — unchanged ── */}
+              {/* ── CUSTOM TAB — Manual (pool + rules) / Pattern Engine (former
+                   "Multi Gen" tab, folded in 2026-08-06) toggle. Both engines
+                   share the Stake/Target Odds/Tickets/Max Same Market block
+                   and the Build button below; only the pool-building step
+                   (and, for Manual, the pool/league/exclude/research controls)
+                   differs per engine. ── */}
               {builderMode === "custom" && (
                 <>
+                  <div style={{ display:"flex",gap:6,marginBottom:12,
+                                background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
+                    {[
+                      { id:"manual",  label:"Manual",         desc:"Pool + your rules" },
+                      { id:"pattern", label:"Pattern Engine",  desc:"SA / CA / SC / Model" },
+                    ].map(e => (
+                      <button key={e.id} onClick={() => setCustomEngine(e.id)}
+                        style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                                 background:customEngine===e.id?C.accent:"transparent",
+                                 color:customEngine===e.id?C.accentText:C.muted,
+                                 fontSize:9,fontWeight:800,cursor:"pointer",fontFamily:C.font,
+                                 display:"flex",flexDirection:"column",alignItems:"center",gap:2 }}>
+                        <span>{e.label}</span>
+                        <span style={{ fontSize:7,opacity:.7,fontWeight:500 }}>{e.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {customEngine === "pattern" && (
+                    <PatternEngineControls
+                      fixtures={fixtures}
+                      C={C}
+                      appSaPatterns={appSaPatterns}
+                      appCaPatterns={appCaPatterns}
+                      onPoolChange={setPatternEnginePool}
+                    />
+                  )}
+
+                  {customEngine === "manual" && (<>
                   {/* Pool selector */}
                   <div style={{ display:"flex",gap:6,marginBottom:12,
                                 background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
@@ -16269,6 +16142,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   <div style={{ fontSize:8,color:C.text,marginBottom:12,lineHeight:1.6 }}>
                     Builds <span style={{ color:C.gold }}>N non-overlapping tickets</span> — each picks from fixtures unused by previous tickets.{customPool==="engine"?" Engine pool only — highest confidence games.":" All fixtures today, confidence ranked high to low."}
                   </div>
+                  </>)}
+
+                  {/* SHARED across both engines — Stake, Target Odds, Tickets,
+                      Max Same Market drive whichever pool is active (Manual's
+                      rawPool or Pattern Engine's patternEnginePool). */}
                   <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
                     <div>
                       <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Stake ($)</div>
@@ -16320,6 +16198,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     </div>
                   </div>
 
+                  {customEngine === "manual" && (<>
                   {/* League filter — Custom tab only */}
                   {parlayAvailableLeagues.length > 1 && (
                     <div style={{ marginBottom:12 }}>
@@ -16397,6 +16276,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       </svg>
                     )}
                   </button>
+                  </>)}
 
                   <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
                     style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
