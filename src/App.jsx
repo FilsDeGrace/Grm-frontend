@@ -1463,7 +1463,7 @@ export function computeCAVerdicts(caMatches, f) {
     if (positiveMarkets.has(a) && positiveMarkets.has(b)) {
       verdicts.push({
         type: "contradiction", market: a, market2: b,
-        text: `${CA_MARKET_SHORT(a)} and ${CA_MARKET_SHORT(b)} both matched as VALID positives, but they can't both be right — one of these patterns is misfiring on this fixture. Treat both with extra caution.`,
+        text: `${CA_MARKET_SHORT(a)} and ${CA_MARKET_SHORT(b)} both matched as valid patterns, but they can't both be right — one of them is misfiring on this fixture. Treat both with extra caution.`,
       });
     }
   }
@@ -11126,6 +11126,11 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
           <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
+          {ticket.combinedEmpiricalRate != null && (
+            <span style={{ fontSize:9,color:C.radar,fontWeight:700 }} title="Combined probability — each leg's own historical hit-rate multiplied together across the whole ticket">
+              {ticket.combinedEmpiricalRate}% combined
+            </span>
+          )}
           {/* P-FIX: Correlation risk badge — now driven by actual booking
               history (always) and, optionally, reuse across the user's other
               current tickets (toggle-gated). Shakes periodically so it
@@ -14689,8 +14694,8 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
             className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
           <div style={{ fontSize: 8, color: C.muted }}>
             {applyGlobalFloor
-              ? "% — applied to every source below, including CA/SA/SC (their own qualifying legs can still be dropped if the model disagrees hard enough)"
-              : "% — no pattern-mining backing needed, model confidence alone qualifies a leg from the standalone Model source only"}
+              ? "% — the minimum model confidence a leg needs, from any source, to be included."
+              : "% — the minimum model confidence a leg needs to qualify through the Model source."}
           </div>
         </div>
       )}
@@ -14698,8 +14703,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         <input type="checkbox" checked={applyGlobalFloor} onChange={e => setApplyGlobalFloor(e.target.checked)}
           style={{ width: 12, height: 12, accentColor: C.accent }} />
         <span style={{ fontSize: 8, color: C.muted }}>
-          Apply this floor to <strong style={{ color: C.text }}>every</strong> checked source, not just Model
-          {applyGlobalFloor ? "" : " (off — CA/SA/SC legs qualify on their own hit-rate regardless of model confidence, same as before)"}
+          Apply this floor to <strong style={{ color: C.text }}>every</strong> source, not just Model
         </span>
       </label>
       <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Strategy</div>
@@ -15741,6 +15745,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       if (results.length === 0) {
         setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
       }
+      // Combined probability — each leg's own hit-rate multiplied across the
+      // whole ticket. Pattern Engine legs carry a real per-source empiricalRate
+      // (SA/CA/SC's own hit-rate, or the model's own probability for the
+      // standalone Model source — see qualifyingLegs), so this number means
+      // something here specifically; Manual/Jarvis tickets don't get it,
+      // same as before.
+      results.forEach(t => {
+        t.combinedEmpiricalRate = Math.round(
+          t.legs.reduce((acc, l) => acc * ((l.empiricalRate ?? 50) / 100), 1) * 100
+        );
+      });
       setTickets(results);
     } else {
       // Manual mode

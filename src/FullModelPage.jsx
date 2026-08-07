@@ -1668,6 +1668,109 @@ function pickCATopSlots(list, isAvoid) {
   return picked;
 }
 
+// SCVerdictBlock — same headline/promotion treatment CAVerdictBlock gives CA
+// above (reuses resolveCAVerdictHeadline directly — SC verdicts share the
+// same {type, direction, text} shape), so a fixture's two verdict engines
+// read consistently instead of CA getting a real card and SC getting a flat
+// text list. Also shows the predictiveStrength/reliability/verifiedEdge
+// stat row SC verdicts carry (CA's don't have these fields).
+//
+// An avoid-direction headline gets the exact same size/weight treatment as
+// a positive one here — a "steer away from this market" reading is worth
+// just as much as a lean, so it isn't shrunk or buried; it just skips the
+// Use Custom Pick button, since there's nothing to pick.
+function SCVerdictBlock({ verdicts }) {
+  if (!verdicts || !verdicts.length) return null;
+  const top = verdicts.find(v => v.type === "strongest-lean");
+  const headline = resolveCAVerdictHeadline(verdicts);
+  const demotedAvoid = (headline && headline !== top) ? top : null;
+  const rest = verdicts.filter(v => v !== headline && v !== demotedAvoid);
+  const scrollToCustomPick = () => {
+    document.getElementById("grm-custom-pick-anchor")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+  const StatRow = ({ v }) => v.verifiedEdge == null ? null : (
+    <div style={{ display: "flex", gap: 10, marginTop: 6, fontSize: 8, color: C.muted, flexWrap: "wrap" }}>
+      <span>Predictive strength: <strong style={{ color: C.text }}>{v.predictiveStrength?.toFixed(1)}%</strong></span>
+      <span>Reliability: <strong style={{ color: C.text }}>{v.reliability?.toFixed(1)}%</strong></span>
+      <span>Verified edge: <strong style={{ color: v.verifiedEdge >= 0 ? C.green : C.red }}>{v.verifiedEdge >= 0 ? "+" : ""}{v.verifiedEdge.toFixed(1)}pp</strong></span>
+    </div>
+  );
+  return (
+    <div style={{
+      background: C.faint, borderRadius: 12, padding: "14px 14px",
+      margin: "12px 14px", display: "flex", flexDirection: "column", gap: 12,
+    }}>
+      <div style={{
+        fontSize: 9, fontWeight: 800, letterSpacing: ".12em",
+        textTransform: "uppercase", color: C.text, opacity: 0.7,
+      }}>
+        Settlement Verdict
+      </div>
+      {headline && (() => {
+        const isAvoidLean = headline.direction === "avoid";
+        const color = isAvoidLean ? C.red : C.purple;
+        const marketLabel = headline.market ? (SC_MARKET_LABELS.find(m => m.id === headline.market)?.label || headline.market) : null;
+        return (
+          <div>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+              {isAvoidLean ? <CAIconAvoid size={14} color={color} /> : <CAIconCheck size={14} color={color} />}
+              <div>
+                {marketLabel && (
+                  <div style={{ fontSize: 9, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 2 }}>
+                    {marketLabel}
+                  </div>
+                )}
+                <span style={{ fontSize: 13, fontWeight: 800, color: C.text, lineHeight: 1.4 }}>{headline.text}</span>
+              </div>
+            </div>
+            <StatRow v={headline} />
+            {!isAvoidLean && (
+              <button onClick={scrollToCustomPick} className="gb" style={{
+                marginTop: 10, width: "100%", padding: "9px 0", fontSize: 10, fontWeight: 800,
+                letterSpacing: ".04em", textTransform: "none", fontFamily: C.font,
+                background: `${C.purple}18`, color: C.purple, border: `1px solid ${C.purple}45`, borderRadius: 8,
+              }}>
+                Use Custom Pick
+              </button>
+            )}
+          </div>
+        );
+      })()}
+      {demotedAvoid && (
+        <div style={{ paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <CAIconAvoid size={11} color={C.red} />
+            <span style={{ fontSize: 9.5, color: C.red, opacity: 0.85, lineHeight: 1.6, fontWeight: 400 }}>{demotedAvoid.text}</span>
+          </div>
+          <StatRow v={demotedAvoid} />
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: (headline || demotedAvoid) ? 4 : 0, borderTop: (headline && !demotedAvoid) ? `1px solid ${C.border}` : "none" }}>
+          {rest.map((v, i) => {
+            const isSecond = v.type === "second-lean";
+            const isValue = v.type === "best-value";
+            const color = (v.type === "contradiction" || v.type === "conflicting-signal") ? C.red
+              : isValue ? C.gold
+              : isSecond ? C.purple
+              : C.amber;
+            const Icon = (isSecond || isValue) ? CAIconCheck : CAIconVerdict;
+            return (
+              <div key={i}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <Icon size={11} color={color} />
+                  <span style={{ fontSize: 9.5, color: C.text, opacity: 0.72, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
+                </div>
+                <StatRow v={v} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // SettlementConditionsSection — deliberately much simpler than
 // ConditionStrategySection above: no pill-per-market drilldown, no
 // top-slots/emerging/traps machinery to reproduce, because scFlags is
@@ -1694,7 +1797,17 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
   // flags above are.
   const emergingPositive = (scEmerging?.positive || []).slice(0, 2);
   const emergingAvoid = (scEmerging?.avoid || []).slice(0, 2);
-  const verdicts = scVerdicts || [];
+  // Dedupes identical verdicts (same type + market pair + text) before
+  // rendering — the server can return the same contradiction/verdict twice
+  // for a fixture; showing it once either way is the correct read, not a
+  // display trick, so this stays even once that's fixed upstream.
+  const seenVerdictKeys = new Set();
+  const verdicts = (scVerdicts || []).filter(v => {
+    const key = `${v.type}|${v.market || ""}|${v.market2 || ""}|${v.text}`;
+    if (seenVerdictKeys.has(key)) return false;
+    seenVerdictKeys.add(key);
+    return true;
+  });
   if (!entries.length && !emergingPositive.length && !emergingAvoid.length && !verdicts.length) return (
     <SectionPanel label="Settlement Conditions">
       <div style={{ padding: "12px 16px", fontSize: 9, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
@@ -1705,58 +1818,36 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
   );
   const order = { favorable: 0, conflicted: 1, unfavorable: 2 };
   entries.sort((a, b) => (order[a[1].status] ?? 3) - (order[b[1].status] ?? 3));
-  // Verdict headline — computed server-side already (scComputeVerdicts,
-  // CA_Ranking_Merge_Spec.md's triplet) but never actually reached the
-  // screen until now (2026-08-04 fix). Same shape CAVerdictBlock shows for
-  // CA: strongest-lean first, then second-lean/best-value/contradiction/
-  // origin-caveat, with predictiveStrength/reliability/verifiedEdge shown
-  // explicitly rather than one collapsed number.
-  const verdictOrder = { "strongest-lean": 0, "best-value": 1, "second-lean": 2, "contradiction": 3, "unclear-origin": 4, "fragile-origin": 5, "origin-caveat": 6 };
-  const sortedVerdicts = [...verdicts].sort((a, b) => (verdictOrder[a.type] ?? 9) - (verdictOrder[b.type] ?? 9));
+  const STATUS_GROUP_LABEL = { favorable: "Favorable", conflicted: "Conflicted", unfavorable: "Unfavorable" };
+  let lastStatus = null;
   return (
     <SectionPanel label="Settlement Conditions">
-      {sortedVerdicts.length > 0 && (
-        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
-          {sortedVerdicts.map((v, i) => {
-            const color = v.type === "strongest-lean" || v.type === "second-lean"
-              ? (v.direction === "avoid" ? C.red : C.purple)
-              : v.type === "best-value" ? C.gold : C.amber;
-            return (
-              <div key={i} style={{ marginBottom: i < sortedVerdicts.length - 1 ? 8 : 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                  <span style={{ fontSize: 8, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: ".06em" }}>
-                    {v.type.replace(/-/g, " ")}
-                  </span>
-                  {v.market && <span style={{ fontSize: 9, color: C.text, fontWeight: 700 }}>
-                    {SC_MARKET_LABELS.find(m => m.id === v.market)?.label || v.market}
-                  </span>}
-                </div>
-                <div style={{ fontSize: 9, color: C.text, opacity: 0.75, lineHeight: 1.5 }}>{v.text}</div>
-                {v.verifiedEdge != null && (
-                  <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 8, color: C.muted }}>
-                    <span>Predictive strength: <strong style={{ color: C.text }}>{v.predictiveStrength?.toFixed(1)}%</strong></span>
-                    <span>Reliability: <strong style={{ color: C.text }}>{v.reliability?.toFixed(1)}%</strong></span>
-                    <span>Verified edge: <strong style={{ color: v.verifiedEdge >= 0 ? C.green : C.red }}>{v.verifiedEdge >= 0 ? "+" : ""}{v.verifiedEdge.toFixed(1)}pp</strong></span>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <SCVerdictBlock verdicts={verdicts} />
       <div style={{ padding: "4px 0" }}>
+        {entries.length > 0 && (
+          <div style={{ fontSize: 8, color: C.muted, textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 700, padding: "10px 14px 4px" }}>
+            By Market
+          </div>
+        )}
         {entries.map(([marketKey, flag]) => {
           const label = SC_MARKET_LABELS.find(m => m.id === marketKey)?.label || marketKey;
           const color = flag.status === "favorable" ? C.purple : flag.status === "conflicted" ? C.amber : C.red;
           const Icon = flag.status === "favorable" ? CAIconCheck : flag.status === "conflicted" ? CAIconVerdict : CAIconAvoid;
+          const showGroupHeader = flag.status !== lastStatus;
+          lastStatus = flag.status;
           return (
-            <div key={marketKey} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 14px" }}>
-              <Icon size={12} color={color} />
-              <div>
-                <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{label}
-                  <span style={{ marginLeft: 6, fontSize: 8, color, textTransform: "uppercase", letterSpacing: ".05em" }}>{flag.status}</span>
+            <div key={marketKey}>
+              {showGroupHeader && (
+                <div style={{ fontSize: 7, color, opacity: 0.8, textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 800, padding: "8px 14px 2px" }}>
+                  {STATUS_GROUP_LABEL[flag.status] || flag.status}
                 </div>
-                <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 2 }}>{flag.reason}</div>
+              )}
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 14px" }}>
+                <Icon size={12} color={color} />
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{label}</div>
+                  <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 2 }}>{flag.reason}</div>
+                </div>
               </div>
             </div>
           );
