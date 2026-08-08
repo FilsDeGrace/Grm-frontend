@@ -2910,7 +2910,12 @@ const mktStyle = (m, sport = "football") => {
       "DC":        { color:C.dc,     bg:C.dcDim     },
       "CS":        { color:C.blue,   bg:C.blueDim   },
     };
-    return map[m] || { color:C.text, bg:C.surface };
+    // FIX (2026-08-08): map keys are plain labels, no "TB:" variants — every
+    // caller passes whatever leg.market/anchor.market happens to hold, and
+    // several of those (theRead.anchor, TA-engine legs) carry the raw
+    // server-canonical "TB:Over 2.5" form. Stripped once here instead of at
+    // each of the ~15 call sites, so none of them need to know or care.
+    return map[(m||"").replace(/^TB:/, "")] || { color:C.text, bg:C.surface };
   }
   return getMarketStyle(m, sport, C); // sportConfig.js handles basketball/tennis
 };
@@ -4467,7 +4472,7 @@ export function TheReadSection({ theRead, onAddToParlay, fixture, alreadyAdded, 
 
       {!isFallback && anchor.empiricalRate != null && (anchor.sampleSize == null || anchor.sampleSize >= 5) && (
         <div className="grm-signal-panel-meta">
-          {anchor.market} hit rate: <strong style={{ color:C.text,opacity:.8 }}>{anchor.empiricalRate}%</strong>
+          {(anchor.market||"").replace(/^TB:/, "")} hit rate: <strong style={{ color:C.text,opacity:.8 }}>{anchor.empiricalRate}%</strong>
           {anchor.sampleSize != null && <span style={{ opacity:.55 }}> ({anchor.sampleSize} games)</span>}
         </div>
       )}
@@ -8474,13 +8479,32 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             // Previously this read from `rows` (the normal custom pick market rows),
             // meaning Mix selections were added with whatever market the normal Custom
             // section happened to have active — completely wrong market/pick.
-            const legs = displayRows.filter(({ f }) => selectedIds.has(f.id)).map(({ f, pick }) => ({
-              fixtureId: f.id, game:`${f.teams.home} vs ${f.teams.away}`,
-              league: f.league || "",
-              pick:pick.label, market:pick.market && pick.market !== "Unknown" ? pick.market : inferMarket(pick.label),
-              odds:pick.odds || null, conf:Math.round(pick.prob),
-              strategyLabel: saMarket === "PE:Mix" ? "SA Mix" : familyLabel,
-            }));
+            // TT-LABEL-FIX (2026-08-08): strategyLabel used to be familyLabel for
+            // every leg in the batch, unconditionally — correct when every selected
+            // row shares one family, wrong for Team Total rows, which come from Goal
+            // Radar, a picker entirely separate from the family dropdown. A batch
+            // mixing Team Total selections with the dropdown parked on an unrelated
+            // family (e.g. Away Over 1.5) tagged every Team Total leg with that
+            // unrelated family regardless of the row's real side/line. Team Total's
+            // own market id is a flat "TeamTotal" for all four home/away x O0.5/O1.5
+            // variants, so the real side+line has to come from the pick's own label.
+            const legs = displayRows.filter(({ f }) => selectedIds.has(f.id)).map(({ f, pick }) => {
+              const market = pick.market && pick.market !== "Unknown" ? pick.market : inferMarket(pick.label);
+              let strategyLabel = saMarket === "PE:Mix" ? "SA Mix" : familyLabel;
+              if (market === "TeamTotal") {
+                const lineMatch = pick.label.match(/O(\d\.\d)/);
+                const isHome = f.teams?.home && pick.label.startsWith(f.teams.home);
+                const isAway = f.teams?.away && pick.label.startsWith(f.teams.away);
+                if (lineMatch && (isHome || isAway)) strategyLabel = `${isHome ? "Home" : "Away"} O${lineMatch[1]}`;
+              }
+              return {
+                fixtureId: f.id, game:`${f.teams.home} vs ${f.teams.away}`,
+                league: f.league || "",
+                pick:pick.label, market,
+                odds:pick.odds || null, conf:Math.round(pick.prob),
+                strategyLabel,
+              };
+            });
             const prod = legs.reduce((s, l) => parseFloat((s * (parseFloat(l.odds) || 1)).toFixed(4)), 1.0);
             if (onAddToTicket) onAddToTicket({ id:Date.now(), legs, totalOdds:prod.toFixed(2), stake:0, exhausted:false, source:"custom_selection", family });
             clearSelection();
@@ -11488,13 +11512,19 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
 
               <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4 }}>
                 <div style={{ display:"flex",gap:5,alignItems:"center",flexWrap:"wrap" }}>
-                  {leg.market && leg.market !== "Unknown" && (
-                    <Pill color={mktStyle(leg.market||"").color} bg={mktStyle(leg.market||"").bg}>{leg.market}</Pill>
-                  )}
+                  {leg.market && leg.market !== "Unknown" && (() => {
+                    // FIX (2026-08-08): mktStyle keys are plain labels ("Over
+                    // 2.5", "BTTS") with no "TB:" variants — a leg carrying
+                    // the raw server-canonical "TB:Over 2.5" missed the map
+                    // entirely and silently fell through to the grey default,
+                    // on top of showing the prefix in the pill's own text.
+                    const displayMarket = leg.market.replace(/^TB:/, "");
+                    return <Pill color={mktStyle(displayMarket).color} bg={mktStyle(displayMarket).bg}>{displayMarket}</Pill>;
+                  })()}
                   {leg.isVolatile && (
                     <Pill color={C.muted} bg="transparent">volatile</Pill>
                   )}
-                  <span style={{ fontSize:10,color:mktStyle(leg.market && leg.market !== "Unknown" ? leg.market : "1X2").color,fontWeight:700 }}>
+                  <span style={{ fontSize:10,color:mktStyle((leg.market && leg.market !== "Unknown" ? leg.market : "1X2").replace(/^TB:/, "")).color,fontWeight:700 }}>
                     {leg.pick}
                   </span>
                 </div>
@@ -12684,7 +12714,7 @@ function DailyBreakdownTable({ dailyTrend }) {
                               <span style={{ fontSize:7, color:mst.color, background:`${mst.color}18`,
                                 border:`1px solid ${mst.color}28`, borderRadius:3, padding:"0 4px",
                                 marginLeft:4, fontWeight:800, letterSpacing:".05em" }}>
-                                {p.market}
+                                {p.market.replace(/^TB:/, "")}
                               </span>
                             )}
                           </div>
@@ -12768,7 +12798,7 @@ function PoolAccordion({ data, C }) {
                             {p.pick}
                             {p.market && (
                               <span style={{ fontSize:7,color:mst.color,background:`${mst.color}18`,border:`1px solid ${mst.color}28`,
-                                borderRadius:3,padding:"0 4px",marginLeft:4,fontWeight:800,letterSpacing:".04em" }}>{p.market}</span>
+                                borderRadius:3,padding:"0 4px",marginLeft:4,fontWeight:800,letterSpacing:".04em" }}>{p.market.replace(/^TB:/, "")}</span>
                             )}
                           </div>
                         </div>
@@ -13925,7 +13955,7 @@ function DataAnalystPanel({ data, loading, days }) {
                       {p.game}
                     </div>
                     <div style={{ fontSize:7, color:C.muted, marginTop:1 }}>
-                      {p.market}{p.league ? ` · ${p.league}` : ""}
+                      {(p.market||"").replace(/^TB:/, "")}{p.league ? ` · ${p.league}` : ""}
                       {p.type === "value" && (
                         <span style={{ color:C.edge, marginLeft:4, fontWeight:600 }}>Edge</span>
                       )}
@@ -14403,7 +14433,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                           )}
                         </div>
                         <div style={{ fontSize:8, color:C.muted, marginTop:2 }}>
-                          {leg.market}{leg.league ? ` · ${leg.league}` : ""}
+                          {(leg.market||"").replace(/^TB:/, "")}{leg.league ? ` · ${leg.league}` : ""}
                         </div>
                       </div>
                       <div style={{ textAlign:"right", flexShrink:0, marginLeft:10, display:"flex", alignItems:"center", gap:6 }}>
@@ -14508,9 +14538,33 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // this app that builds a leg off live odds.
   const qualifyingLegs = useMemo(() => {
     const legs = [];
+    // Cross-source avoid veto (2026-08-07) — reassigned at the top of each
+    // fixture below. Collects every market CA and/or SC's own verdict logic
+    // has flagged as a contradiction, a conflicting signal, or a validated
+    // avoid on THIS fixture — as family ids (see familyOfMarket above) so a
+    // CA-format id and an SC-format id for the same real-world market veto
+    // each other correctly. pushLeg checks every leg against this set,
+    // regardless of which source produced it — a market CA/SC itself calls
+    // a steer-away or a misfire isn't a usable leg from SA or Model either.
+    let currentVetoFamilies = new Set();
+    const engineOfSource = source => (source === "SC" || source === "SC verdict") ? "sc" : "sa";
+    const extractVetoMarkets = (verdicts) => {
+      const out = [];
+      for (const v of verdicts || []) {
+        if (v.type === "conflicting-signal" || v.type === "contradiction") {
+          if (v.market) out.push(v.market);
+          if (v.market2) out.push(v.market2);
+        } else if (v.direction === "avoid" && (v.type === "strongest-lean" || v.type === "second-lean")) {
+          if (v.market) out.push(v.market);
+        }
+      }
+      return out;
+    };
     const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source) => {
       const oddsNum = parseFloat(odds);
       if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
+      const fam = familyOfMarket(engineOfSource(source), market);
+      if (fam != null && currentVetoFamilies.has(fam)) return;
       const mp = modelProbFor(f, market);
       // Global floor (opt-in, see applyGlobalFloor above) — applies to every
       // source's legs, not just Model's own (which already self-gates below
@@ -14522,6 +14576,24 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         modelProb: mp, source });
     };
     for (const f of fixtures || []) {
+      currentVetoFamilies = new Set();
+      let caMatchesForFixture = null, caVerdictsForFixture = null;
+      if ((sources.has("ca") || sources.has("ca-verdict")) && appCaPatterns) {
+        caMatchesForFixture = matchCAConditions(f, appCaPatterns);
+        caVerdictsForFixture = computeCAVerdicts(caMatchesForFixture, f);
+        for (const m of extractVetoMarkets(caVerdictsForFixture)) {
+          const fam = familyOfMarket("ca", m);
+          if (fam != null) currentVetoFamilies.add(fam);
+        }
+      }
+      let scVerdictsForFixture = null;
+      if ((sources.has("sc") || sources.has("sc-verdict")) && scResults) {
+        scVerdictsForFixture = scResults[f.id]?.verdicts || [];
+        for (const m of extractVetoMarkets(scVerdictsForFixture)) {
+          const fam = familyOfMarket("sc", m);
+          if (fam != null) currentVetoFamilies.add(fam);
+        }
+      }
       if (sources.has("sa") && appSaPatterns?.length) {
         for (const mkt of Object.keys(SA_MARKETS)) {
           if (mkt === "PE:Mix") continue;
@@ -14533,15 +14605,15 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         }
       }
       if (sources.has("ca") && appCaPatterns) {
-        const { positive } = matchCAConditions(f, appCaPatterns);
+        const { positive } = caMatchesForFixture || matchCAConditions(f, appCaPatterns);
         for (const c of positive) {
           const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
           pushLeg(f, c.market, c.market.replace(/^TB:/, ""), odds, c.holdoutHitRate, c.holdoutLift, "CA");
         }
       }
       if (sources.has("ca-verdict") && appCaPatterns) {
-        const caMatches = matchCAConditions(f, appCaPatterns);
-        const lean = computeCAVerdicts(caMatches, f).find(v => v.type === "strongest-lean" && v.direction === "positive");
+        const verdictsList = caVerdictsForFixture || computeCAVerdicts(caMatchesForFixture || matchCAConditions(f, appCaPatterns), f);
+        const lean = verdictsList.find(v => v.type === "strongest-lean" && v.direction === "positive");
         if (lean) {
           const odds = SA_MARKETS[lean.market]?.oddsKey ? f.odds?.[SA_MARKETS[lean.market].oddsKey] : caOddsFor(f, lean.market);
           pushLeg(f, lean.market, lean.market.replace(/^TB:/, ""), odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "CA verdict");
@@ -14556,7 +14628,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         }
       }
       if (sources.has("sc-verdict") && scResults) {
-        const lean = (scResults[f.id]?.verdicts || []).find(v => v.type === "strongest-lean" && v.direction === "positive");
+        const lean = (scVerdictsForFixture || []).find(v => v.type === "strongest-lean" && v.direction === "positive");
         if (lean) {
           const label = SC_MARKET_LABELS.find(m => m.id === lean.market)?.label || lean.market;
           const odds = SC_MARKET_ODDS_FIELD[lean.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[lean.market]] : null;
@@ -14667,6 +14739,9 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
         Pulls whatever qualifies across any combination of SA/CA/SC/Model into a shared pool. Ranking always blends the base model's own probability in alongside whatever engine backed the leg — except Random, which ignores ranking entirely and shuffles. Build below uses this pool with your Tickets and Target Odds settings.
+        {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict")) && (
+          <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
+        )}
       </div>
 
       <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Sources</div>
@@ -20841,16 +20916,27 @@ function GRMProInner() {
 class GRMErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, error: null, info: null };
   }
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
   }
   componentDidCatch(error, info) {
+    this.setState({ info });
     try { console.error("GRM Pro crashed during render:", error, info); } catch {}
   }
   render() {
     if (this.state.hasError) {
+      // FIX (2026-08-08): used to show this fallback with zero error detail
+      // — message and stack only ever reached console.error, which isn't
+      // reachable on mobile Chrome without devtools. Tap "Error details"
+      // below, tap the box to select it, copy, and send it over — that's an
+      // exact stack trace instead of a description of what was clicked.
+      const details = [
+        this.state.error?.message || String(this.state.error || "Unknown error"),
+        this.state.error?.stack || "",
+        this.state.info?.componentStack ? `Component stack:${this.state.info.componentStack}` : "",
+      ].filter(Boolean).join("\n\n");
       return (
         <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center",
                       justifyContent:"center", gap:16, background:"#0a0a0f", color:"#fff", padding:24,
@@ -20864,6 +20950,12 @@ class GRMErrorBoundary extends React.Component {
                      padding:"10px 24px", fontSize:13, fontWeight:900, cursor:"pointer" }}>
             Reload
           </button>
+          <details style={{ maxWidth:"92vw", width:480, textAlign:"left", marginTop:8 }}>
+            <summary style={{ fontSize:11, color:"#666", cursor:"pointer" }}>Error details</summary>
+            <textarea readOnly value={details} onClick={e => e.target.select()}
+              style={{ width:"100%", height:160, marginTop:8, fontSize:10, fontFamily:"monospace",
+                       background:"#111", color:"#ccc", border:"1px solid #333", borderRadius:6, padding:8, boxSizing:"border-box" }} />
+          </details>
         </div>
       );
     }

@@ -1695,6 +1695,20 @@ function SCVerdictBlock({ verdicts }) {
       <span>Verified edge: <strong style={{ color: v.verifiedEdge >= 0 ? C.green : C.red }}>{v.verifiedEdge >= 0 ? "+" : ""}{v.verifiedEdge.toFixed(1)}pp</strong></span>
     </div>
   );
+  // FIX (2026-08-08): demotedAvoid and every "rest" entry (including
+  // contradiction/conflicting-signal rows) used to render only v.text — for
+  // types like contradiction, that text is a generic template ("Both
+  // matched as VALID positives, but they can't both be right...") that
+  // never names which two markets it's about, so two different
+  // contradiction pairs on the same fixture were visually indistinguishable.
+  // The headline already showed its market above the text; this gives the
+  // same treatment everywhere else.
+  const marketLabelOf = (v) => {
+    const one = id => SC_MARKET_LABELS.find(m => m.id === id)?.label || id;
+    if (v.market2) return `${one(v.market)} vs ${one(v.market2)}`;
+    if (v.market) return one(v.market);
+    return null;
+  };
   return (
     <div style={{
       background: C.faint, borderRadius: 12, padding: "14px 14px",
@@ -1740,7 +1754,14 @@ function SCVerdictBlock({ verdicts }) {
         <div style={{ paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <CAIconAvoid size={11} color={C.red} />
-            <span style={{ fontSize: 9.5, color: C.red, opacity: 0.85, lineHeight: 1.6, fontWeight: 400 }}>{demotedAvoid.text}</span>
+            <div>
+              {marketLabelOf(demotedAvoid) && (
+                <div style={{ fontSize: 8, fontWeight: 700, color: C.red, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 1 }}>
+                  {marketLabelOf(demotedAvoid)}
+                </div>
+              )}
+              <span style={{ fontSize: 9.5, color: C.red, opacity: 0.85, lineHeight: 1.6, fontWeight: 400 }}>{demotedAvoid.text}</span>
+            </div>
           </div>
           <StatRow v={demotedAvoid} />
         </div>
@@ -1755,11 +1776,19 @@ function SCVerdictBlock({ verdicts }) {
               : isSecond ? C.purple
               : C.amber;
             const Icon = (isSecond || isValue) ? CAIconCheck : CAIconVerdict;
+            const mLabel = marketLabelOf(v);
             return (
               <div key={i}>
                 <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                   <Icon size={11} color={color} />
-                  <span style={{ fontSize: 9.5, color: C.text, opacity: 0.72, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
+                  <div>
+                    {mLabel && (
+                      <div style={{ fontSize: 8, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 1 }}>
+                        {mLabel}
+                      </div>
+                    )}
+                    <span style={{ fontSize: 9.5, color: C.text, opacity: 0.72, lineHeight: 1.6, fontWeight: isValue ? 700 : 400 }}>{v.text}</span>
+                  </div>
                 </div>
                 <StatRow v={v} />
               </div>
