@@ -2299,6 +2299,33 @@ function getEmpiricalRate(market, conf, historicalRates) {
 function isLeagueVolatile(league) { return league in CALIBRATION.volatileLeagues; }
 function getVolatileBoost(league) { return CALIBRATION.volatileLeagues[league]?.boostRequired ?? 0; }
 
+// Fixture lifecycle states shared by every pool/leg builder in the app
+// (evaluatePick, buildSignalPool, PatternEngineControls). Single source of
+// truth so the three don't drift out of sync with three separately-typed
+// copies of the same two sets.
+// ALWAYS_BLOCKED: live in-play and cancelled states — never valid for any
+// pool regardless of date, since there's no bookable outcome once a game has
+// kicked off or been called off.
+// FINISHED_STATES: allowed on past dates (needed for backtesting / pool
+// display) but blocked on today — you can't book a game that already ended.
+const FIXTURE_ALWAYS_BLOCKED_STATES = new Set([
+  "1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live",
+  "postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted",
+]);
+const FIXTURE_FINISHED_STATES = new Set([
+  "finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties",
+]);
+const normalizeFixtureState = f => (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
+// isBookableFixtureState: can a leg be built on this fixture right now?
+// isPastDate lets finished games through (backtesting); live/cancelled states
+// are excluded no matter what date is being viewed.
+function isBookableFixtureState(f, isPastDate = false) {
+  const state = normalizeFixtureState(f);
+  if (FIXTURE_ALWAYS_BLOCKED_STATES.has(state)) return false;
+  if (!isPastDate && FIXTURE_FINISHED_STATES.has(state)) return false;
+  return true;
+}
+
 // isPastDate: when true (viewing a historical date), finished games are allowed
 // into the engine pool so backtesting works. Live/in-play and cancelled states
 // are always blocked regardless of date — they have no bookable outcome.
@@ -2311,19 +2338,7 @@ function evaluatePick(f, historicalRates, isPastDate = false) {
   // The anchor.type === "tt" check below is dead code — getRead() never sets anchor.type.
   // Left as a defensive guard in case a future code path sets anchor.role for team-scoped picks.
   if (anchor.role) return null;
-  const state = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
-  // FINISHED_STATES: allowed on past dates (needed for backtesting / pool display).
-  // Blocked on today — can't book a finished game.
-  const FINISHED_STATES = new Set([
-    "finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties",
-  ]);
-  // ALWAYS_BLOCKED: live in-play and cancelled states — never valid for pool regardless of date.
-  const ALWAYS_BLOCKED = new Set([
-    "1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live",
-    "postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted",
-  ]);
-  if (ALWAYS_BLOCKED.has(state)) return null;
-  if (!isPastDate && FINISHED_STATES.has(state)) return null;
+  if (!isBookableFixtureState(f, isPastDate)) return null;
   if (!conf || conf <= 0) return null;
   if (market === "BTTS" && conf < CALIBRATION.bttsMinConf) return null;
   if (market === "Under 3.5" || market === "Under 3.5 Goals") {
@@ -2436,14 +2451,10 @@ function buildUniversalPool(fixtures, historicalRates, isPastDate = false) {
 // "All Fixtures" was silently converging on the Engine pool before this fix.
 function buildSignalPool(fixtures, historicalRates, isPastDate = false) {
   const oi = oddsOrImplied;
-  const FINISHED_STATES = new Set(["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties"]);
-  const ALWAYS_BLOCKED  = new Set(["1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live","postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted"]);
   const pool = [];
 
   for (const f of fixtures) {
-    const state = (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
-    if (ALWAYS_BLOCKED.has(state)) continue;
-    if (!isPastDate && FINISHED_STATES.has(state)) continue;
+    if (!isBookableFixtureState(f, isPastDate)) continue;
 
     // Read > Edge > Radar — same priority order as buildPool() elsewhere.
     let sig = null;
@@ -14484,8 +14495,13 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 // infrastructure directly rather than re-deriving it server-side — the same
 // reasoning liveSaMatchCache/liveCaMatchCache above already runs on, just
 // generalized across ALL markets per fixture instead of one.
-function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange }) {
+function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date }) {
   const [sources, setSources] = useState(() => new Set(["sa", "ca"]));
+  // Same "viewing a past date allows finished games through, live/cancelled
+  // states never do" rule Manual mode's isPastBuild already applies —
+  // Pattern Engine had no state check at all before this, so live games
+  // could enter the pool with live odds and read as a normal qualifying leg.
+  const isPastDate = !!(date && date !== todayStr());
   const [strategy, setStrategy] = useState("mixed-ladder"); // "pure-ladder" | "mixed-ladder" | "random"
   const [ladderMarket, setLadderMarket] = useState(null);
   const [modelMinProb, setModelMinProb] = useState(65); // floor value shared by both uses below
@@ -14530,6 +14546,25 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     if (def) return def.computeProb ? def.computeProb(m) : (m[def.probKey] ?? null);
     return m[market] ?? null;
   };
+
+  // PERF (2026-08-08): matchSAPatterns filters whatever array it's handed by
+  // `p.market !== market`, so passing the full flat appSaPatterns array made
+  // qualifyingLegs below re-scan every pattern in the whole dataset, once per
+  // market, per fixture (13 full scans per fixture) — the actual cause of
+  // Pattern Engine's slowness with exhaustive depth-2 mining producing a
+  // large patterns array. Grouping by market once here means each of those
+  // 13 calls only scans the patterns that could possibly match, without
+  // touching matchSAPatterns' signature (it's also called from the Custom
+  // List/Smart Tier Trim live-match caches — left untouched to avoid any
+  // regression risk there).
+  const saPatternsByMarket = useMemo(() => {
+    const map = new Map();
+    for (const p of appSaPatterns || []) {
+      if (!map.has(p.market)) map.set(p.market, []);
+      map.get(p.market).push(p);
+    }
+    return map;
+  }, [appSaPatterns]);
 
   // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
   // LEAST ONE selected source (OR across sources, not AND — requiring every
@@ -14576,6 +14611,13 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         modelProb: mp, source });
     };
     for (const f of fixtures || []) {
+      // BUGFIX (2026-08-08): live in-play and cancelled fixtures had no gate
+      // here at all — only odds validity was checked, and live games still
+      // carry live odds, so they qualified as normal legs. Same rule
+      // evaluatePick/buildSignalPool already enforce everywhere else in the
+      // app: never live/cancelled, finished games only allowed when
+      // backtesting a past date.
+      if (!isBookableFixtureState(f, isPastDate)) continue;
       currentVetoFamilies = new Set();
       let caMatchesForFixture = null, caVerdictsForFixture = null;
       if ((sources.has("ca") || sources.has("ca-verdict")) && appCaPatterns) {
@@ -14597,7 +14639,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       if (sources.has("sa") && appSaPatterns?.length) {
         for (const mkt of Object.keys(SA_MARKETS)) {
           if (mkt === "PE:Mix") continue;
-          const { positive } = matchSAPatterns(f, mkt, appSaPatterns);
+          const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
           if (!positive.length) continue;
           const def = SA_MARKETS[mkt];
           const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
@@ -14650,20 +14692,56 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         }
       }
     }
+    // Cross-source corroboration (2026-08-08) — until now, selecting SA+CA
+    // just meant "more legs to pick from"; a fixture+market both SA and CA
+    // independently flagged scored no differently than one only SA flagged.
+    // That's a real signal being thrown away — App.jsx already treats
+    // model/CA agreement as meaningful for CA's own scoring
+    // (caModelAgreementFactor). This applies the same idea across engines:
+    // count how many distinct engines (sa / ca / sc / model) landed a leg on
+    // the same fixture+market, and let legScore below reward agreement.
+    // "CA" and "CA verdict" collapse to one engine (same underlying CA
+    // matcher), same for "SC"/"SC verdict" — corroboration means independent
+    // engines agreeing, not the same engine's own two output shapes.
+    const engineFamily = source =>
+      (source === "SC" || source === "SC verdict") ? "sc" :
+      (source === "CA" || source === "CA verdict") ? "ca" :
+      source === "Model" ? "model" : "sa";
+    const corroborationByKey = new Map();
+    for (const leg of legs) {
+      const key = `${leg.fixtureId}|${leg.market}`;
+      if (!corroborationByKey.has(key)) corroborationByKey.set(key, new Set());
+      corroborationByKey.get(key).add(engineFamily(leg.source));
+    }
+    for (const leg of legs) {
+      const engines = corroborationByKey.get(`${leg.fixtureId}|${leg.market}`);
+      leg.corroboration = engines.size;
+      leg.corroboratingEngines = [...engines];
+    }
     return legs;
-  }, [fixtures, sources, appSaPatterns, appCaPatterns, scResults, modelMinProb, applyGlobalFloor]);
+  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate]);
 
   const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
-  // Ranking now blends model probability in alongside whatever
-  // pattern-mining signal earned the leg its spot (2026-08-05, Davies's
-  // request) — a leg with strong SA/CA/SC support AND a confident base
-  // model reads as more trustworthy than one resting on pattern support
-  // alone. hitRate/modelProb are both already 0-100 scale (directly
-  // averageable); lift stays additive on top, same as before. Model-only
-  // legs (hitRate:null) fall back to modelProb alone.
-  const legScore = l => l.hitRate != null
-    ? ((l.hitRate + (l.modelProb ?? l.hitRate)) / 2) + (l.lift ?? 0)
-    : (l.modelProb ?? 0);
+  // Ranking blends model probability in alongside whatever pattern-mining
+  // signal earned the leg its spot (2026-08-05, Davies's request) — a leg
+  // with strong SA/CA/SC support AND a confident base model reads as more
+  // trustworthy than one resting on pattern support alone. hitRate/modelProb
+  // are both already 0-100 scale (directly averageable); lift stays additive
+  // on top, same as before. Model-only legs (hitRate:null) fall back to
+  // modelProb alone.
+  // CORROBORATION_BONUS_PER_ENGINE (2026-08-08): a small additive bonus per
+  // extra independent engine that agrees on the same fixture+market — see
+  // corroboration computation above. Kept deliberately small (well under a
+  // single lift point's typical swing) so it breaks ties toward agreement
+  // without letting a weak, low-hit-rate leg leapfrog a strong single-source
+  // one purely for being flagged twice.
+  const CORROBORATION_BONUS_PER_ENGINE = 3;
+  const legScore = l => {
+    const base = l.hitRate != null
+      ? ((l.hitRate + (l.modelProb ?? l.hitRate)) / 2) + (l.lift ?? 0)
+      : (l.modelProb ?? 0);
+    return base + Math.max(0, (l.corroboration ?? 1) - 1) * CORROBORATION_BONUS_PER_ENGINE;
+  };
 
   const stackedLegs = useMemo(() => {
     if (strategy === "pure-ladder") {
@@ -14704,9 +14782,17 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // same ~0-1 range Manual's evaluatePick scores land in (legScore here
   // is roughly 0-100 + lift points), just for the tier-shuffle stratification
   // inside buildManualParlaysFromPool — not a precision-critical conversion.
+  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model" };
   useEffect(() => {
     const pool = stackedLegs.map(l => {
       const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
+      // When multiple engines independently agreed on this fixture+market,
+      // show all of them (e.g. "SA + CA") instead of just whichever one
+      // happened to produce the winning leg object — the agreement itself
+      // is the useful signal to surface here.
+      const strategyLabel = (l.corroboration ?? 1) > 1
+        ? l.corroboratingEngines.map(e => ENGINE_DISPLAY_LABEL[e] || e).join(" + ")
+        : l.source;
       return {
         fixtureId: l.fixtureId,
         game: `${l.home || "?"} vs ${l.away || "?"}`,
@@ -14717,7 +14803,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         league: l.league,
         score: Math.max(0, Math.min(1, legScore(l) / 100)),
         empiricalRate: conf,
-        strategyLabel: l.source,
+        strategyLabel,
         strategyTags: [],
         isVolatile: isLeagueVolatile(l.league || ""),
       };
@@ -14738,7 +14824,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of SA/CA/SC/Model into a shared pool. Ranking always blends the base model's own probability in alongside whatever engine backed the leg — except Random, which ignores ranking entirely and shuffles. Build below uses this pool with your Tickets and Target Odds settings.
+        Pulls whatever qualifies across any combination of SA/CA/SC/Model into a shared pool. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
         {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict")) && (
           <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
         )}
@@ -16210,6 +16296,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       appSaPatterns={appSaPatterns}
                       appCaPatterns={appCaPatterns}
                       onPoolChange={setPatternEnginePool}
+                      date={date}
                     />
                   )}
 
