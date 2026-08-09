@@ -1903,6 +1903,29 @@ function consensusOddsFor(f, market) {
   return teamTotalOddsFor(f, market);
 }
 
+// SIGNAL_MARKET_TIER (2026-08-09) — adapted from caStoryVerdict.js's
+// validated MAIN/SUBSIDIARY split (Davies's own 801-fixture holdout study),
+// not a number invented for this file. Same real finding that made
+// TB:Home Over 1.5 sit alongside TB:1X2-Home there, and TB:Under 4.5/
+// TB:Over 1.5 sit as fallback-only under their thesis, applies here —
+// adapted to Consensus's family boundaries (Davies's spec keeps Goals as
+// one family rather than splitting under/over, so the tiering below lives
+// inside Goals instead of across two separate theses).
+// SUBSIDIARY isn't banned — caStoryVerdict tried a hard MAIN-first gate and
+// walked it back ("that's exactly the gap the holdout numbers exposed");
+// hard-gating cost it a genuinely-strong SUBSIDIARY signal that should have
+// won. SIGNAL_SUBSIDIARY_EDGE_TAX below keeps that lesson: a real, large tax
+// so SUBSIDIARY needs genuine separation to win its family, not a hard ban.
+const SIGNAL_MARKET_TIER = {
+  "TB:1X2-Home": "MAIN", "TB:1X2-Draw": "MAIN", "TB:1X2-Away": "MAIN",
+  "TB:DC1X": "SUBSIDIARY", "TB:DCX2": "SUBSIDIARY",
+  "TB:Home Over 1.5": "MAIN", "TB:Away Over 1.5": "MAIN",
+  "TB:Over 2.5": "MAIN", "TB:Under 3.5": "MAIN", "TB:BTTS": "MAIN",
+  "TB:Over 1.5": "SUBSIDIARY", "TB:Under 4.5": "SUBSIDIARY",
+  "TB:Home Over 0.5": "SUBSIDIARY", "TB:Away Over 0.5": "SUBSIDIARY",
+};
+const SIGNAL_SUBSIDIARY_EDGE_TAX = 8;
+
 // Computes, for ONE fixture, the strongest (and where a distinct second
 // candidate clears the bar, secondary) lean in each of the four families —
 // cross-engine, baseline-adjusted. Only ever returns POSITIVE-direction
@@ -1912,11 +1935,19 @@ function consensusOddsFor(f, market) {
 // getting a complement mapping wrong would silently produce a wrongly-priced
 // leg, not a risk worth taking in a betting product without Davies
 // explicitly signing off on the exact complement rules first).
+// RADAR (2026-08-09): getRead's own real rule is stronger than a per-market
+// tax — "TeamTotal is a REINFORCER only — never a Read anchor" (server.js
+// ~3015). Both Radar markets are SUBSIDIARY-tier with nothing MAIN in their
+// own family to lose ties to, so a flat tax alone can't reproduce that rule
+// (there's no MAIN competitor inside Radar for it to lose to). This mirrors
+// getRead directly: Radar is only even evaluated once Result/Dominance/Goals
+// have all failed to produce a lean for this fixture, matching "TeamTotal
+// never anchors, only reinforces when there's nothing else."
 // ctx: { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor }
 function computeFamilyConsensus(f, ctx) {
   const { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor } = ctx;
-  const families = {};
-  for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
+
+  function evaluateFamily(markets) {
     const eligible = [];
     for (const market of markets) {
       const posByEngine = new Map(), avoidByEngine = new Map();
@@ -1947,13 +1978,23 @@ function computeFamilyConsensus(f, ctx) {
       const pos = bestSignalCandidate(posByEngine, false, modelProb);
       if (!pos) continue;
       const avoid = avoidByEngine.size ? bestSignalCandidate(avoidByEngine, true, modelProb) : null;
-      const netScore = pos.netScore - (avoid ? avoid.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
+      let netScore = pos.netScore - (avoid ? avoid.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
+      if (SIGNAL_MARKET_TIER[market] === "SUBSIDIARY") netScore -= SIGNAL_SUBSIDIARY_EDGE_TAX;
       if (pos.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) continue;
       eligible.push({ market, odds, netScore, candidate: pos, hadContradiction: !!avoid });
     }
     eligible.sort((a, b) => b.netScore - a.netScore);
-    families[familyId] = { strongest: eligible[0] ?? null, secondary: eligible[1] ?? null };
+    return { strongest: eligible[0] ?? null, secondary: eligible[1] ?? null };
   }
+
+  const families = {};
+  for (const familyId of ["RESULT", "DOMINANCE", "GOALS"]) {
+    families[familyId] = evaluateFamily(SIGNAL_FAMILIES[familyId]);
+  }
+  const anyPrimaryHit = ["RESULT", "DOMINANCE", "GOALS"].some(id => families[id].strongest);
+  families.RADAR = anyPrimaryHit
+    ? { strongest: null, secondary: null }
+    : evaluateFamily(SIGNAL_FAMILIES.RADAR);
   return families;
 }
 
@@ -15082,7 +15123,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into four market families — Result, Dominance, Goals, Radar — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Every other source still works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
+        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-09) looks at SA, CA, SC, and the base model together per fixture, grouped into four market families — Result, Dominance, Goals, Radar — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Within Result and Goals, DC and Over 1.5/Under 4.5 need real separation to beat 1X2/Over 2.5/Under 3.5/BTTS — same fallback-market principle The Read and CA Story already use. Radar only fires when Result, Dominance, and Goals all come up empty for a fixture, matching The Read's own rule that TeamTotal never anchors, only reinforces. Every other source still works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
         {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && (
           <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
         )}
