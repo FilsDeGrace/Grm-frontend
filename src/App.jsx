@@ -11725,7 +11725,13 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* ── Legs ── */}
-      {!exhausted && (
+      {/* FIX (2026-08-10): this used to only render when !exhausted, so a
+          shortfall ticket showed the "fewer legs than requested" warning
+          with no way to see which legs it actually found — you'd have to
+          guess or dig elsewhere. Legs render regardless of exhausted state
+          now; only the actions row above (remix/add legs) stays gated,
+          since those specifically assume a ticket that hit its target. */}
+      {(
         <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:12 }}>
           {/* B-FIX: date-separator between legs from different dates. Deliberately
               does NOT reorder ticket.legs — `i` is used below (onRemoveLeg(i),
@@ -14970,8 +14976,18 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         for (const [familyId, verdict] of Object.entries(consensus)) {
           const win = verdict.strongest;
           if (!win) continue;
-          const label = `${SIGNAL_FAMILY_LABELS[familyId]}: ${win.market.replace(/^TB:/, "")}`;
-          pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, "Consensus");
+          // FIX (2026-08-10): the pool-reporting effect below sets both
+          // `pick` and `market` to marketLabel, so baking the family name
+          // into marketLabel here made the ticket card show "Dominance:
+          // Away Over 1.5" as both the pill AND the text next to it — the
+          // exact same string twice. Bare market name matches every other
+          // source's card; the family now rides in the source string
+          // instead, so it shows once, in the orange badge, as "Consensus ·
+          // Dominance" — engineFamily() below matches on the "Consensus"
+          // prefix so corroboration counting still treats every family's
+          // Consensus leg as one engine, not four different ones.
+          const label = win.market.replace(/^TB:/, "");
+          pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, `Consensus · ${SIGNAL_FAMILY_LABELS[familyId]}`);
         }
       }
       // Model — the raw base model's own probability, no pattern-mining
@@ -15004,7 +15020,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       (source === "SC" || source === "SC verdict") ? "sc" :
       (source === "CA" || source === "CA verdict") ? "ca" :
       source === "Model" ? "model" :
-      source === "Consensus" ? "consensus" : "sa";
+      source.startsWith("Consensus") ? "consensus" : "sa";
     const corroborationByKey = new Map();
     for (const leg of legs) {
       const key = `${leg.fixtureId}|${leg.market}`;
@@ -15083,7 +15099,18 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus" };
   useEffect(() => {
     const pool = stackedLegs.map(l => {
-      const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
+      // FIX (2026-08-10): conf and empiricalRate were both set to the same
+      // number (hitRate, falling back to modelProb only when no engine
+      // backed the leg) — so the ticket card's primary "(_%)" next to odds
+      // and its "% hist" line always showed the identical figure, twice.
+      // Not intentional for SA/CA/SC either (confirmed) — applies to every
+      // source now: conf leads with modelProb (the model's own read on THIS
+      // game today), falling back to the historical rate only when there's
+      // no model number at all. empiricalRate stays strictly the engine's
+      // own historical/holdout rate. Top line = model confidence, bottom
+      // "hist" line = historical hit rate — two different, both-meaningful
+      // numbers instead of one number rendered twice.
+      const conf = Math.round((l.modelProb ?? l.hitRate) ?? 0);
       // When multiple engines independently agreed on this fixture+market,
       // show all of them (e.g. "SA + CA") instead of just whichever one
       // happened to produce the winning leg object — the agreement itself
@@ -15100,7 +15127,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         market: l.marketLabel,
         league: l.league,
         score: Math.max(0, Math.min(1, legScore(l) / 100)),
-        empiricalRate: conf,
+        empiricalRate: l.hitRate != null ? Math.round(l.hitRate) : null,
         strategyLabel,
         strategyTags: [],
         isVolatile: isLeagueVolatile(l.league || ""),
