@@ -548,6 +548,41 @@ const SA_MARKET_LABELS = [...Object.keys(SA_MARKETS)].map(id => ({
 // follow it, so both selectors stay in sync instead of showing two different
 // markets at once. CUSTOM_FAMILIES uses different (lowercase, unprefixed)
 // ids than SA_MARKETS — this is the explicit mapping between the two schemes.
+// ─────────────────────────────────────────────────────────────────────────
+// CA/SC:Scan tier weights (2026-08-13) — duplicated from tgp-genetic-search-
+// v2.mjs's TIER_A/B/C + tierWeightOf (Sterling's spec, 2026-08-11), NOT
+// imported: that file pulls in `fs`/`worker_threads` for its offline
+// genetic-search CLI, neither of which exist in a browser bundle, so a
+// direct import would break the Vite build. Same "small intentional
+// duplication" class that file's own header already documents for
+// wilsonLowerBound/effectiveN — kept in lockstep by hand, not re-derived.
+// Draw is deliberately absent from every tier ("Draw ain't a market I even
+// consider. drop it.") — tierWeightOf returns null for it, and both Scan
+// branches below drop any market tierWeightOf can't resolve rather than
+// defaulting it to some weight, same as validateGene's own rejection rule.
+const CA_SCAN_TIER_A = { "TB:1X2-Home": 1.00, "TB:1X2-Away": 1.00, "TB:Over 2.5": 1.00, "TB:BTTS": 1.00, "TB:Under 3.5": 1.00 };
+const CA_SCAN_TIER_B = { "TB:DC1X": 0.85, "TB:DCX2": 0.85, "TB:Over 1.5": 0.85, "TB:Home Over 1.5": 0.70, "TB:Away Over 1.5": 0.70 };
+const CA_SCAN_TIER_C = { "TB:Home Over 0.5": 0.60, "TB:Away Over 0.5": 0.60, "TB:Under 4.5": 0.60 };
+const CA_SCAN_TIER_LIST = [CA_SCAN_TIER_A, CA_SCAN_TIER_B, CA_SCAN_TIER_C];
+function caScanTierWeightOf(tbMarket) {
+  for (const tier of CA_SCAN_TIER_LIST) if (tbMarket in tier) return tier[tbMarket];
+  return null;
+}
+// SC:Scan carries bare pool-market ids (e.g. "over25"), not "TB:Over 2.5" —
+// same translation TB_TO_POOL_MARKET does server-side, just inverted here
+// since Scan needs pool-id -> TB: to reuse the same weight table above
+// rather than a second hand-kept copy of it.
+const SC_SCAN_POOL_TO_TB = {
+  homeWin: "TB:1X2-Home", awayWin: "TB:1X2-Away", dc1X: "TB:DC1X", dcX2: "TB:DCX2",
+  homeOver15: "TB:Home Over 1.5", awayOver15: "TB:Away Over 1.5",
+  over15: "TB:Over 1.5", over25: "TB:Over 2.5", under35: "TB:Under 3.5", under45: "TB:Under 4.5",
+  bttsYes: "TB:BTTS", homeOver05: "TB:Home Over 0.5", awayOver05: "TB:Away Over 0.5",
+  // draw intentionally absent — no TB: tier entry exists for it either.
+};
+function scScanTierWeightOf(poolMarket) {
+  const tb = SC_SCAN_POOL_TO_TB[poolMarket];
+  return tb ? caScanTierWeightOf(tb) : null;
+}
 const SA_TO_FAMILY_ID = {
   "TB:Over 1.5": "over15", "TB:Over 2.5": "over25",
   "TB:Under 3.5": "under35", "TB:Under 4.5": "under45",
@@ -6845,9 +6880,23 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         // "strength" is the mirror of its holdout HR (a 12% holdout HR avoid
         // signal is as strong as an 88% positive one), so rank on that
         // common scale rather than sorting positives and avoids separately.
+        // 2026-08-13 fix (Sterling report — Under 4.5/team-total-Over 0.5/
+        // Over 1.5 wrongly winning the scan): raw hit rate alone let those
+        // naturally-high-base-rate, lower-value markets outrank markets
+        // Sterling actually trusts more at a similar HR. Multiplying in
+        // caScanTierWeightOf fixes that — a Tier C market now needs a
+        // meaningfully higher HR to outrank a Tier A one, matching the same
+        // tier waterfall the genetic search already uses to select markets.
+        // Untiered markets (tierWeightOf → null, i.e. Draw) are dropped from
+        // the scan entirely rather than defaulted to some weight — same
+        // "drop it" rule validateGene already enforces on the search side.
         scanMatches = [
-          ...posGrouped.map(c => ({ combo: c, isAvoid: false, rank: c.holdoutHitRate ?? 0 })),
-          ...avoidGrouped.map(c => ({ combo: c, isAvoid: true, rank: 100 - (c.holdoutHitRate ?? 100) })),
+          ...posGrouped.map(c => ({ combo: c, isAvoid: false, tierWeight: caScanTierWeightOf(c.market), rank: 0 }))
+            .filter(m => m.tierWeight != null)
+            .map(m => ({ ...m, rank: (m.combo.holdoutHitRate ?? 0) * m.tierWeight })),
+          ...avoidGrouped.map(c => ({ combo: c, isAvoid: true, tierWeight: caScanTierWeightOf(c.market), rank: 0 }))
+            .filter(m => m.tierWeight != null)
+            .map(m => ({ ...m, rank: (100 - (m.combo.holdoutHitRate ?? 100)) * m.tierWeight })),
         ].sort((a, b) => b.rank - a.rank);
         if (!scanMatches.length) continue;
         const top = scanMatches[0];
@@ -7035,9 +7084,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             if (!cur || (c.holdoutHitRate ?? 100) < (cur.holdoutHitRate ?? 100)) byMarket.set(c.market, c);
           }
           const avd = [...byMarket.values()];
+          // 2026-08-13 tier-weight fix — same reasoning as CA:Scan above.
           scanMatches = [
-            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, rank: c.holdoutHitRate ?? 0 })),
-            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, rank: 100 - (c.holdoutHitRate ?? 100) })),
+            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
+              .filter(m => m.tw != null).map(m => ({ ...m, rank: (m.holdoutHitRate ?? 0) * m.tw })),
+            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
+              .filter(m => m.tw != null).map(m => ({ ...m, rank: (100 - (m.holdoutHitRate ?? 100)) * m.tw })),
           ].sort((a, b) => b.rank - a.rank);
         } else if (scMode === "emerging") {
           const avoidCeiling = 100 - scEmergingMinHR;
@@ -7056,18 +7108,21 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           }
           const avd = [...byMarket.values()];
           scanMatches = [
-            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, rank: c.holdoutHitRate ?? 0 })),
-            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, rank: 100 - (c.holdoutHitRate ?? 100) })),
+            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
+              .filter(m => m.tw != null).map(m => ({ ...m, rank: (m.holdoutHitRate ?? 0) * m.tw })),
+            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
+              .filter(m => m.tw != null).map(m => ({ ...m, rank: (100 - (m.holdoutHitRate ?? 100)) * m.tw })),
           ].sort((a, b) => b.rank - a.rank);
         } else {
           // Standard — flags is already one entry per market, just walk it
           // instead of narrowing to scResults[f.id].flags[scMarket].
           const flags = scResults[f.id]?.flags || {};
-          scanMatches = Object.entries(flags).map(([market, fl]) => ({
-            market, isAvoid: fl.status !== "favorable",
-            holdoutHitRate: fl.holdoutHitRate, holdoutLift: fl.holdoutLift,
-            rank: fl.status !== "favorable" ? 100 - (fl.holdoutHitRate ?? 100) : (fl.holdoutHitRate ?? 0),
-          })).sort((a, b) => b.rank - a.rank);
+          scanMatches = Object.entries(flags).map(([market, fl]) => {
+            const tw = scScanTierWeightOf(market);
+            return { market, isAvoid: fl.status !== "favorable", holdoutHitRate: fl.holdoutHitRate, holdoutLift: fl.holdoutLift, tw };
+          }).filter(m => m.tw != null)
+            .map(m => ({ ...m, rank: m.isAvoid ? (100 - (m.holdoutHitRate ?? 100)) * m.tw : (m.holdoutHitRate ?? 0) * m.tw }))
+            .sort((a, b) => b.rank - a.rank);
         }
         if (!scanMatches.length) continue;
         const top = scanMatches[0];
