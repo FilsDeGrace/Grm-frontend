@@ -15519,6 +15519,440 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     </div>
   );
 }
+
+// ── TGP (Ticket Gene Pool) CONTROLS — 2026-08-15 handoff ────────────────────
+// Fourth pattern engine, same family as SA/CA/SC above. Unlike those three,
+// TGP's own patterns aren't single-market signals — they're MINED MULTI-LEG
+// SHAPES (tgp-ticket-miner.mjs): cross-fixture combinations of CA/SC/SA
+// leg-types already proven to beat naive independence on historical
+// holdout. This component's job is exactly what the handoff called out as
+// "required, easy to miss": the mined JSON only proves a shape was
+// historically reliable — it has no idea which of TODAY's fixtures
+// currently satisfy each leg's conditions. That's computed here, live,
+// the same way Pattern Engine above computes its own live CA/SA pool
+// (matchCAConditions/matchSAPatterns, both already client-side) plus SC's
+// existing server match (scResults) — no new matching engine invented,
+// same three primitives Pattern Engine already trusts.
+//
+// tgpComboKey/tgpSaKey are byte-for-byte ports of tgp-ticket-miner.mjs's
+// own comboKey()/saKey() (that file, ~line 93) — this MUST stay identical
+// to how the miner hashed conditions when it mined shapes, or a live match
+// silently fails to line up with its shape and reads as "nothing live
+// today" instead of erroring. Server's /api/tgp-shapes already parsed each
+// shape's leg labels into {market, source, patternKey} — matching a live
+// hit is just "does its computed key equal patternKey."
+function tgpComboKey(combo) {
+  return combo.conditions.map(c => `${c.field}${c.op}${c.value}`).sort().join('&');
+}
+function tgpSaKey(pattern) {
+  return Object.entries(pattern.conditions).map(([k, v]) => `${k}=${v}`).sort().join('&');
+}
+
+// T-cap ledger — mirrors parlaySystemEngine.mjs's createLedger/canClaim/
+// claim exactly (that file's own two rules, restated here rather than
+// imported since it has no build step to pull a .mjs into this bundle):
+//   1. A (fixture, market) pair can be claimed once, ever.
+//   2. A fixture can be claimed by at most maxPerFixture (3) tickets total.
+// Scoped to ONE TGPControls session (resets on date change / remount) —
+// same lifetime buildManualParlaysFromPool's own globalUsed Set already
+// has for a single build call, just persisted across repeated actions
+// within this component instead of one call.
+function createTgpLedger() {
+  return { claimed: new Set(), occupancy: new Map() };
+}
+function tgpLegKey(fixtureId, market) { return `${fixtureId}|${market}`; }
+function tgpCanClaim(ledger, fixtureId, market, maxPerFixture = 3) {
+  if (ledger.claimed.has(tgpLegKey(fixtureId, market))) return false;
+  return (ledger.occupancy.get(fixtureId) ?? 0) < maxPerFixture;
+}
+function tgpClaim(ledger, fixtureId, market, maxPerFixture = 3) {
+  if (!tgpCanClaim(ledger, fixtureId, market, maxPerFixture)) return false;
+  ledger.claimed.add(tgpLegKey(fixtureId, market));
+  ledger.occupancy.set(fixtureId, (ledger.occupancy.get(fixtureId) ?? 0) + 1);
+  return true;
+}
+
+// Builds a global index: leg key ("market/source:patternKey") -> every
+// fixture live-matching it right now, with that fixture's odds for the
+// market. One pass over fixtures (not one pass per shape) — same
+// performance discipline PERF (2026-08-08) applied to saPatternsByMarket
+// above, since shapes can number in the thousands but fixtures are a
+// handful of hundred at most.
+function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }) {
+  const index = new Map(); // key -> [{fixtureId, home, away, league, odds}]
+  const add = (key, f, odds) => {
+    if (!(odds > 1)) return; // unpriced legs can't be staked or combined into odds
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league, odds });
+  };
+  for (const f of fixtures || []) {
+    if (!isBookableFixtureState(f, isPastDate)) continue; // same live/cancelled gate Pattern Engine uses
+    if (appCaPatterns) {
+      const { positive } = matchCAConditions(f, appCaPatterns);
+      for (const c of positive) {
+        const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
+        add(`${c.market}/ca:${tgpComboKey(c)}`, f, odds);
+      }
+    }
+    if (appSaPatterns?.length) {
+      for (const mkt of Object.keys(SA_MARKETS)) {
+        if (mkt === "PE:Mix") continue;
+        const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
+        const def = SA_MARKETS[mkt];
+        const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
+        for (const p of positive) add(`${mkt}/sa:${tgpSaKey(p)}`, f, odds);
+      }
+    }
+    // SC's matched combos come back from POST /api/sc-match's own
+    // matchResult.positive — real {conditions} objects, same shape CA's
+    // are (tgp-pattern-matcher.mjs confirms CA/SC condition objects are
+    // byte-identical), so tgpComboKey applies unchanged. c.market here is
+    // SC's raw pool-key field (over25, homeWin, ...) — no TB: prefix,
+    // matching exactly what the miner's library.sc grouping key was.
+    const scPositive = scResults?.[f.id]?.positive;
+    if (scPositive?.length) {
+      for (const c of scPositive) {
+        const odds = SC_MARKET_ODDS_FIELD[c.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[c.market]] : null;
+        add(`${c.market}/sc:${tgpComboKey(c)}`, f, odds);
+      }
+    }
+  }
+  return index;
+}
+
+// Whole-shape mode only: finds ONE assignment of a distinct fixture to
+// each of a shape's legs (cut is 2 or 3 in the current miner — see that
+// file's header — so plain backtracking is more than fast enough; this
+// is never run against an unbounded leg count). Candidates per leg are
+// pre-sorted by odds descending so, among multiple valid assignments,
+// the search naturally favors the higher-value one without needing a
+// separate optimization pass.
+function tgpAssignDistinctFixtures(legLabels, liveIndex) {
+  const candidatesPerLeg = legLabels.map(l => {
+    const key = `${l.market}/${l.source}:${l.patternKey}`;
+    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
+  });
+  if (candidatesPerLeg.some(c => c.length === 0)) return null; // at least one leg isn't live anywhere today
+  const used = new Set();
+  const assignment = new Array(legLabels.length);
+  function backtrack(i) {
+    if (i === legLabels.length) return true;
+    for (const cand of candidatesPerLeg[i]) {
+      if (used.has(cand.fixtureId)) continue;
+      used.add(cand.fixtureId);
+      assignment[i] = cand;
+      if (backtrack(i + 1)) return true;
+      used.delete(cand.fixtureId);
+    }
+    return false;
+  }
+  return backtrack(0) ? assignment : null;
+}
+
+function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets }) {
+  const isPastDate = !!(date && date !== todayStr());
+  const [tgpData, setTgpData] = useState(null); // { shapes, killerLeaderboard, generatedAt, ... }
+  const [tgpError, setTgpError] = useState(null);
+  const [tgpLoading, setTgpLoading] = useState(false);
+  useEffect(() => {
+    if (tgpData || tgpLoading) return;
+    setTgpLoading(true);
+    fetch(`${SERVER}/api/tgp-shapes`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
+      .then(setTgpData)
+      .catch(e => setTgpError(e.message))
+      .finally(() => setTgpLoading(false));
+  }, [tgpData, tgpLoading]);
+
+  const [scResults, setScResults] = useState(null);
+  const [scLoading, setScLoading] = useState(false);
+  useEffect(() => {
+    if (!fixtures?.length || scResults || scLoading) return;
+    setScLoading(true);
+    fetch(`${SERVER}/api/sc-match`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+    })
+      .then(r => r.json())
+      .then(d => setScResults(d?.results || {}))
+      .catch(() => setScResults({}))
+      .finally(() => setScLoading(false));
+  }, [fixtures, scResults, scLoading]);
+
+  const saPatternsByMarket = useMemo(() => {
+    const map = new Map();
+    for (const p of appSaPatterns || []) {
+      if (!map.has(p.market)) map.set(p.market, []);
+      map.get(p.market).push(p);
+    }
+    return map;
+  }, [appSaPatterns]);
+
+  // ── Mode + filter/query layer (handoff #2 — a general layer, not a
+  // single-purpose pure-ladder feature): cut, per-leg source composition,
+  // minimum lift, minimum holdout sample. Market-composition filter uses
+  // whatever market ids actually appear in the loaded shapes, populated
+  // once data is in.
+  const [mode, setMode] = useState("decompose"); // "decompose" | "whole"
+  const [cutFilter, setCutFilter] = useState("all"); // "all" | 2 | 3
+  const [sourceFilter, setSourceFilter] = useState(() => new Set(["ca", "sc", "sa"]));
+  const [minLift, setMinLift] = useState(5);
+  const [minHoldoutN, setMinHoldoutN] = useState(15);
+  const [marketFilter, setMarketFilter] = useState(null); // null = all markets
+
+  const availableMarkets = useMemo(() => {
+    const set = new Set();
+    for (const s of tgpData?.shapes || []) for (const l of s.legs) set.add(l.market);
+    return [...set].sort();
+  }, [tgpData]);
+
+  // Known frequent lone-killers (handoff's killerLeaderboard) — surfaced as
+  // a caution tag on any shape containing one, not a hard exclusion; a
+  // shape already cleared holdout validation as a WHOLE combo, a
+  // high-soleKillRate leg inside it is a caution about robustness, not
+  // proof the shape itself is bad.
+  const riskyLegKeys = useMemo(() => {
+    const set = new Set();
+    for (const k of tgpData?.killerLeaderboard || []) {
+      if ((k.soleKillRate ?? 0) >= 40) set.add(k.leg);
+    }
+    return set;
+  }, [tgpData]);
+  const legKeyOf = l => `${l.market}/${l.source}:${l.patternKey}`;
+
+  const filteredShapes = useMemo(() => {
+    return (tgpData?.shapes || []).filter(s => {
+      if (cutFilter !== "all" && s.cut !== cutFilter) return false;
+      if ((s.lift ?? -999) < minLift) return false;
+      if ((s.holdoutN ?? 0) < minHoldoutN) return false;
+      if (marketFilter && !s.legs.some(l => l.market === marketFilter)) return false;
+      if (!s.legs.some(l => sourceFilter.has(l.source))) return false;
+      return true;
+    });
+  }, [tgpData, cutFilter, minLift, minHoldoutN, marketFilter, sourceFilter]);
+
+  const liveIndex = useMemo(
+    () => computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }),
+    [fixtures, appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate]
+  );
+
+  // ── DECOMPOSE mode (handoff #1a — recommended, reuses the shared
+  // target-odds builder, see file header): flattens every leg referenced
+  // by a filtered VALID shape into a candidate pool of live (fixture,
+  // market) matches, tagged with the strongest containing shape's
+  // lift/holdoutHR for ranking — same pool shape Pattern Engine already
+  // reports via onPoolChange, so handleBuildParlay's existing
+  // buildManualParlaysFromPool call needs no changes at all.
+  const decomposedPool = useMemo(() => {
+    if (mode !== "decompose") return [];
+    const bestStatsByKey = new Map(); // key -> {lift, holdoutHR}
+    for (const s of filteredShapes) {
+      for (const l of s.legs) {
+        const key = legKeyOf(l);
+        const cur = bestStatsByKey.get(key);
+        if (!cur || (s.lift ?? -999) > cur.lift) bestStatsByKey.set(key, { lift: s.lift ?? 0, holdoutHR: s.holdoutHR ?? 0 });
+      }
+    }
+    const seen = new Set(); // dedupe by fixtureId|market — same leg can appear via multiple shapes
+    const pool = [];
+    for (const [key, stats] of bestStatsByKey) {
+      const [marketPart, rest] = [key.slice(0, key.lastIndexOf("/")), key.slice(key.lastIndexOf("/") + 1)];
+      const source = rest.slice(0, rest.indexOf(":"));
+      for (const cand of liveIndex.get(key) || []) {
+        const dedupeKey = `${cand.fixtureId}|${marketPart}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        pool.push({
+          fixtureId: cand.fixtureId, game: `${cand.home || "?"} vs ${cand.away || "?"}`,
+          pick: marketPart.replace(/^TB:/, ""), market: marketPart, league: cand.league,
+          odds: cand.odds, conf: Math.round(stats.holdoutHR), empiricalRate: Math.round(stats.holdoutHR),
+          score: Math.max(0, Math.min(1, (stats.holdoutHR + stats.lift) / 100)),
+          strategyLabel: `TGP ${source.toUpperCase()}`, strategyTags: [], isVolatile: isLeagueVolatile(cand.league || ""),
+          isRisky: riskyLegKeys.has(key),
+        });
+      }
+    }
+    return pool;
+  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
+
+  useEffect(() => { if (mode === "decompose") onPoolChange(decomposedPool); }, [mode, decomposedPool, onPoolChange]);
+  // Whole-shape mode builds complete tickets directly, not a pool for the
+  // shared builder to pack — nothing for handleBuildParlay to do here, so
+  // the pool it's fed is empty (keeps the shared Build button honest about
+  // there being nothing for IT to build while this mode is active).
+  useEffect(() => { if (mode === "whole") onPoolChange([]); }, [mode, onPoolChange]);
+
+  // ── WHOLE-SHAPE mode (handoff #1b — explicitly flagged as untested: a
+  // shape's OWN combo was holdout-validated, but combining it with
+  // whatever else lands in a build was never tested). One shape = one
+  // atomic ticket, each leg pinned to whichever live fixture
+  // tgpAssignDistinctFixtures found. Ledger applied here directly (not
+  // via the shared builder) since this component fully controls when a
+  // whole-shape ticket is actually committed.
+  const ledgerRef = useRef(createTgpLedger());
+  useEffect(() => { ledgerRef.current = createTgpLedger(); }, [date]); // fresh ledger per day viewed
+  const [addedShapeTickets, setAddedShapeTickets] = useState([]); // shapes already added to the draft this session
+
+  const wholeShapeCandidates = useMemo(() => {
+    if (mode !== "whole") return [];
+    return filteredShapes.map(s => {
+      const assignment = tgpAssignDistinctFixtures(s.legs, liveIndex);
+      if (!assignment) return null;
+      const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
+      const flaggedLegs = s.legs.filter(l => riskyLegKeys.has(legKeyOf(l)));
+      return { shape: s, assignment, combinedOdds, flaggedLegs, blockedByLedger: !assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, s.legs[assignment.indexOf(a)]?.market)) };
+    }).filter(Boolean).sort((a, b) => (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
+  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
+
+  const addWholeShapeTicket = (candidate) => {
+    const { shape, assignment } = candidate;
+    // Claim every leg atomically — if ANY leg can't be claimed (T-cap hit
+    // since this list was computed), abort without partially claiming.
+    const legMarkets = shape.legs.map(l => l.market);
+    if (!assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, legMarkets[i]))) return false;
+    assignment.forEach((a, i) => tgpClaim(ledgerRef.current, a.fixtureId, legMarkets[i]));
+    const newTicket = {
+      id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
+      legs: assignment.map((a, i) => ({
+        fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
+        pick: legMarkets[i].replace(/^TB:/, ""), market: legMarkets[i], league: a.league, odds: a.odds,
+        conf: Math.round(shape.holdoutHR), empiricalRate: Math.round(shape.holdoutHR),
+        score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
+        strategyLabel: "TGP whole-shape", strategyTags: [],
+      })),
+      totalOdds: candidate.combinedOdds.toFixed(2), exhausted: false,
+      reason: `TGP mined shape — cut${shape.cut}, holdout n=${shape.holdoutN}, lift ${shape.lift}pp. Combination of these specific legs was not itself holdout-tested.`,
+      edgeScore: shape.holdoutHR / 100, jarvisConf: Math.round(shape.holdoutHR),
+    };
+    // Appends onto whatever's already in the draft (mirrors every other
+    // "card_add" site in this file, e.g. the fixture card's own Add to
+    // Ticket button) — unlike the shared Build button, which REPLACES
+    // tickets wholesale, whole-shape mode adds one ticket at a time.
+    setTickets(prev => [...prev, newTicket]);
+    setAddedShapeTickets(prev => [...prev, newTicket.id]);
+    return true;
+  };
+
+  if (tgpLoading && !tgpData) {
+    return <div style={{ padding: 16, fontSize: 9, color: C.muted, textAlign: "center" }}>Loading mined ticket shapes…</div>;
+  }
+  if (tgpError) {
+    return <div style={{ padding: 16, fontSize: 9, color: C.red, textAlign: "center" }}>Couldn't load TGP shapes: {tgpError}</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {[{ id: "decompose", label: "Decompose", desc: "Feed target-odds stack" },
+          { id: "whole", label: "Whole Shapes", desc: "Untested combo — see note" }].map(m => (
+          <button key={m.id} onClick={() => setMode(m.id)}
+            style={{ flex: 1, padding: "7px 4px", borderRadius: 8, border: "none",
+                     background: mode === m.id ? C.accent : "transparent",
+                     color: mode === m.id ? C.accentText : C.muted,
+                     fontSize: 9, fontWeight: 800, cursor: "pointer", fontFamily: C.font,
+                     display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <span>{m.label}</span>
+            <span style={{ fontSize: 7, opacity: .7, fontWeight: 500 }}>{m.desc}</span>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Leg count</div>
+          <select value={cutFilter} onChange={e => setCutFilter(e.target.value === "all" ? "all" : +e.target.value)} className="gi">
+            <option value="all">Any</option><option value={2}>2 legs</option><option value={3}>3 legs</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Market</div>
+          <select value={marketFilter || ""} onChange={e => setMarketFilter(e.target.value || null)} className="gi">
+            <option value="">Any</option>
+            {availableMarkets.map(m => <option key={m} value={m}>{m.replace(/^TB:/, "")}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Min lift (pp)</div>
+          <input type="number" value={minLift} onChange={e => setMinLift(+e.target.value)} onFocus={e => e.target.select()} className="gi" />
+        </div>
+        <div>
+          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Min holdout n</div>
+          <input type="number" value={minHoldoutN} onChange={e => setMinHoldoutN(+e.target.value)} onFocus={e => e.target.select()} className="gi" />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {[{ id: "ca", label: "CA" }, { id: "sc", label: "SC" }, { id: "sa", label: "SA" }].map(s => (
+          <button key={s.id} onClick={() => setSourceFilter(prev => {
+              const next = new Set(prev);
+              next.has(s.id) ? next.delete(s.id) : next.add(s.id);
+              return next.size ? next : prev; // never allow zero sources selected
+            })}
+            style={{ flex: 1, padding: "5px 4px", borderRadius: 6, fontSize: 8, fontWeight: 800, cursor: "pointer", fontFamily: C.font,
+                     border: `1px solid ${sourceFilter.has(s.id) ? C.accent : C.border}`,
+                     background: sourceFilter.has(s.id) ? `${C.accent}1a` : "transparent",
+                     color: sourceFilter.has(s.id) ? C.accent : C.muted }}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 8, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
+        {tgpData ? `${filteredShapes.length} of ${tgpData.shapes.length} VALID shapes match your filters · mined ${new Date(tgpData.generatedAt).toLocaleDateString()}` : ""}
+        {mode === "whole" && " · Each shape's own combo was holdout-validated; combining it with today's other tickets was not."}
+      </div>
+
+      {mode === "decompose" && (
+        <div style={{ padding: "9px 12px", borderRadius: 8, marginBottom: 4,
+                      background: decomposedPool.length ? `${C.accent}0c` : `${C.red}0c`,
+                      border: `1px solid ${decomposedPool.length ? C.accent + "30" : C.red + "30"}` }}>
+          <span style={{ fontSize: 9, color: decomposedPool.length ? C.text : C.red, fontWeight: 700 }}>
+            {decomposedPool.length
+              ? `${decomposedPool.length} live leg${decomposedPool.length !== 1 ? "s" : ""} from mined shapes — hit Build below to stack toward target odds`
+              : "No mined shape legs are live today for these filters — try widening leg count/market or lowering min lift."}
+          </span>
+        </div>
+      )}
+
+      {mode === "whole" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 360, overflowY: "auto" }}>
+          {!wholeShapeCandidates.length && (
+            <div style={{ fontSize: 9, color: C.red, textAlign: "center", padding: 12 }}>
+              No filtered shape has every leg live on a distinct fixture today.
+            </div>
+          )}
+          {wholeShapeCandidates.map((cand, i) => (
+            <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
+              <div style={{ fontSize: 9, fontWeight: 800, color: C.text, marginBottom: 4 }}>
+                cut{cand.shape.cut} · lift {cand.shape.lift}pp · holdout {cand.shape.holdoutHR}% (n={cand.shape.holdoutN}) · odds {cand.combinedOdds.toFixed(2)}×
+              </div>
+              {cand.assignment.map((a, i) => (
+                <div key={i} style={{ fontSize: 8, color: C.muted }}>
+                  {a.home} vs {a.away} — {cand.shape.legs[i].market.replace(/^TB:/, "")} @ {a.odds}
+                </div>
+              ))}
+              {cand.flaggedLegs.length > 0 && (
+                <div style={{ fontSize: 7, color: C.red, marginTop: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
+              )}
+              <button onClick={() => addWholeShapeTicket(cand)} disabled={cand.blockedByLedger}
+                style={{ marginTop: 6, width: "100%", padding: "6px 0", borderRadius: 6, border: "none",
+                         background: cand.blockedByLedger ? C.border : C.accent, color: cand.blockedByLedger ? C.muted : C.accentText,
+                         fontSize: 8, fontWeight: 800, cursor: cand.blockedByLedger ? "not-allowed" : "pointer", fontFamily: C.font }}>
+                {cand.blockedByLedger ? "Fixture cap reached (3/day)" : "Add to draft"}
+              </button>
+            </div>
+          ))}
+          {addedShapeTickets.length > 0 && (
+            <div style={{ fontSize: 8, color: C.text, textAlign: "center", padding: 6 }}>
+              {addedShapeTickets.length} whole-shape ticket{addedShapeTickets.length !== 1 ? "s" : ""} added this session
+            </div>
+          )}
+        </div>
+      )}
+      {scLoading && <div style={{ fontSize: 8, color: C.muted, marginTop: 6 }}>Loading settlement conditions…</div>}
+    </div>
+  );
+}
+
 function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLegs, budget, setBudget, budgetPct, setBudgetPct, numParlays, setNumParlays, targetOdds, setTargetOdds, marketFilter, toggleMarket, historicalRates, ensureHistoricalRates, date, onClose, engineFixtureIds, onAddLegToDraft, onFullModel, adminToken = "", jarvisBuiltTicket = null, onJarvisBuiltTicketConsumed, grmInboundCode = null, onGrmInboundConsumed, ensureFixturesForDate, goToFetchDate, crossCheckEnabled = false, unresolvableTagEnabled = false, parleyEntryPulse = 0, appSaPatterns = null, appCaPatterns = null }) {
   // Only the first ticket card (in render order) that actually has a leg-risk
   // flag should auto-open its explainer on entry — otherwise every flagged
@@ -15927,8 +16361,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // instead of living on its own top-level tab. Both engines share the same
   // Stake/Target Odds/Tickets/Max Same Market controls and the same Build
   // button — only how the candidate pool gets built differs.
-  const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern"
+  const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
   const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
+  const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
   const [focusFixture, setFocus] = useState(null);
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
@@ -16518,6 +16953,33 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         );
       });
       setTickets(results);
+    } else if (customEngine === "tgp") {
+      // TGP decompose mode — tgpPool is reported by TGPControls exactly like
+      // patternEnginePool is, same buildManualParlaysFromPool call, no new
+      // build path. Whole-shape mode reports an empty pool on purpose (see
+      // TGPControls) since it builds/adds its own tickets directly via its
+      // own "Add to draft" buttons — the Build button has nothing to do in
+      // that mode, hence the distinct message here rather than reusing the
+      // "no qualifying legs" wording, which would wrongly suggest a filter
+      // problem instead of "you're in the wrong mode for this button."
+      if (tgpPool.length === 0) {
+        setAutoMessage("No live TGP shape legs match today — in Whole Shapes mode, use each shape's own \"Add to draft\" button instead of Build.");
+        setBuilding(false); return;
+      }
+      if (tgpPool.length < numParlays * 3) {
+        setAutoMessage(`⚠ Pool has ${tgpPool.length} qualifying leg${tgpPool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
+        setTimeout(() => setAutoMessage(""), 5000);
+      }
+      const results = buildManualParlaysFromPool(tgpPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity });
+      if (results.length === 0) {
+        setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
+      }
+      results.forEach(t => {
+        t.combinedEmpiricalRate = Math.round(
+          t.legs.reduce((acc, l) => acc * ((l.empiricalRate ?? 50) / 100), 1) * 100
+        );
+      });
+      setTickets(results);
     } else {
       // Manual mode
       // customPool === "all": every fixture with a Read/Edge/Radar signal, no
@@ -16876,6 +17338,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     {[
                       { id:"manual",  label:"Manual",         desc:"Pool + your rules" },
                       { id:"pattern", label:"Pattern Engine",  desc:"SA / CA / SC / Model" },
+                      { id:"tgp",     label:"TGP",             desc:"Mined multi-leg shapes" },
                     ].map(e => (
                       <button key={e.id} onClick={() => setCustomEngine(e.id)}
                         style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
@@ -16897,6 +17360,18 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       appCaPatterns={appCaPatterns}
                       onPoolChange={setPatternEnginePool}
                       date={date}
+                    />
+                  )}
+
+                  {customEngine === "tgp" && (
+                    <TGPControls
+                      fixtures={fixtures}
+                      C={C}
+                      appSaPatterns={appSaPatterns}
+                      appCaPatterns={appCaPatterns}
+                      onPoolChange={setTgpPool}
+                      date={date}
+                      setTickets={setTickets}
                     />
                   )}
 
