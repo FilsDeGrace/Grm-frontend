@@ -11964,7 +11964,12 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       </div>
 
       {/* ── Header row 2: actions ── */}
-      {!exhausted && (
+      {/* 2026-08-16 fix: was `!exhausted &&` — an exhausted ticket with real
+          legs (fewer than requested, not zero) still needs Edit/Remix, same
+          as any other ticket. Only a genuinely empty exhausted ticket
+          (legs:[] — see buildManualParlaysFromPool's "not enough pool" stub)
+          has nothing to act on. */}
+      {ticket.legs?.length > 0 && (
         <TicketActions
           ticket={ticket}
           onRemove={onRemove}
@@ -12010,7 +12015,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* ── Jarvis confidence bar ── */}
-      {isJarvis && !exhausted && ticket.jarvisConf != null && (
+      {isJarvis && ticket.jarvisConf != null && (
         <div style={{ marginBottom:10,background:`${C.edge}08`,borderRadius:10,padding:"8px 11px",border:`1px solid ${C.edge}20` }}>
           <div style={{ fontSize:9,color:C.edge,fontWeight:800,textTransform:"uppercase",letterSpacing:".1em",marginBottom:4 }}>Jarvis Confidence</div>
           <div style={{ display:"flex",alignItems:"center",gap:8 }}>
@@ -12026,7 +12031,10 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* ── Legs ── */}
-      {!exhausted && (
+      {/* 2026-08-16 fix: was `!exhausted &&`, hiding legs entirely on any
+          exhausted ticket (even a 21-leg one) — see header-row fix above
+          for the same reasoning. */}
+      {ticket.legs?.length > 0 && (
         <div style={{ display:"flex",flexDirection:"column",gap:6,marginBottom:12 }}>
           {/* B-FIX: date-separator between legs from different dates. Deliberately
               does NOT reorder ticket.legs — `i` is used below (onRemoveLeg(i),
@@ -12150,12 +12158,12 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* ── Book Now ── */}
-      {!exhausted && ticket.legs?.length > 0 && (
+      {ticket.legs?.length > 0 && (
         <TicketBookNowButton legs={ticket.legs} />
       )}
 
       {/* ── Stake + return ── */}
-      {!exhausted && (
+      {ticket.legs?.length > 0 && (
         <div style={{ paddingTop:12,borderTop:`1px solid ${accentBdr}`,marginTop:6 }}>
           <div style={{ fontSize:9,color:C.muted,fontWeight:700,letterSpacing:".08em",textTransform:"uppercase",marginBottom:12 }}>
             Estimated Return
@@ -12207,7 +12215,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
       )}
 
       {/* P11-FIX: Ask Jarvis — faint footer on every ticket. Infrastructure (/api/jarvis-analyse) is live. */}
-      {ticket.legs?.length > 0 && !exhausted && (
+      {ticket.legs?.length > 0 && (
         <_AskJarvisFooter ticket={ticket} SERVER={window.__GRM_SERVER__ || "http://localhost:3000"} />
       )}
     </div>
@@ -15748,6 +15756,18 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
     const bestStatsByKey = new Map(); // key -> {lift, holdoutHR}
     for (const s of filteredShapes) {
       for (const l of s.legs) {
+        // 2026-08-16 fix: filteredShapes only guarantees the SHAPE contains
+        // at least one leg matching market/source (needed so a cut-3 shape
+        // with one Over 2.5 leg and two companion legs still counts as
+        // "relevant"). It does NOT mean every leg of that shape matches —
+        // this loop was previously pushing ALL of a qualifying shape's legs
+        // into the pool, including non-matching companions, which is
+        // exactly the bug reported: Market=Over 2.5 still surfacing Under
+        // 3.5 legs, and deselecting a source not removing its legs (they
+        // were riding along on a shape that also had a selected-source
+        // leg). Each leg now has to individually pass both filters.
+        if (marketFilter && l.market !== marketFilter) continue;
+        if (!sourceFilter.has(l.source)) continue;
         const key = legKeyOf(l);
         const cur = bestStatsByKey.get(key);
         if (!cur || (s.lift ?? -999) > cur.lift) bestStatsByKey.set(key, { lift: s.lift ?? 0, holdoutHR: s.holdoutHR ?? 0 });
@@ -15792,6 +15812,16 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   const ledgerRef = useRef(createTgpLedger());
   useEffect(() => { ledgerRef.current = createTgpLedger(); }, [date]); // fresh ledger per day viewed
   const [addedShapeTickets, setAddedShapeTickets] = useState([]); // shapes already added to the draft this session
+  // 2026-08-16 fix: ledgerRef is a ref — mutating it (tgpClaim, in
+  // addWholeShapeTicket below) does NOT make wholeShapeCandidates' useMemo
+  // recompute, since none of its listed deps change. Result: blockedByLedger
+  // stayed stale after every add — a candidate that just became capped
+  // still rendered as clickable, so clicking "Add to draft" silently no-op'd
+  // (addWholeShapeTicket's own fresh check correctly blocked it, just with
+  // no UI feedback) — this is the "adds a ticket, then blocks me for no
+  // visible reason" bug. ledgerVersion is bumped on every successful claim
+  // and added to the memo's deps purely to force a recompute.
+  const [ledgerVersion, setLedgerVersion] = useState(0);
 
   const wholeShapeCandidates = useMemo(() => {
     if (mode !== "whole") return [];
@@ -15800,17 +15830,29 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       if (!assignment) return null;
       const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
       const flaggedLegs = s.legs.filter(l => riskyLegKeys.has(legKeyOf(l)));
-      return { shape: s, assignment, combinedOdds, flaggedLegs, blockedByLedger: !assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, s.legs[assignment.indexOf(a)]?.market)) };
+      // Fixed to zip by index (assignment[i] pairs with s.legs[i] by
+      // construction — tgpAssignDistinctFixtures preserves leg order) rather
+      // than the previous assignment.indexOf(a), which worked but was doing
+      // an unnecessary linear re-search for something already known by
+      // position.
+      const blockedByLedger = !assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, s.legs[i].market));
+      return { shape: s, assignment, combinedOdds, flaggedLegs, blockedByLedger };
     }).filter(Boolean).sort((a, b) => (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
-  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
+  }, [mode, filteredShapes, liveIndex, riskyLegKeys, ledgerVersion]);
 
+  const [addFailMsg, setAddFailMsg] = useState("");
   const addWholeShapeTicket = (candidate) => {
     const { shape, assignment } = candidate;
     // Claim every leg atomically — if ANY leg can't be claimed (T-cap hit
     // since this list was computed), abort without partially claiming.
     const legMarkets = shape.legs.map(l => l.market);
-    if (!assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, legMarkets[i]))) return false;
+    if (!assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, legMarkets[i]))) {
+      setAddFailMsg("Couldn't add — a fixture in this shape hit its 3-ticket cap since this list loaded.");
+      setTimeout(() => setAddFailMsg(""), 4000);
+      return false;
+    }
     assignment.forEach((a, i) => tgpClaim(ledgerRef.current, a.fixtureId, legMarkets[i]));
+    setLedgerVersion(v => v + 1);
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
       legs: assignment.map((a, i) => ({
@@ -15920,16 +15962,31 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
               No filtered shape has every leg live on a distinct fixture today.
             </div>
           )}
-          {wholeShapeCandidates.map((cand, i) => (
+          {wholeShapeCandidates.map((cand, i) => {
+            // 2026-08-16: "hide it" per feedback means hide the LEG rows
+            // that don't match the Market filter, not drop the whole shape
+            // from the list — the shape stays because it's still a valid
+            // candidate (it has a matching leg), only display is narrowed.
+            // The ticket itself, if added, still contains every leg —
+            // odds/combinedOdds are computed off the FULL assignment above,
+            // unaffected by this display-only filter. hiddenCount tells the
+            // user legs exist beyond what's shown, so the leg list can't be
+            // mistaken for the full ticket.
+            const visibleLegs = cand.assignment.map((a, i) => ({ a, i })).filter(({ i }) => !marketFilter || cand.shape.legs[i].market === marketFilter);
+            const hiddenCount = cand.assignment.length - visibleLegs.length;
+            return (
             <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
               <div style={{ fontSize: 9, fontWeight: 800, color: C.text, marginBottom: 4 }}>
                 cut{cand.shape.cut} · lift {cand.shape.lift}pp · holdout {cand.shape.holdoutHR}% (n={cand.shape.holdoutN}) · odds {cand.combinedOdds.toFixed(2)}×
               </div>
-              {cand.assignment.map((a, i) => (
+              {visibleLegs.map(({ a, i }) => (
                 <div key={i} style={{ fontSize: 8, color: C.muted }}>
                   {a.home} vs {a.away} — {cand.shape.legs[i].market.replace(/^TB:/, "")} @ {a.odds}
                 </div>
               ))}
+              {hiddenCount > 0 && (
+                <div style={{ fontSize: 7, color: C.muted, opacity: .7 }}>+{hiddenCount} more leg{hiddenCount !== 1 ? "s" : ""} in this shape (hidden by Market filter, still included in odds/ticket)</div>
+              )}
               {cand.flaggedLegs.length > 0 && (
                 <div style={{ fontSize: 7, color: C.red, marginTop: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
               )}
@@ -15940,7 +15997,11 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
                 {cand.blockedByLedger ? "Fixture cap reached (3/day)" : "Add to draft"}
               </button>
             </div>
-          ))}
+            );
+          })}
+          {addFailMsg && (
+            <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{addFailMsg}</div>
+          )}
           {addedShapeTickets.length > 0 && (
             <div style={{ fontSize: 8, color: C.text, textAlign: "center", padding: 6 }}>
               {addedShapeTickets.length} whole-shape ticket{addedShapeTickets.length !== 1 ? "s" : ""} added this session
