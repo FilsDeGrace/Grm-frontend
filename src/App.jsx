@@ -15779,23 +15779,106 @@ function tgpAssignDistinctFixtures(legLabels, liveIndex) {
   return backtrack(0) ? assignment : null;
 }
 
-// Stacking (2026-08-16, Sterling request — stack 2+ Whole Shape tickets
-// into one Built ticket) reuses tgpAssignDistinctFixtures directly against
-// the FLATTENED leg list across every shape being stacked. Each shape's
-// OWN legs are already guaranteed cross-fixture-distinct by the miner and
-// by tgpAssignDistinctFixtures's per-shape assignment — but that guarantee
-// is scoped to one shape. Stack two DIFFERENT shapes together and there's
-// nothing stopping them from independently landing on the same fixture for
-// two different markets, which is a correlated bet-builder situation this
-// app has no pricing model for (naive combinedOdds multiplication would
-// misprice it), not a clean accumulator leg — that's exactly what running
-// the backtracking search over the WHOLE flattened list (instead of
-// per-shape) prevents: a fixture collision between two stacked shapes
-// forces the search to try each leg's next-best live fixture instead of
-// accepting the collision. (This dropped its own ledger-aware variant —
-// there's no more claim-based blocking to check mid-search, see
-// tgpApplyFixtureDiversity above for where the fixture-diversity rule now
-// lives instead: at candidate-ranking time, not at assignment time.)
+// Whole-shape stacking is different from normal shape assignment.
+// A stacked set can contain multiple legs that resolve to the SAME live
+// fixture. The app does not have bet-builder pricing, so we cannot safely
+// keep two markets from that fixture in one accumulator. Instead, preserve
+// the strongest occurrence and drop weaker duplicate occurrences, while
+// still using alternate live fixtures when they exist.
+// Priority: shape holdout hit rate -> shape lift -> holdout sample size -> odds.
+function tgpAssignStackFixtures(legLabels, liveIndex) {
+  const candidatesPerLeg = legLabels.map(l => {
+    const key = `${l.market}/${l.source}:${l.patternKey}`;
+    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
+  });
+  if (candidatesPerLeg.some(c => c.length === 0)) return null;
+
+  const priority = (leg, bestOdds = 0) => [
+    Number(leg?._shape?.holdoutHR) || 0,
+    Number(leg?._shape?.lift) || 0,
+    Number(leg?._shape?.holdoutN) || 0,
+    Number(bestOdds) || 0,
+  ];
+
+  // Process strongest occurrences first. A weaker leg can still move to an
+  // alternate fixture through the augmenting search instead of blocking the
+  // stronger occurrence.
+  const order = legLabels.map((leg, legIndex) => ({ leg, legIndex }))
+    .sort((a, b) => {
+      const pa = priority(a.leg, candidatesPerLeg[a.legIndex][0]?.odds);
+      const pb = priority(b.leg, candidatesPerLeg[b.legIndex][0]?.odds);
+      for (let i = 0; i < pa.length; i++) {
+        if (pb[i] !== pa[i]) return pb[i] - pa[i];
+      }
+      return a.legIndex - b.legIndex;
+    });
+
+  const fixtureOwner = new Map(); // fixtureId -> legIndex
+  const assigned = new Array(legLabels.length).fill(null);
+
+  const canTakeFixture = (legIndex, seenFixtures, seenLegs) => {
+    if (seenLegs.has(legIndex)) return false;
+    seenLegs.add(legIndex);
+
+    const leg = legLabels[legIndex];
+    for (const cand of candidatesPerLeg[legIndex]) {
+      const fixtureId = cand.fixtureId;
+      if (seenFixtures.has(fixtureId)) continue;
+      seenFixtures.add(fixtureId);
+
+      const ownerIndex = fixtureOwner.get(fixtureId);
+      if (ownerIndex == null) {
+        fixtureOwner.set(fixtureId, legIndex);
+        assigned[legIndex] = cand;
+        return true;
+      }
+
+      const ownerPriority = priority(legLabels[ownerIndex], assigned[ownerIndex]?.odds);
+      const contenderPriority = priority(leg, cand.odds);
+      let contenderStronger = false;
+
+      for (let i = 0; i < contenderPriority.length; i++) {
+        if (contenderPriority[i] !== ownerPriority[i]) {
+          contenderStronger = contenderPriority[i] > ownerPriority[i];
+          break;
+        }
+      }
+
+      // The existing occurrence wins ties so renders remain deterministic.
+      if (!contenderStronger) continue;
+
+      // Stronger occurrence takes the fixture; try to relocate the weaker one.
+      fixtureOwner.delete(fixtureId);
+      const previous = assigned[ownerIndex];
+      assigned[ownerIndex] = null;
+
+      if (canTakeFixture(ownerIndex, seenFixtures, seenLegs)) {
+        fixtureOwner.set(fixtureId, legIndex);
+        assigned[legIndex] = cand;
+        return true;
+      }
+
+      // No alternate fixture for the weaker occurrence — restore it.
+      fixtureOwner.set(fixtureId, ownerIndex);
+      assigned[ownerIndex] = previous;
+    }
+    return false;
+  };
+
+  for (const { legIndex } of order) {
+    if (!assigned[legIndex]) canTakeFixture(legIndex, new Set(), new Set());
+  }
+
+  return assigned
+    .map((candidate, legIndex) => candidate ? { legIndex, candidate } : null)
+    .filter(Boolean);
+}
+
+// Normal Whole Shape cards still use strict distinct-fixture assignment.
+// Stacking uses the duplicate-aware matcher above because multiple
+// validated shapes can legitimately point at the same fixture; without
+// bet-builder pricing, the strongest occurrence must win rather than
+// blocking the entire stack.
 
 function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets, onModeChange }) {
   const isPastDate = !!(date && date !== todayStr());
@@ -16053,20 +16136,27 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
 
   const handleStackSelected = () => {
     if (selectedCandidates.length < 2) return; // button is disabled below this, but guard directly too
-    const flatLegs = selectedCandidates.flatMap(c => c.shape.legs.map(l => ({ ...l, _shape: c.shape })));
-    const assignment = tgpAssignDistinctFixtures(flatLegs, liveIndex);
-    if (!assignment) {
-      setStackFailMsg("Couldn't stack — these shapes collide on the same fixture with no live alternative right now.");
+
+    const flatLegs = selectedCandidates.flatMap(c =>
+      c.shape.legs.map(l => ({ ...l, _shape: c.shape }))
+    );
+    const assignment = tgpAssignStackFixtures(flatLegs, liveIndex);
+
+    if (!assignment?.length) {
+      setStackFailMsg("Couldn't stack — none of the selected shape legs has a live fixture.");
       setTimeout(() => setStackFailMsg(""), 5000);
       return;
     }
-    const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
+
+    const droppedDuplicateLegs = flatLegs.length - assignment.length;
+    const combinedOdds = assignment.reduce((p, { candidate }) => p * candidate.odds, 1);
     const shapesSummary = selectedCandidates
       .map(c => `cut${c.shape.cut} n=${c.shape.holdoutN} +${c.shape.lift}pp`).join("; ");
+
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
-      legs: assignment.map((a, i) => {
-        const leg = flatLegs[i];
+      legs: assignment.map(({ candidate: a, legIndex }) => {
+        const leg = flatLegs[legIndex];
         return {
           fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
           pick: leg.market.replace(/^TB:/, ""), market: leg.market, league: a.league, odds: a.odds,
@@ -16076,10 +16166,11 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
         };
       }),
       totalOdds: combinedOdds.toFixed(2), exhausted: false,
-      reason: `TGP stacked shapes (${selectedCandidates.length}): ${shapesSummary}. Each shape was holdout-validated on its own; the combination across shapes was not.`,
+      reason: `TGP stacked shapes (${selectedCandidates.length}): ${shapesSummary}. Duplicate fixtures were consolidated to the strongest occurrence${droppedDuplicateLegs ? `; ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} ignored` : ""}.`,
       edgeScore: Math.min(...selectedCandidates.map(c => c.shape.holdoutHR)) / 100,
       jarvisConf: Math.round(selectedCandidates.reduce((s, c) => s + c.shape.holdoutHR, 0) / selectedCandidates.length),
     };
+
     setTickets(prev => [...prev, newTicket]);
     setAddedShapeTickets(prev => [...prev, newTicket.id]);
     setSelectMode(false);
