@@ -15694,6 +15694,20 @@ function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPattern
   };
   for (const f of fixtures || []) {
     if (!isBookableFixtureState(f, isPastDate)) continue; // same live/cancelled gate Pattern Engine uses
+    // 2026-08-16 (Sterling report — mined shapes not cross-competition-aware):
+    // tgp-ticket-miner.mjs mined its shapes from settlement-pool-v2.jsonl
+    // without excluding cup/friendly/international fixtures, so a shape's
+    // holdout stats may be contaminated by that noisier population. Rather
+    // than re-mine right now, this is the client-side stopgap: never let a
+    // TODAY fixture server.js has itself flagged as cup/friendly/
+    // international (f.competitionRisk — same field App.jsx's dominanceGate
+    // already trusts, see ~line 1592) become a live candidate for a mined
+    // leg. This narrows what TGP can match against; it does not retroactively
+    // clean the mined shapes' own stats. TODO: once tgp-ticket-miner.mjs is
+    // updated to exclude these fixtures at mining time (the real fix),
+    // this client-side gate becomes redundant belt-and-suspenders and can
+    // be removed.
+    if (f.competitionRisk) continue;
     if (appCaPatterns) {
       const { positive } = matchCAConditions(f, appCaPatterns);
       for (const c of positive) {
@@ -16221,6 +16235,7 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       <div style={{ fontSize: 8, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
         {tgpData ? `${filteredShapes.length} of ${tgpData.shapes.length} VALID shapes match your filters · mined ${new Date(tgpData.generatedAt).toLocaleDateString()}` : ""}
         {mode === "whole" && " · Each shape's own combo was holdout-validated; combining it with today's other tickets was not."}
+        {" · Cup/friendly/international fixtures are excluded from live matching (mined shapes weren't validated on that population)."}
       </div>
 
       {mode === "decompose" && (
