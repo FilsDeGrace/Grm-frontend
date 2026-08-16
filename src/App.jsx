@@ -630,6 +630,22 @@ function caResolveFamily(caMarketId, pickMarketFamily) {
   if (!alts) return SA_TO_FAMILY_ID[caMarketId];
   return alts.includes(pickMarketFamily) ? pickMarketFamily : alts[0];
 }
+// 2026-08-16 fix (Alden's report, Tatran Všechovice case) — CA_FAMILY_
+// ALTERNATES' alts[1], where present, is already an EXACT probability
+// complement of alts[0] (this table's own comments confirm it: DC1X is
+// Home-or-Draw, the exact complement of Away Win; Over/Under and BTTS
+// Yes/No the same). Re-keyed here from "CA market -> [default, complement]"
+// to "family id -> its complement family id" so an avoid-direction verdict
+// (CA:Verdict AND SC:Verdict — SC_MARKET_TO_FAMILY_ID maps onto these same
+// family ids) can resolve directly to the complement without a second
+// lookup table. Markets with no exact complement (Draw, team-total Over
+// X.5s — alts.length===1) are absent on purpose: there's nothing valid to
+// flip to, callers must fall back to a plain avoid label instead of
+// fabricating one.
+const FAMILY_ID_COMPLEMENT = {};
+for (const alts of Object.values(CA_FAMILY_ALTERNATES)) {
+  if (alts.length > 1) FAMILY_ID_COMPLEMENT[alts[0]] = alts[1];
+}
 
 // CA row market list — same 13 TB: market strings as SA (CA and SA mine the
 // identical 14-market scope, minus PE:Mix which is SA-specific), plus its
@@ -6742,11 +6758,29 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         if (!headline) continue; // no verdict at all for this fixture (no clean positive/avoid match)
         const isAvoidLean = headline.direction === "avoid";
         const marketLabel = (headline.market || "").replace(/^TB:/, "");
-        const family = caResolveFamily(headline.market, pickMarketFamily);
+        let family = caResolveFamily(headline.market, pickMarketFamily);
+        // 2026-08-16 fix — see FAMILY_ID_COMPLEMENT comment above. Was:
+        // getCustomPick called on the SAME family the avoid verdict is
+        // AGAINST, then just recolored red — "avoid Away Win" rendered as
+        // "FK Nové Sady Win" (Away Win's own label/prob) tinted red, which
+        // reads exactly like a same-direction pick. If a manual Pick
+        // Market override hasn't already pointed this at the complement,
+        // resolve to it automatically for avoid leans.
+        const defaultFamily = (CA_FAMILY_ALTERNATES[headline.market] || [SA_TO_FAMILY_ID[headline.market]])[0];
+        if (isAvoidLean && family === defaultFamily && FAMILY_ID_COMPLEMENT[defaultFamily]) {
+          family = FAMILY_ID_COMPLEMENT[defaultFamily];
+        }
+        const isComplementFamily = isAvoidLean && family !== defaultFamily;
         const primaryPick = getCustomPick(f, family, C);
-        const pick = primaryPick
-          ? { ...primaryPick, color: isAvoidLean ? C.red : C.green }
-          : { label: marketLabel, prob: 0, odds: null, color: isAvoidLean ? C.red : C.green };
+        // No complement exists for this market (Draw, team-total Over
+        // X.5s) — showing getCustomPick's raw same-direction result here
+        // would be the exact bug reported, so this stays a plain notice
+        // instead of a fabricated recommendation.
+        const pick = isAvoidLean && !isComplementFamily
+          ? { label: `Avoid: ${marketLabel}`, prob: headline.holdoutHitRate ?? null, odds: null, color: C.red, market: headline.market }
+          : primaryPick
+            ? { ...primaryPick, color: isComplementFamily ? C.green : (isAvoidLean ? C.red : C.green) }
+            : { label: marketLabel, prob: 0, odds: null, color: isAvoidLean ? C.red : C.green };
         if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
         if (probFilter && pick.prob != null) {
           if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
@@ -6857,6 +6891,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // a "best market across all of them" picker; now always the single-
       // market path (previously the else branch).
       let bestPositive, bestAvoid, marketLabel, family, scanMatches;
+      let caScanNoComplementAvoid = false; // set below only on the CA:Scan branch
       if (caMarket === "CA:Scan") {
         // CA:SCAN (2026-08-13) — dedupe cleanPositive/cleanAvoid down to one
         // (the best-scoring) combo per market, same reduce this block always
@@ -6903,7 +6938,24 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         bestPositive = top.isAvoid ? null : top.combo;
         bestAvoid = top.isAvoid ? top.combo : null;
         marketLabel = top.combo.market.replace(/^TB:/, "");
+        // 2026-08-16 fix (Sterling report) — CA:Scan runs its own separate
+        // peak-market selection path, so the earlier CA:Verdict fix (see
+        // FAMILY_ID_COMPLEMENT comment near the top of the file) never
+        // touched it: an Avoid pattern winning the scan was being resolved
+        // straight through caResolveFamily's own-direction default and
+        // handed to getCustomPick as if it were a real pick, i.e. the Avoid
+        // pattern itself became the "peak market." Same fix as Verdict: an
+        // Avoid winner must resolve to its complement/opposite market, and
+        // if that market has no valid complement, it must NOT be promoted
+        // into a same-direction peak pick at all — caScanNoComplementAvoid
+        // makes the shared pick-construction block below fall back to a
+        // plain "Avoid: X" notice instead, exactly like CA:Verdict does.
+        const scanDefaultFamily = (CA_FAMILY_ALTERNATES[top.combo.market] || [SA_TO_FAMILY_ID[top.combo.market]])[0];
         family = caResolveFamily(top.combo.market, pickMarketFamily);
+        if (top.isAvoid && family === scanDefaultFamily && FAMILY_ID_COMPLEMENT[scanDefaultFamily]) {
+          family = FAMILY_ID_COMPLEMENT[scanDefaultFamily];
+        }
+        caScanNoComplementAvoid = top.isAvoid && family === scanDefaultFamily;
       } else {
         // A single market can still have more than one VALID combo matching
         // this fixture at once (different thresholds) — score them too,
@@ -6923,11 +6975,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         marketLabel = caMarket.replace(/^TB:/, "");
         family = caResolveFamily(caMarket, pickMarketFamily);
       }
-      const primaryPick = getCustomPick(f, family, C);
+      // caScanNoComplementAvoid is only ever true coming out of the CA:Scan
+      // branch above (an Avoid pattern won the scan with no valid opposite
+      // to flip to) — every other path leaves it false and behaves exactly
+      // as before.
+      const primaryPick = caScanNoComplementAvoid ? null : getCustomPick(f, family, C);
       const flagged = !bestPositive;
-      const pick = primaryPick
-        ? { ...primaryPick, color: flagged ? C.red : C.green }
-        : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.green };
+      const pick = caScanNoComplementAvoid
+        ? { label: `Avoid: ${marketLabel}`, prob: bestAvoid?.holdoutHitRate ?? null, odds: null, color: C.red, market: bestAvoid?.market }
+        : primaryPick
+          ? { ...primaryPick, color: flagged ? C.red : C.green }
+          : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.green };
       if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
       if (probFilter && pick.prob != null) {
         if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
@@ -7026,10 +7084,20 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const isAvoidLean = headline.direction === "avoid";
         const scFamilyForHeadline = headline.market ? SC_MARKET_TO_FAMILY_ID[headline.market] : null;
         const marketLabel = headline.market ? (SC_MARKET_LABELS.find(m => m.id === headline.market)?.label || headline.market) : "";
-        const primaryPick = getCustomPick(f, scFamilyForHeadline, C);
-        const pick = primaryPick
-          ? { ...primaryPick, color: isAvoidLean ? C.red : C.purple }
-          : { label: marketLabel, prob: 0, odds: null, color: isAvoidLean ? C.red : C.purple };
+        // 2026-08-16 fix — same bug/fix as CA:Verdict above, SC_MARKET_TO_
+        // FAMILY_ID already maps onto the SAME family ids FAMILY_ID_
+        // COMPLEMENT is keyed by, so no separate table needed here.
+        let scFamily = scFamilyForHeadline;
+        if (isAvoidLean && scFamily && FAMILY_ID_COMPLEMENT[scFamily]) {
+          scFamily = FAMILY_ID_COMPLEMENT[scFamily];
+        }
+        const isComplementFamily = isAvoidLean && scFamily !== scFamilyForHeadline;
+        const primaryPick = getCustomPick(f, scFamily, C);
+        const pick = isAvoidLean && !isComplementFamily
+          ? { label: `Avoid: ${marketLabel}`, prob: headline.holdoutHitRate ?? null, odds: null, color: C.red, market: headline.market }
+          : primaryPick
+            ? { ...primaryPick, color: isComplementFamily ? C.purple : (isAvoidLean ? C.red : C.purple) }
+            : { label: marketLabel, prob: 0, odds: null, color: isAvoidLean ? C.red : C.purple };
         if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
         if (probFilter && pick.prob != null) {
           if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
@@ -7126,12 +7194,27 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
         if (!scanMatches.length) continue;
         const top = scanMatches[0];
-        const topFamily = SC_MARKET_TO_FAMILY_ID[top.market];
         const marketLabel = SC_MARKET_LABELS.find(m => m.id === top.market)?.label || top.market;
-        const primaryPick = getCustomPick(f, topFamily, C);
-        const pick = primaryPick
-          ? { ...primaryPick, color: top.isAvoid ? C.red : C.purple }
-          : { label: marketLabel, prob: 0, odds: null, color: top.isAvoid ? C.red : C.purple };
+        // 2026-08-16 fix (Sterling report) — same bug/fix as CA:Scan's mirror
+        // fix above, and the same pattern SC:Verdict already uses: an Avoid
+        // pattern winning the scan must resolve to its complement family
+        // before being usable as the peak pick, never straight through as
+        // the avoid market's own (same-direction) family. If no valid
+        // complement exists, fall back to a plain "Avoid: X" notice instead
+        // of fabricating a same-direction recommendation.
+        const scanFamilyForTop = SC_MARKET_TO_FAMILY_ID[top.market];
+        let topFamily = scanFamilyForTop;
+        if (top.isAvoid && topFamily && FAMILY_ID_COMPLEMENT[topFamily]) {
+          topFamily = FAMILY_ID_COMPLEMENT[topFamily];
+        }
+        const scanIsComplementFamily = top.isAvoid && topFamily !== scanFamilyForTop;
+        const scanNoComplementAvoid = top.isAvoid && !scanIsComplementFamily;
+        const primaryPick = scanNoComplementAvoid ? null : getCustomPick(f, topFamily, C);
+        const pick = scanNoComplementAvoid
+          ? { label: `Avoid: ${marketLabel}`, prob: top.holdoutHitRate ?? null, odds: null, color: C.red, market: top.market }
+          : primaryPick
+            ? { ...primaryPick, color: scanIsComplementFamily ? C.purple : (top.isAvoid ? C.red : C.purple) }
+            : { label: marketLabel, prob: 0, odds: null, color: top.isAvoid ? C.red : C.purple };
         if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
         if (probFilter && pick.prob != null) {
           if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
@@ -15556,27 +15639,43 @@ function tgpSaKey(pattern) {
   return Object.entries(pattern.conditions).map(([k, v]) => `${k}=${v}`).sort().join('&');
 }
 
-// T-cap ledger — mirrors parlaySystemEngine.mjs's createLedger/canClaim/
-// claim exactly (that file's own two rules, restated here rather than
-// imported since it has no build step to pull a .mjs into this bundle):
-//   1. A (fixture, market) pair can be claimed once, ever.
-//   2. A fixture can be claimed by at most maxPerFixture (3) tickets total.
+// T-cap ledger.
+// 2026-08-16 fix (Sterling report — "Feature cap reached" blocking a game
+// that should still qualify): this used to key claims by (fixtureId,
+// market) — a per-LEG key. That meant once a fixture had been claimed
+// under, say, "Over 2.5", EVERY other Whole Shape that also happened to
+// use "Over 2.5" as one of its legs was blocked for that fixture, even
+// though those shapes are entirely different patterns (different companion
+// legs). The intended rule was never about markets at all — a single game
+// can legitimately anchor up to 3 DIFFERENT Whole Shapes/patterns, and
+// should only be blocked from reappearing in the SAME shape it already
+// claimed. So the claim key is now the WHOLE SHAPE's signature (every leg's
+// market/source/patternKey, order-independent), not one leg's market:
+//   1. A (fixture, shape-signature) pair can be claimed once, ever — same
+//      game can't double-claim the identical pattern.
+//   2. A fixture can be claimed by at most maxPerFixture (3) DISTINCT
+//      shape signatures total.
 // Scoped to ONE TGPControls session (resets on date change / remount) —
 // same lifetime buildManualParlaysFromPool's own globalUsed Set already
 // has for a single build call, just persisted across repeated actions
 // within this component instead of one call.
+function tgpShapeSignature(shape) {
+  return shape.legs.map(l => `${l.market}/${l.source}:${l.patternKey}`).sort().join('||');
+}
 function createTgpLedger() {
-  return { claimed: new Set(), occupancy: new Map() };
+  return { claimed: new Set(), shapesByFixture: new Map() }; // fixtureId -> Set(shapeSignature)
 }
-function tgpLegKey(fixtureId, market) { return `${fixtureId}|${market}`; }
-function tgpCanClaim(ledger, fixtureId, market, maxPerFixture = 3) {
-  if (ledger.claimed.has(tgpLegKey(fixtureId, market))) return false;
-  return (ledger.occupancy.get(fixtureId) ?? 0) < maxPerFixture;
+function tgpLegKey(fixtureId, shapeSig) { return `${fixtureId}|${shapeSig}`; }
+function tgpCanClaim(ledger, fixtureId, shapeSig, maxPerFixture = 3) {
+  if (ledger.claimed.has(tgpLegKey(fixtureId, shapeSig))) return false; // same game, same pattern already used
+  const used = ledger.shapesByFixture.get(fixtureId);
+  return (used?.size ?? 0) < maxPerFixture; // up to 3 DIFFERENT patterns per game
 }
-function tgpClaim(ledger, fixtureId, market, maxPerFixture = 3) {
-  if (!tgpCanClaim(ledger, fixtureId, market, maxPerFixture)) return false;
-  ledger.claimed.add(tgpLegKey(fixtureId, market));
-  ledger.occupancy.set(fixtureId, (ledger.occupancy.get(fixtureId) ?? 0) + 1);
+function tgpClaim(ledger, fixtureId, shapeSig, maxPerFixture = 3) {
+  if (!tgpCanClaim(ledger, fixtureId, shapeSig, maxPerFixture)) return false;
+  ledger.claimed.add(tgpLegKey(fixtureId, shapeSig));
+  if (!ledger.shapesByFixture.has(fixtureId)) ledger.shapesByFixture.set(fixtureId, new Set());
+  ledger.shapesByFixture.get(fixtureId).add(shapeSig);
   return true;
 }
 
@@ -15657,7 +15756,56 @@ function tgpAssignDistinctFixtures(legLabels, liveIndex) {
   return backtrack(0) ? assignment : null;
 }
 
-function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets }) {
+// Stacking-only variant of tgpAssignDistinctFixtures above (2026-08-16,
+// Sterling request — stack 2+ Whole Shape tickets into one Built ticket).
+// Each shape's OWN legs are already guaranteed cross-fixture-distinct by
+// the miner and by tgpAssignDistinctFixtures's per-candidate assignment —
+// but that guarantee is scoped to one shape. Stack two DIFFERENT shapes
+// together and there's nothing stopping them from independently landing
+// on the same fixture for two different markets, which is a correlated
+// bet-builder situation this app has no pricing model for (naive
+// combinedOdds multiplication would misprice it), not a clean
+// accumulator leg.
+//
+// legs here is the FLATTENED leg list across every shape being stacked,
+// each tagged with `_shapeSig` (that leg's parent shape's signature, see
+// tgpShapeSignature). Same backtracking shape as the original function,
+// with two differences: (1) distinctness is enforced across the WHOLE
+// flattened list, not per-shape, so a fixture collision between two
+// different shapes forces the search to try each leg's next-best live
+// fixture instead of accepting the collision — this is what makes
+// "auto-swap to another fixture if one exists, else block" real rather
+// than a promise; (2) every candidate is also checked against the T-cap
+// ledger's tgpCanClaim (same 3-different-shapes-per-fixture rule single
+// Whole Shape adds already respect), so an assignment that's
+// fixture-distinct on paper but already capped for that leg's shape is
+// never selected. Returns null (caller shows a clear "no live
+// alternative" message) rather than silently falling back to a
+// colliding assignment.
+function tgpAssignDistinctFixturesClaimable(legs, liveIndex, ledger) {
+  const candidatesPerLeg = legs.map(l => {
+    const key = `${l.market}/${l.source}:${l.patternKey}`;
+    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
+  });
+  if (candidatesPerLeg.some(c => c.length === 0)) return null;
+  const used = new Set();
+  const assignment = new Array(legs.length);
+  function backtrack(i) {
+    if (i === legs.length) return true;
+    for (const cand of candidatesPerLeg[i]) {
+      if (used.has(cand.fixtureId)) continue; // collides with another leg already placed in this stack
+      if (!tgpCanClaim(ledger, cand.fixtureId, legs[i]._shapeSig)) continue; // T-cap would reject this leg's shape here
+      used.add(cand.fixtureId);
+      assignment[i] = cand;
+      if (backtrack(i + 1)) return true;
+      used.delete(cand.fixtureId);
+    }
+    return false;
+  }
+  return backtrack(0) ? assignment : null;
+}
+
+function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets, onModeChange }) {
   const isPastDate = !!(date && date !== todayStr());
   const [tgpData, setTgpData] = useState(null); // { shapes, killerLeaderboard, generatedAt, ... }
   const [tgpError, setTgpError] = useState(null);
@@ -15702,11 +15850,18 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   // whatever market ids actually appear in the loaded shapes, populated
   // once data is in.
   const [mode, setMode] = useState("decompose"); // "decompose" | "whole"
+  useEffect(() => { onModeChange?.(mode); }, [mode, onModeChange]);
   const [cutFilter, setCutFilter] = useState("all"); // "all" | 2 | 3
   const [sourceFilter, setSourceFilter] = useState(() => new Set(["ca", "sc", "sa"]));
   const [minLift, setMinLift] = useState(5);
   const [minHoldoutN, setMinHoldoutN] = useState(15);
   const [marketFilter, setMarketFilter] = useState(null); // null = all markets
+  // Whole Shape mode's own ranked-ticket-display state (2026-08-16 —
+  // Sterling request). Search is a plain team/market substring match over
+  // ALREADY-computed wholeShapeCandidates; visibleCount paginates that same
+  // list instead of dumping every candidate into the DOM at once.
+  const [shapeQuery, setShapeQuery] = useState("");
+  const [wholeVisibleCount, setWholeVisibleCount] = useState(20);
 
   const availableMarkets = useMemo(() => {
     const set = new Set();
@@ -15728,16 +15883,23 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   }, [tgpData]);
   const legKeyOf = l => `${l.market}/${l.source}:${l.patternKey}`;
 
+  // 2026-08-16 fix: Leg count and Market are Decompose-only params (Whole
+  // Shape builds each shape as one atomic pre-formed ticket — there's no
+  // single "leg" or "market" to narrow the shape down to the way Decompose's
+  // flattened pool has). Min lift / min holdout n / source composition stay
+  // shared — both modes still benefit from filtering candidate SHAPE quality.
   const filteredShapes = useMemo(() => {
     return (tgpData?.shapes || []).filter(s => {
-      if (cutFilter !== "all" && s.cut !== cutFilter) return false;
+      if (mode === "decompose") {
+        if (cutFilter !== "all" && s.cut !== cutFilter) return false;
+        if (marketFilter && !s.legs.some(l => l.market === marketFilter)) return false;
+      }
       if ((s.lift ?? -999) < minLift) return false;
       if ((s.holdoutN ?? 0) < minHoldoutN) return false;
-      if (marketFilter && !s.legs.some(l => l.market === marketFilter)) return false;
       if (!s.legs.some(l => sourceFilter.has(l.source))) return false;
       return true;
     });
-  }, [tgpData, cutFilter, minLift, minHoldoutN, marketFilter, sourceFilter]);
+  }, [tgpData, mode, cutFilter, minLift, minHoldoutN, marketFilter, sourceFilter]);
 
   const liveIndex = useMemo(
     () => computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }),
@@ -15830,28 +15992,140 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       if (!assignment) return null;
       const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
       const flaggedLegs = s.legs.filter(l => riskyLegKeys.has(legKeyOf(l)));
-      // Fixed to zip by index (assignment[i] pairs with s.legs[i] by
-      // construction — tgpAssignDistinctFixtures preserves leg order) rather
-      // than the previous assignment.indexOf(a), which worked but was doing
-      // an unnecessary linear re-search for something already known by
-      // position.
-      const blockedByLedger = !assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, s.legs[i].market));
+      // 2026-08-16 fix: claim key is now the whole shape's signature (see
+      // tgpShapeSignature/createTgpLedger comment above), not each leg's
+      // market — a fixture is checked once per shape, not once per leg.
+      const shapeSig = tgpShapeSignature(s);
+      const blockedByLedger = !assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, shapeSig));
       return { shape: s, assignment, combinedOdds, flaggedLegs, blockedByLedger };
-    }).filter(Boolean).sort((a, b) => (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
+    }).filter(Boolean).sort((a, b) => (b.shape.holdoutHR ?? -1) - (a.shape.holdoutHR ?? -1) || (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
   }, [mode, filteredShapes, liveIndex, riskyLegKeys, ledgerVersion]);
+
+  // 2026-08-16 (Sterling request — ranked/searchable Whole Shape display):
+  // wholeShapeCandidates above is already ranked strongest-first by holdout
+  // hit rate; this layer just narrows it by a free-text team/market search
+  // before pagination slices it, so search and "load more" compose cleanly.
+  const wholeSearchedCandidates = useMemo(() => {
+    const q = shapeQuery.trim().toLowerCase();
+    if (!q) return wholeShapeCandidates;
+    return wholeShapeCandidates.filter(cand =>
+      cand.assignment.some(a => (a.home || "").toLowerCase().includes(q) || (a.away || "").toLowerCase().includes(q)) ||
+      cand.shape.legs.some(l => l.market.toLowerCase().includes(q))
+    );
+  }, [wholeShapeCandidates, shapeQuery]);
+  // Reset pagination back to the top page whenever the underlying ranked
+  // list could have changed shape (new filters, new search, mode switch) —
+  // otherwise "showing 60 of 40" type states are reachable after narrowing.
+  // 2026-08-16 fix: also clears any in-progress stack selection on the same
+  // triggers — a selection made against one filtered list silently carrying
+  // over into a differently-filtered list (where the user can no longer
+  // even see what's selected) is more confusing than just starting over.
+  useEffect(() => {
+    setWholeVisibleCount(20);
+    setSelectMode(false);
+  }, [mode, minLift, minHoldoutN, sourceFilter, shapeQuery]);
+  const wholeVisibleCandidates = useMemo(
+    () => wholeSearchedCandidates.slice(0, wholeVisibleCount),
+    [wholeSearchedCandidates, wholeVisibleCount]
+  );
+
+  // ── Stack-into-one-ticket (2026-08-16, Sterling request): hold a Whole
+  // Shape card to enter select mode, tap others to add them, then combine
+  // every leg from every selected shape into a single Built ticket for more
+  // legs than one shape alone provides. See tgpAssignDistinctFixturesClaimable
+  // above for why this needs its own assignment pass instead of just
+  // concatenating each shape's already-computed `assignment`.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedSigs, setSelectedSigs] = useState(() => new Set());
+  const [stackFailMsg, setStackFailMsg] = useState("");
+  const longPressTimer = useRef(null);
+  const longPressFired = useRef(false);
+  useEffect(() => { if (!selectMode) setSelectedSigs(new Set()); }, [selectMode]);
+  // Ledger resets fresh per date viewed (see ledgerRef effect above) — an
+  // in-progress stack selection from a different date's shapes has nothing
+  // valid left to reference once that happens, so drop it too instead of
+  // leaving a "0 selected" floating bar stranded on screen.
+  useEffect(() => { setSelectMode(false); }, [date]);
+
+  // Derived from the LIVE candidate list, not raw selectedSigs — if a
+  // selected shape drops out of wholeShapeCandidates (data refresh, ledger
+  // claim elsewhere) mid-selection, it should just quietly stop counting
+  // rather than the stack build crashing on a shape that's no longer there.
+  const selectedCandidates = useMemo(
+    () => wholeShapeCandidates.filter(c => selectedSigs.has(tgpShapeSignature(c.shape))),
+    [wholeShapeCandidates, selectedSigs]
+  );
+
+  const cardSelectHandlers = (sig) => ({
+    onContextMenu: e => e.preventDefault(),
+    onPointerDown: e => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      longPressFired.current = false;
+      longPressTimer.current = setTimeout(() => {
+        longPressFired.current = true;
+        setSelectMode(true);
+        setSelectedSigs(prev => new Set(prev).add(sig));
+        if (navigator.vibrate) try { navigator.vibrate(12); } catch {}
+      }, LONG_PRESS_MS);
+    },
+    onPointerUp:     () => clearTimeout(longPressTimer.current),
+    onPointerLeave:  () => clearTimeout(longPressTimer.current),
+    onPointerCancel: () => clearTimeout(longPressTimer.current),
+  });
+
+  const handleStackSelected = () => {
+    if (selectedCandidates.length < 2) return; // button is disabled below this, but guard directly too
+    const flatLegs = selectedCandidates.flatMap(c => {
+      const sig = tgpShapeSignature(c.shape);
+      return c.shape.legs.map(l => ({ ...l, _shapeSig: sig, _shape: c.shape }));
+    });
+    const assignment = tgpAssignDistinctFixturesClaimable(flatLegs, liveIndex, ledgerRef.current);
+    if (!assignment) {
+      setStackFailMsg("Couldn't stack — these shapes collide on the same fixture with no live alternative right now.");
+      setTimeout(() => setStackFailMsg(""), 5000);
+      return;
+    }
+    assignment.forEach((a, i) => tgpClaim(ledgerRef.current, a.fixtureId, flatLegs[i]._shapeSig));
+    setLedgerVersion(v => v + 1);
+    const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
+    const shapesSummary = selectedCandidates
+      .map(c => `cut${c.shape.cut} n=${c.shape.holdoutN} +${c.shape.lift}pp`).join("; ");
+    const newTicket = {
+      id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
+      legs: assignment.map((a, i) => {
+        const leg = flatLegs[i];
+        return {
+          fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
+          pick: leg.market.replace(/^TB:/, ""), market: leg.market, league: a.league, odds: a.odds,
+          conf: Math.round(leg._shape.holdoutHR), empiricalRate: Math.round(leg._shape.holdoutHR),
+          score: Math.max(0, Math.min(1, (leg._shape.holdoutHR + leg._shape.lift) / 100)),
+          strategyLabel: "TGP whole-shape (stacked)", strategyTags: [],
+        };
+      }),
+      totalOdds: combinedOdds.toFixed(2), exhausted: false,
+      reason: `TGP stacked shapes (${selectedCandidates.length}): ${shapesSummary}. Each shape was holdout-validated on its own; the combination across shapes was not.`,
+      edgeScore: Math.min(...selectedCandidates.map(c => c.shape.holdoutHR)) / 100,
+      jarvisConf: Math.round(selectedCandidates.reduce((s, c) => s + c.shape.holdoutHR, 0) / selectedCandidates.length),
+    };
+    setTickets(prev => [...prev, newTicket]);
+    setAddedShapeTickets(prev => [...prev, newTicket.id]);
+    setSelectMode(false);
+  };
 
   const [addFailMsg, setAddFailMsg] = useState("");
   const addWholeShapeTicket = (candidate) => {
     const { shape, assignment } = candidate;
-    // Claim every leg atomically — if ANY leg can't be claimed (T-cap hit
-    // since this list was computed), abort without partially claiming.
+    // Claim every leg's fixture atomically against this shape's signature —
+    // if ANY fixture can't be claimed (T-cap hit since this list was
+    // computed), abort without partially claiming.
     const legMarkets = shape.legs.map(l => l.market);
-    if (!assignment.every((a, i) => tgpCanClaim(ledgerRef.current, a.fixtureId, legMarkets[i]))) {
-      setAddFailMsg("Couldn't add — a fixture in this shape hit its 3-ticket cap since this list loaded.");
+    const shapeSig = tgpShapeSignature(shape);
+    if (!assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, shapeSig))) {
+      setAddFailMsg("Couldn't add — a fixture in this shape hit its 3-pattern cap since this list loaded.");
       setTimeout(() => setAddFailMsg(""), 4000);
       return false;
     }
-    assignment.forEach((a, i) => tgpClaim(ledgerRef.current, a.fixtureId, legMarkets[i]));
+    assignment.forEach(a => tgpClaim(ledgerRef.current, a.fixtureId, shapeSig));
     setLedgerVersion(v => v + 1);
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
@@ -15900,19 +16174,25 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Leg count</div>
-          <select value={cutFilter} onChange={e => setCutFilter(e.target.value === "all" ? "all" : +e.target.value)} className="gi">
-            <option value="all">Any</option><option value={2}>2 legs</option><option value={3}>3 legs</option>
-          </select>
-        </div>
-        <div>
-          <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Market</div>
-          <select value={marketFilter || ""} onChange={e => setMarketFilter(e.target.value || null)} className="gi">
-            <option value="">Any</option>
-            {availableMarkets.map(m => <option key={m} value={m}>{m.replace(/^TB:/, "")}</option>)}
-          </select>
-        </div>
+        {/* 2026-08-16 fix: Leg count and Market only apply to Decompose's
+            flattened leg pool — Whole Shape adds each shape as one fixed,
+            pre-formed ticket, so these can't narrow it the same way and are
+            hidden entirely in that mode rather than shown but inert. */}
+        {mode === "decompose" && (<>
+          <div>
+            <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Leg count</div>
+            <select value={cutFilter} onChange={e => setCutFilter(e.target.value === "all" ? "all" : +e.target.value)} className="gi">
+              <option value="all">Any</option><option value={2}>2 legs</option><option value={3}>3 legs</option>
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Market</div>
+            <select value={marketFilter || ""} onChange={e => setMarketFilter(e.target.value || null)} className="gi">
+              <option value="">Any</option>
+              {availableMarkets.map(m => <option key={m} value={m}>{m.replace(/^TB:/, "")}</option>)}
+            </select>
+          </div>
+        </>)}
         <div>
           <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Min lift (pp)</div>
           <input type="number" value={minLift} onChange={e => setMinLift(+e.target.value)} onFocus={e => e.target.select()} className="gi" />
@@ -15956,55 +16236,145 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       )}
 
       {mode === "whole" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 360, overflowY: "auto" }}>
-          {!wholeShapeCandidates.length && (
-            <div style={{ fontSize: 9, color: C.red, textAlign: "center", padding: 12 }}>
-              No filtered shape has every leg live on a distinct fixture today.
+        <div>
+          {/* 2026-08-16 (Sterling request): search + ranked, paginated
+              display instead of dumping every candidate at once. List below
+              is already sorted strongest-first by holdout hit rate. */}
+          <input
+            type="text"
+            value={shapeQuery}
+            onChange={e => setShapeQuery(e.target.value)}
+            placeholder="Search team or market…"
+            className="gi"
+            style={{ width: "100%", marginBottom: 8, boxSizing: "border-box" }}
+          />
+          <div style={{ fontSize: 8, color: C.muted, marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+            <span>Ranked by holdout hit rate</span>
+            <span>{Math.min(wholeVisibleCount, wholeSearchedCandidates.length)} of {wholeSearchedCandidates.length}</span>
+          </div>
+          {!selectMode && (
+            <div style={{ fontSize: 7, color: C.muted, marginBottom: 8 }}>
+              Hold a card, then tap others to stack 2+ shapes into one ticket.
             </div>
           )}
-          {wholeShapeCandidates.map((cand, i) => {
-            // 2026-08-16: "hide it" per feedback means hide the LEG rows
-            // that don't match the Market filter, not drop the whole shape
-            // from the list — the shape stays because it's still a valid
-            // candidate (it has a matching leg), only display is narrowed.
-            // The ticket itself, if added, still contains every leg —
-            // odds/combinedOdds are computed off the FULL assignment above,
-            // unaffected by this display-only filter. hiddenCount tells the
-            // user legs exist beyond what's shown, so the leg list can't be
-            // mistaken for the full ticket.
-            const visibleLegs = cand.assignment.map((a, i) => ({ a, i })).filter(({ i }) => !marketFilter || cand.shape.legs[i].market === marketFilter);
-            const hiddenCount = cand.assignment.length - visibleLegs.length;
-            return (
-            <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
-              <div style={{ fontSize: 9, fontWeight: 800, color: C.text, marginBottom: 4 }}>
-                cut{cand.shape.cut} · lift {cand.shape.lift}pp · holdout {cand.shape.holdoutHR}% (n={cand.shape.holdoutN}) · odds {cand.combinedOdds.toFixed(2)}×
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 480, overflowY: "auto",
+                        paddingBottom: selectMode ? 56 : 0 }}>
+            {!wholeSearchedCandidates.length && (
+              <div style={{ fontSize: 9, color: C.red, textAlign: "center", padding: 12 }}>
+                {shapeQuery
+                  ? "No live shape matches that search."
+                  : "No filtered shape has every leg live on a distinct fixture today."}
               </div>
-              {visibleLegs.map(({ a, i }) => (
-                <div key={i} style={{ fontSize: 8, color: C.muted }}>
-                  {a.home} vs {a.away} — {cand.shape.legs[i].market.replace(/^TB:/, "")} @ {a.odds}
+            )}
+            {wholeVisibleCandidates.map((cand, i) => {
+              const sig = tgpShapeSignature(cand.shape);
+              const selected = selectMode && selectedSigs.has(sig);
+              return (
+              <div key={i}
+                {...cardSelectHandlers(sig)}
+                onClick={() => {
+                  if (longPressFired.current) { longPressFired.current = false; return; } // handled as long-press
+                  if (!selectMode) return; // normal mode: only the button below adds a ticket
+                  setSelectedSigs(prev => {
+                    const next = new Set(prev);
+                    next.has(sig) ? next.delete(sig) : next.add(sig);
+                    return next;
+                  });
+                }}
+                style={{ position: "relative", border: `1px solid ${selected ? C.accent : C.border}`, borderRadius: 10,
+                         padding: "10px 10px 10px 30px", background: C.faint,
+                         cursor: selectMode ? "pointer" : "default",
+                         boxShadow: selected ? `0 0 0 1px ${C.accent}` : "none" }}>
+                <div style={{ position: "absolute", left: 8, top: 10, fontSize: 8, fontWeight: 800, color: C.muted }}>
+                  #{i + 1}
                 </div>
-              ))}
-              {hiddenCount > 0 && (
-                <div style={{ fontSize: 7, color: C.muted, opacity: .7 }}>+{hiddenCount} more leg{hiddenCount !== 1 ? "s" : ""} in this shape (hidden by Market filter, still included in odds/ticket)</div>
-              )}
-              {cand.flaggedLegs.length > 0 && (
-                <div style={{ fontSize: 7, color: C.red, marginTop: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
-              )}
-              <button onClick={() => addWholeShapeTicket(cand)} disabled={cand.blockedByLedger}
-                style={{ marginTop: 6, width: "100%", padding: "6px 0", borderRadius: 6, border: "none",
-                         background: cand.blockedByLedger ? C.border : C.accent, color: cand.blockedByLedger ? C.muted : C.accentText,
-                         fontSize: 8, fontWeight: 800, cursor: cand.blockedByLedger ? "not-allowed" : "pointer", fontFamily: C.font }}>
-                {cand.blockedByLedger ? "Fixture cap reached (3/day)" : "Add to draft"}
+                {selectMode && (
+                  <div style={{ position: "absolute", right: 8, top: 8, width: 16, height: 16, borderRadius: 8,
+                                 border: `1px solid ${selected ? C.accent : C.border}`,
+                                 background: selected ? C.accent : "transparent",
+                                 color: C.accentText, fontSize: 10, fontWeight: 800,
+                                 display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {selected ? "✓" : ""}
+                  </div>
+                )}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginBottom: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: C.gold }}>{cand.shape.holdoutHR}% hit</span>
+                  <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                    <span style={{ fontSize: 7, color: C.muted }}>cut{cand.shape.cut} · n={cand.shape.holdoutN} · +{cand.shape.lift}pp</span>
+                    <span style={{ fontSize: 8, fontWeight: 800, color: C.text, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 5, padding: "2px 6px" }}>
+                      {cand.combinedOdds.toFixed(2)}×
+                    </span>
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: cand.flaggedLegs.length ? 4 : 0 }}>
+                  {cand.assignment.map((a, li) => (
+                    <div key={li} style={{ fontSize: 8, color: C.text, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.home} vs {a.away}</span>
+                      <span style={{ color: C.muted, flexShrink: 0 }}>{cand.shape.legs[li].market.replace(/^TB:/, "")} @ {a.odds}</span>
+                    </div>
+                  ))}
+                </div>
+                {cand.flaggedLegs.length > 0 && (
+                  <div style={{ fontSize: 7, color: C.red, marginBottom: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
+                )}
+                {!selectMode && (
+                  <button onClick={(e) => { e.stopPropagation(); addWholeShapeTicket(cand); }} disabled={cand.blockedByLedger}
+                    style={{ marginTop: 4, width: "100%", padding: "6px 0", borderRadius: 6, border: "none",
+                             background: cand.blockedByLedger ? C.border : C.accent, color: cand.blockedByLedger ? C.muted : C.accentText,
+                             fontSize: 8, fontWeight: 800, cursor: cand.blockedByLedger ? "not-allowed" : "pointer", fontFamily: C.font }}>
+                    {cand.blockedByLedger ? "Feature cap reached (3 patterns/game)" : "Add to draft"}
+                  </button>
+                )}
+              </div>
+              );
+            })}
+            {addFailMsg && (
+              <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{addFailMsg}</div>
+            )}
+            {stackFailMsg && (
+              <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{stackFailMsg}</div>
+            )}
+            {addedShapeTickets.length > 0 && (
+              <div style={{ fontSize: 8, color: C.text, textAlign: "center", padding: 6 }}>
+                {addedShapeTickets.length} whole-shape ticket{addedShapeTickets.length !== 1 ? "s" : ""} added this session
+              </div>
+            )}
+          </div>
+          {selectMode && (
+            <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 999,
+                          background: C.edge, borderRadius: 12, padding: "10px 14px", display: "flex",
+                          alignItems: "center", gap: 10, boxShadow: "0 4px 24px rgba(0,0,0,0.5)" }}>
+              <span style={{ fontSize: 9, color: C.text, fontWeight: 800 }}>
+                {selectedCandidates.length} selected
+              </span>
+              <button onClick={() => setSelectMode(false)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`,
+                         background: "transparent", color: C.muted, fontSize: 8, fontWeight: 800,
+                         cursor: "pointer", fontFamily: C.font }}>
+                Cancel
+              </button>
+              <button onClick={handleStackSelected} disabled={selectedCandidates.length < 2}
+                style={{ padding: "6px 12px", borderRadius: 6, border: "none",
+                         background: selectedCandidates.length < 2 ? C.border : C.accent,
+                         color: selectedCandidates.length < 2 ? C.muted : C.accentText,
+                         fontSize: 8, fontWeight: 800,
+                         cursor: selectedCandidates.length < 2 ? "not-allowed" : "pointer", fontFamily: C.font }}>
+                Stack into 1 ticket
               </button>
             </div>
-            );
-          })}
-          {addFailMsg && (
-            <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{addFailMsg}</div>
           )}
-          {addedShapeTickets.length > 0 && (
-            <div style={{ fontSize: 8, color: C.text, textAlign: "center", padding: 6 }}>
-              {addedShapeTickets.length} whole-shape ticket{addedShapeTickets.length !== 1 ? "s" : ""} added this session
+          {wholeVisibleCount < wholeSearchedCandidates.length && (
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <button onClick={() => setWholeVisibleCount(c => c + 20)}
+                style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: `1px solid ${C.border}`,
+                         background: "transparent", color: C.text, fontSize: 8, fontWeight: 800, cursor: "pointer", fontFamily: C.font }}>
+                Load 20 more
+              </button>
+              <button onClick={() => setWholeVisibleCount(wholeSearchedCandidates.length)}
+                style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: `1px solid ${C.border}`,
+                         background: "transparent", color: C.text, fontSize: 8, fontWeight: 800, cursor: "pointer", fontFamily: C.font }}>
+                Show all ({wholeSearchedCandidates.length})
+              </button>
             </div>
           )}
         </div>
@@ -16425,6 +16795,14 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
   const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
   const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
+  // 2026-08-16 fix (Sterling request): TGPControls reports its own
+  // decompose/whole toggle up here so the shared Stake/Target Odds/
+  // Tickets/Max Same Market block and Build button below — which Whole
+  // Shape mode can't use at all, it adds its own pre-formed tickets via
+  // its own "Add to draft" buttons — can be hidden outright in that mode
+  // instead of shown but inert.
+  const [tgpMode, setTgpMode] = useState("decompose"); // "decompose" | "whole"
+  const tgpWholeModeActive = customEngine === "tgp" && tgpMode === "whole";
   const [focusFixture, setFocus] = useState(null);
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
@@ -17433,6 +17811,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       onPoolChange={setTgpPool}
                       date={date}
                       setTickets={setTickets}
+                      onModeChange={setTgpMode}
                     />
                   )}
 
@@ -17459,7 +17838,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
                   {/* SHARED across both engines — Stake, Target Odds, Tickets,
                       Max Same Market drive whichever pool is active (Manual's
-                      rawPool or Pattern Engine's patternEnginePool). */}
+                      rawPool or Pattern Engine's patternEnginePool).
+                      2026-08-16 fix: hidden entirely in TGP Whole Shape mode —
+                      that mode adds its own pre-formed tickets directly and
+                      has no pool for these to drive at all (see TGPControls'
+                      own onPoolChange, which reports an empty pool on
+                      purpose while in Whole Shape mode). */}
+                  {!tgpWholeModeActive && (
                   <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
                     <div>
                       <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Stake ($)</div>
@@ -17510,6 +17895,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       )}
                     </div>
                   </div>
+                  )}
 
                   {customEngine === "manual" && (<>
                   {/* League filter — Custom tab only */}
@@ -17591,11 +17977,17 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </button>
                   </>)}
 
+                  {/* 2026-08-16 fix: hidden in TGP Whole Shape mode — that
+                      mode has no pool for Build to act on (see the shared
+                      Stake/Target Odds block above); each shape gets added
+                      to the draft via its own "Add to draft" button instead. */}
+                  {!tgpWholeModeActive && (
                   <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
                     style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
                              opacity:building||!fixtures.length?.5:1 }}>
                     {building?"BUILDING…":`BUILD ${numParlays} TICKET${numParlays>1?"S":""}`}
                   </button>
+                  )}
                   {building && (
                     <div style={{ textAlign:"center",marginTop:5 }}>
                       <span className="pu" style={{ fontSize:8,color:C.muted }}>
