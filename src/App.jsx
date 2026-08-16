@@ -15639,45 +15639,54 @@ function tgpSaKey(pattern) {
   return Object.entries(pattern.conditions).map(([k, v]) => `${k}=${v}`).sort().join('&');
 }
 
-// T-cap ledger.
 // 2026-08-16 fix (Sterling report — "Feature cap reached" blocking a game
-// that should still qualify): this used to key claims by (fixtureId,
-// market) — a per-LEG key. That meant once a fixture had been claimed
-// under, say, "Over 2.5", EVERY other Whole Shape that also happened to
-// use "Over 2.5" as one of its legs was blocked for that fixture, even
-// though those shapes are entirely different patterns (different companion
-// legs). The intended rule was never about markets at all — a single game
-// can legitimately anchor up to 3 DIFFERENT Whole Shapes/patterns, and
-// should only be blocked from reappearing in the SAME shape it already
-// claimed. So the claim key is now the WHOLE SHAPE's signature (every leg's
-// market/source/patternKey, order-independent), not one leg's market:
-//   1. A (fixture, shape-signature) pair can be claimed once, ever — same
-//      game can't double-claim the identical pattern.
-//   2. A fixture can be claimed by at most maxPerFixture (3) DISTINCT
-//      shape signatures total.
-// Scoped to ONE TGPControls session (resets on date change / remount) —
-// same lifetime buildManualParlaysFromPool's own globalUsed Set already
-// has for a single build call, just persisted across repeated actions
-// within this component instead of one call.
+// that should still qualify), reworked twice more the same day (Bohemian
+// bug, then Sterling: no click-tracked blocking at all) — final shape:
+//
+// The "max 3 distinct patterns per fixture, each on a different market"
+// rule is Sterling's actual intent: it exists purely to stop the ranked
+// Whole Shape list itself from being dominated by one popular live
+// fixture, not to police what you've already clicked "Add to draft" on.
+// Sterling has his own risk sheet for exposure — this app doesn't need a
+// second, redundant gate on top of it, and blocking the Add button was
+// actively wrong: it turned "you already added a few tickets" into "here
+// are entire fixtures now unavailable to browse," including phantom
+// blocks on cards you'd never touched.
+// So this is now a pure filter over the ranked list, not a ledger:
+//   - stateless — recomputed from scratch every time the candidate list is
+//     built, with zero memory of session clicks or prior adds.
+//   - applied once, top-down, over the list already sorted by holdout hit
+//     rate — the strongest shape touching a fixture wins a slot first.
+//   - a fixture may anchor at most 3 surfaced shapes, and only if each
+//     uses a different market at that fixture (skips duplicates, not just
+//     counts them).
+// "Add to draft" is never blocked. Adding the same shape, or the same
+// literal pick, twice is allowed — that's Sterling's call, not this app's.
 function tgpShapeSignature(shape) {
   return shape.legs.map(l => `${l.market}/${l.source}:${l.patternKey}`).sort().join('||');
 }
-function createTgpLedger() {
-  return { claimed: new Set(), shapesByFixture: new Map() }; // fixtureId -> Set(shapeSignature)
+function tgpApplyFixtureDiversity(rankedCandidates, maxPerFixture = 3) {
+  const marketsUsedByFixture = new Map(); // fixtureId -> Set(market) already surfaced
+  const result = [];
+  for (const cand of rankedCandidates) {
+    const touches = cand.assignment.map((a, i) => ({ fixtureId: a.fixtureId, market: cand.shape.legs[i].market }));
+    const fits = touches.every(({ fixtureId, market }) => {
+      const used = marketsUsedByFixture.get(fixtureId);
+      if (!used) return true; // fixture has open capacity
+      if (used.has(market)) return false; // this exact market already surfaced for this fixture by a stronger shape
+      return used.size < maxPerFixture;
+    });
+    if (!fits) continue;
+    for (const { fixtureId, market } of touches) {
+      if (!marketsUsedByFixture.has(fixtureId)) marketsUsedByFixture.set(fixtureId, new Set());
+      marketsUsedByFixture.get(fixtureId).add(market);
+    }
+    result.push(cand);
+  }
+  return result;
 }
-function tgpLegKey(fixtureId, shapeSig) { return `${fixtureId}|${shapeSig}`; }
-function tgpCanClaim(ledger, fixtureId, shapeSig, maxPerFixture = 3) {
-  if (ledger.claimed.has(tgpLegKey(fixtureId, shapeSig))) return false; // same game, same pattern already used
-  const used = ledger.shapesByFixture.get(fixtureId);
-  return (used?.size ?? 0) < maxPerFixture; // up to 3 DIFFERENT patterns per game
-}
-function tgpClaim(ledger, fixtureId, shapeSig, maxPerFixture = 3) {
-  if (!tgpCanClaim(ledger, fixtureId, shapeSig, maxPerFixture)) return false;
-  ledger.claimed.add(tgpLegKey(fixtureId, shapeSig));
-  if (!ledger.shapesByFixture.has(fixtureId)) ledger.shapesByFixture.set(fixtureId, new Set());
-  ledger.shapesByFixture.get(fixtureId).add(shapeSig);
-  return true;
-}
+
+
 
 // Builds a global index: leg key ("market/source:patternKey") -> every
 // fixture live-matching it right now, with that fixture's odds for the
@@ -15770,54 +15779,23 @@ function tgpAssignDistinctFixtures(legLabels, liveIndex) {
   return backtrack(0) ? assignment : null;
 }
 
-// Stacking-only variant of tgpAssignDistinctFixtures above (2026-08-16,
-// Sterling request — stack 2+ Whole Shape tickets into one Built ticket).
-// Each shape's OWN legs are already guaranteed cross-fixture-distinct by
-// the miner and by tgpAssignDistinctFixtures's per-candidate assignment —
-// but that guarantee is scoped to one shape. Stack two DIFFERENT shapes
-// together and there's nothing stopping them from independently landing
-// on the same fixture for two different markets, which is a correlated
-// bet-builder situation this app has no pricing model for (naive
-// combinedOdds multiplication would misprice it), not a clean
-// accumulator leg.
-//
-// legs here is the FLATTENED leg list across every shape being stacked,
-// each tagged with `_shapeSig` (that leg's parent shape's signature, see
-// tgpShapeSignature). Same backtracking shape as the original function,
-// with two differences: (1) distinctness is enforced across the WHOLE
-// flattened list, not per-shape, so a fixture collision between two
-// different shapes forces the search to try each leg's next-best live
-// fixture instead of accepting the collision — this is what makes
-// "auto-swap to another fixture if one exists, else block" real rather
-// than a promise; (2) every candidate is also checked against the T-cap
-// ledger's tgpCanClaim (same 3-different-shapes-per-fixture rule single
-// Whole Shape adds already respect), so an assignment that's
-// fixture-distinct on paper but already capped for that leg's shape is
-// never selected. Returns null (caller shows a clear "no live
-// alternative" message) rather than silently falling back to a
-// colliding assignment.
-function tgpAssignDistinctFixturesClaimable(legs, liveIndex, ledger) {
-  const candidatesPerLeg = legs.map(l => {
-    const key = `${l.market}/${l.source}:${l.patternKey}`;
-    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
-  });
-  if (candidatesPerLeg.some(c => c.length === 0)) return null;
-  const used = new Set();
-  const assignment = new Array(legs.length);
-  function backtrack(i) {
-    if (i === legs.length) return true;
-    for (const cand of candidatesPerLeg[i]) {
-      if (used.has(cand.fixtureId)) continue; // collides with another leg already placed in this stack
-      if (!tgpCanClaim(ledger, cand.fixtureId, legs[i]._shapeSig)) continue; // T-cap would reject this leg's shape here
-      used.add(cand.fixtureId);
-      assignment[i] = cand;
-      if (backtrack(i + 1)) return true;
-      used.delete(cand.fixtureId);
-    }
-    return false;
-  }
-  return backtrack(0) ? assignment : null;
-}
+// Stacking (2026-08-16, Sterling request — stack 2+ Whole Shape tickets
+// into one Built ticket) reuses tgpAssignDistinctFixtures directly against
+// the FLATTENED leg list across every shape being stacked. Each shape's
+// OWN legs are already guaranteed cross-fixture-distinct by the miner and
+// by tgpAssignDistinctFixtures's per-shape assignment — but that guarantee
+// is scoped to one shape. Stack two DIFFERENT shapes together and there's
+// nothing stopping them from independently landing on the same fixture for
+// two different markets, which is a correlated bet-builder situation this
+// app has no pricing model for (naive combinedOdds multiplication would
+// misprice it), not a clean accumulator leg — that's exactly what running
+// the backtracking search over the WHOLE flattened list (instead of
+// per-shape) prevents: a fixture collision between two stacked shapes
+// forces the search to try each leg's next-best live fixture instead of
+// accepting the collision. (This dropped its own ledger-aware variant —
+// there's no more claim-based blocking to check mid-search, see
+// tgpApplyFixtureDiversity above for where the fixture-diversity rule now
+// lives instead: at candidate-ranking time, not at assignment time.)
 
 function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets, onModeChange }) {
   const isPastDate = !!(date && date !== todayStr());
@@ -15982,38 +15960,23 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   // shape's OWN combo was holdout-validated, but combining it with
   // whatever else lands in a build was never tested). One shape = one
   // atomic ticket, each leg pinned to whichever live fixture
-  // tgpAssignDistinctFixtures found. Ledger applied here directly (not
-  // via the shared builder) since this component fully controls when a
-  // whole-shape ticket is actually committed.
-  const ledgerRef = useRef(createTgpLedger());
-  useEffect(() => { ledgerRef.current = createTgpLedger(); }, [date]); // fresh ledger per day viewed
+  // tgpAssignDistinctFixtures found.
   const [addedShapeTickets, setAddedShapeTickets] = useState([]); // shapes already added to the draft this session
-  // 2026-08-16 fix: ledgerRef is a ref — mutating it (tgpClaim, in
-  // addWholeShapeTicket below) does NOT make wholeShapeCandidates' useMemo
-  // recompute, since none of its listed deps change. Result: blockedByLedger
-  // stayed stale after every add — a candidate that just became capped
-  // still rendered as clickable, so clicking "Add to draft" silently no-op'd
-  // (addWholeShapeTicket's own fresh check correctly blocked it, just with
-  // no UI feedback) — this is the "adds a ticket, then blocks me for no
-  // visible reason" bug. ledgerVersion is bumped on every successful claim
-  // and added to the memo's deps purely to force a recompute.
-  const [ledgerVersion, setLedgerVersion] = useState(0);
 
   const wholeShapeCandidates = useMemo(() => {
     if (mode !== "whole") return [];
-    return filteredShapes.map(s => {
+    const ranked = filteredShapes.map(s => {
       const assignment = tgpAssignDistinctFixtures(s.legs, liveIndex);
       if (!assignment) return null;
       const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
       const flaggedLegs = s.legs.filter(l => riskyLegKeys.has(legKeyOf(l)));
-      // 2026-08-16 fix: claim key is now the whole shape's signature (see
-      // tgpShapeSignature/createTgpLedger comment above), not each leg's
-      // market — a fixture is checked once per shape, not once per leg.
-      const shapeSig = tgpShapeSignature(s);
-      const blockedByLedger = !assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, shapeSig));
-      return { shape: s, assignment, combinedOdds, flaggedLegs, blockedByLedger };
+      return { shape: s, assignment, combinedOdds, flaggedLegs };
     }).filter(Boolean).sort((a, b) => (b.shape.holdoutHR ?? -1) - (a.shape.holdoutHR ?? -1) || (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
-  }, [mode, filteredShapes, liveIndex, riskyLegKeys, ledgerVersion]);
+    // Fixture-diversity rule lives here now — a pure pass over the already-
+    // ranked list, nothing tracked across renders or clicks. See
+    // tgpApplyFixtureDiversity's own comment for the full rationale.
+    return tgpApplyFixtureDiversity(ranked);
+  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
 
   // 2026-08-16 (Sterling request — ranked/searchable Whole Shape display):
   // wholeShapeCandidates above is already ranked strongest-first by holdout
@@ -16046,19 +16009,20 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   // ── Stack-into-one-ticket (2026-08-16, Sterling request): hold a Whole
   // Shape card to enter select mode, tap others to add them, then combine
   // every leg from every selected shape into a single Built ticket for more
-  // legs than one shape alone provides. See tgpAssignDistinctFixturesClaimable
-  // above for why this needs its own assignment pass instead of just
-  // concatenating each shape's already-computed `assignment`.
+  // legs than one shape alone provides. Runs tgpAssignDistinctFixtures over
+  // the FLATTENED leg list from every selected shape (see that function's
+  // own comment) rather than concatenating each shape's already-computed
+  // `assignment`, since two stacked shapes can independently land on the
+  // same fixture for two different markets otherwise.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedSigs, setSelectedSigs] = useState(() => new Set());
   const [stackFailMsg, setStackFailMsg] = useState("");
   const longPressTimer = useRef(null);
   const longPressFired = useRef(false);
   useEffect(() => { if (!selectMode) setSelectedSigs(new Set()); }, [selectMode]);
-  // Ledger resets fresh per date viewed (see ledgerRef effect above) — an
-  // in-progress stack selection from a different date's shapes has nothing
-  // valid left to reference once that happens, so drop it too instead of
-  // leaving a "0 selected" floating bar stranded on screen.
+  // An in-progress stack selection from a different date's shapes has
+  // nothing valid left to reference once the date changes, so drop it
+  // instead of leaving a "0 selected" floating bar stranded on screen.
   useEffect(() => { setSelectMode(false); }, [date]);
 
   // Derived from the LIVE candidate list, not raw selectedSigs — if a
@@ -16089,18 +16053,13 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
 
   const handleStackSelected = () => {
     if (selectedCandidates.length < 2) return; // button is disabled below this, but guard directly too
-    const flatLegs = selectedCandidates.flatMap(c => {
-      const sig = tgpShapeSignature(c.shape);
-      return c.shape.legs.map(l => ({ ...l, _shapeSig: sig, _shape: c.shape }));
-    });
-    const assignment = tgpAssignDistinctFixturesClaimable(flatLegs, liveIndex, ledgerRef.current);
+    const flatLegs = selectedCandidates.flatMap(c => c.shape.legs.map(l => ({ ...l, _shape: c.shape })));
+    const assignment = tgpAssignDistinctFixtures(flatLegs, liveIndex);
     if (!assignment) {
       setStackFailMsg("Couldn't stack — these shapes collide on the same fixture with no live alternative right now.");
       setTimeout(() => setStackFailMsg(""), 5000);
       return;
     }
-    assignment.forEach((a, i) => tgpClaim(ledgerRef.current, a.fixtureId, flatLegs[i]._shapeSig));
-    setLedgerVersion(v => v + 1);
     const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
     const shapesSummary = selectedCandidates
       .map(c => `cut${c.shape.cut} n=${c.shape.holdoutN} +${c.shape.lift}pp`).join("; ");
@@ -16126,21 +16085,9 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
     setSelectMode(false);
   };
 
-  const [addFailMsg, setAddFailMsg] = useState("");
   const addWholeShapeTicket = (candidate) => {
     const { shape, assignment } = candidate;
-    // Claim every leg's fixture atomically against this shape's signature —
-    // if ANY fixture can't be claimed (T-cap hit since this list was
-    // computed), abort without partially claiming.
     const legMarkets = shape.legs.map(l => l.market);
-    const shapeSig = tgpShapeSignature(shape);
-    if (!assignment.every(a => tgpCanClaim(ledgerRef.current, a.fixtureId, shapeSig))) {
-      setAddFailMsg("Couldn't add — a fixture in this shape hit its 3-pattern cap since this list loaded.");
-      setTimeout(() => setAddFailMsg(""), 4000);
-      return false;
-    }
-    assignment.forEach(a => tgpClaim(ledgerRef.current, a.fixtureId, shapeSig));
-    setLedgerVersion(v => v + 1);
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
       legs: assignment.map((a, i) => ({
@@ -16333,19 +16280,16 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
                   <div style={{ fontSize: 7, color: C.red, marginBottom: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
                 )}
                 {!selectMode && (
-                  <button onClick={(e) => { e.stopPropagation(); addWholeShapeTicket(cand); }} disabled={cand.blockedByLedger}
+                  <button onClick={(e) => { e.stopPropagation(); addWholeShapeTicket(cand); }}
                     style={{ marginTop: 4, width: "100%", padding: "6px 0", borderRadius: 6, border: "none",
-                             background: cand.blockedByLedger ? C.border : C.accent, color: cand.blockedByLedger ? C.muted : C.accentText,
-                             fontSize: 8, fontWeight: 800, cursor: cand.blockedByLedger ? "not-allowed" : "pointer", fontFamily: C.font }}>
-                    {cand.blockedByLedger ? "Feature cap reached (3 patterns/game)" : "Add to draft"}
+                             background: C.accent, color: C.accentText,
+                             fontSize: 8, fontWeight: 800, cursor: "pointer", fontFamily: C.font }}>
+                    Add to draft
                   </button>
                 )}
               </div>
               );
             })}
-            {addFailMsg && (
-              <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{addFailMsg}</div>
-            )}
             {stackFailMsg && (
               <div style={{ fontSize: 8, color: C.red, textAlign: "center", padding: 6 }}>{stackFailMsg}</div>
             )}
