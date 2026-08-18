@@ -1869,7 +1869,7 @@ function signalModelAgreement(modelProb, baseline, isAvoid) {
 // trainHR/testHR/baseHR/lift/testN via isStrongSA; CA/SC: trainHitRate/
 // holdoutHitRate/holdoutBaselineHR/holdoutLift/holdoutSample/gap) rather than
 // assumed from one and applied to all three.
-function normalizeSignal(engine, raw) {
+export function normalizeConsensusSignal(engine, raw) {
   if (engine === "sa") {
     const trainHR = raw.trainHR ?? null, holdoutHR = raw.testHR ?? null;
     return {
@@ -1878,12 +1878,11 @@ function normalizeSignal(engine, raw) {
       gap: (trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null,
     };
   }
-  // ca and sc share one combo/flag shape — SC is a server-side mirror of the
-  // same field names (see the SC integration comment above) — EXCEPT SC's
-  // server-side flags carry no trainHitRate/holdoutSample/gap at all (see
-  // server.js's sc-match flag construction), so those come through as null
-  // for sc, handled explicitly in scoreSignal below rather than silently
-  // defaulting to a fabricated sample size.
+  // CA and SC both expose the same core condition-stat fields when Consensus
+  // receives the full matched condition objects: train/holdout HR, baseline,
+  // lift, holdout sample and gap. The current SC flag object is intentionally
+  // lighter, so the audit path must prefer scResults[f.id].positive/avoid over
+  // flags when full evidence is needed.
   const trainHR = raw.trainHitRate ?? null, holdoutHR = raw.holdoutHitRate ?? null;
   return {
     holdoutHR, trainHR, baseHR: raw.holdoutBaselineHR ?? null, lift: raw.holdoutLift ?? null,
@@ -1891,6 +1890,10 @@ function normalizeSignal(engine, raw) {
     gap: raw.gap ?? ((trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null),
   };
 }
+
+// Backward-compatible internal alias. Keep one canonical normalizer while the
+// audit/export path can use the descriptive public name directly.
+const normalizeSignal = normalizeConsensusSignal;
 
 function scoreSignal(sig, isAvoid, modelProb) {
   if (sig.holdoutHR == null) return null;
@@ -1900,12 +1903,9 @@ function scoreSignal(sig, isAvoid, modelProb) {
     const nEff = effectiveN(sig.n, sig.gap, SIGNAL_GAP_SHRINK_K);
     reliability = wilsonLowerBound(favP, nEff);
   } else {
-    // No sample size available (SC's flags don't carry one) — can't honestly
-    // apply n-based shrinkage without a real n, so this falls back to
-    // trusting the engine's own already-validated rate directly rather than
-    // fabricating a sample size to feed Wilson. Less conservative than the
-    // SA/CA path for that reason — a known, documented asymmetry, not an
-    // oversight.
+    // When a caller only has a derived signal object and no real sample size,
+    // do not fabricate N just to feed Wilson. The full Consensus audit path
+    // uses the underlying SC/CA condition objects where N is available.
     reliability = favP * 100;
   }
   const baseline = sig.baseHR ?? 50;
@@ -1955,6 +1955,163 @@ function consensusOddsFor(f, market) {
   return teamTotalOddsFor(f, market);
 }
 
+// ── CONSENSUS EVIDENCE AUDIT (roadmap Phase 1/2) ─────────────────────────────
+// This layer is deliberately observational first: it records the full evidence
+// available to each engine for a fixture+market without changing current
+// Consensus selection/ranking. The goal is to make the existing system
+// measurable before we introduce Evidence Consensus v2.
+//
+// SC MUST use the full matched condition arrays when available. Its flags are
+// a derived presentation/verdict representation and do not contain every raw
+// field needed for a faithful evidence audit.
+function auditSignalsForMarket(engine, market, direction, rawSignals, modelProb) {
+  return (rawSignals || [])
+    .filter(raw => raw?.market === market)
+    .map(raw => {
+      const normalized = normalizeConsensusSignal(engine, raw);
+      const scored = scoreSignal(normalized, direction === "avoid", modelProb);
+      return {
+        engine,
+        direction,
+        market,
+        raw,
+        normalized,
+        scored,
+      };
+    })
+    .filter(x => x.normalized.holdoutHR != null);
+}
+
+export function buildConsensusEvidenceAudit(f, {
+  saPatternsByMarket,
+  caPositive,
+  caAvoid,
+  scPositive,
+  scAvoid,
+  scFlags,
+  modelProbFor,
+}) {
+  const audit = {
+    fixtureId: f?.id ?? null,
+    game: `${f?.teams?.home || "?"} vs ${f?.teams?.away || "?"}`,
+    league: f?.league ?? null,
+    competitionRisk: f?.competitionRisk ?? null,
+    markets: {},
+  };
+  if (!f) return audit;
+
+  for (const familyMarkets of Object.values(SIGNAL_FAMILIES)) {
+    for (const market of familyMarkets) {
+      const modelProb = typeof modelProbFor === "function" ? modelProbFor(f, market) : null;
+      const saRaw = saPatternsByMarket?.get(market) || [];
+      const caPos = (caPositive || []).filter(c => c?.market === market);
+      const caAv = (caAvoid || []).filter(c => c?.market === market);
+
+      // SC's full matched conditions are preferred over derived flags.
+      const scPos = (scPositive || []).filter(c => c?.market === market);
+      const scAv = (scAvoid || []).filter(c => c?.market === market);
+      const scKey = marketForEngine("sc", familyOfMarket("sa", market));
+      const scFlag = scKey ? (scFlags?.[scKey] || null) : null;
+
+      const matchedSA = saRaw.length ? matchSAPatterns(f, market, saRaw) : { positive: [], avoid: [] };
+      const entries = [
+        ...auditSignalsForMarket("sa", market, "positive", matchedSA.positive, modelProb),
+        ...auditSignalsForMarket("sa", market, "avoid", matchedSA.avoid, modelProb),
+        ...auditSignalsForMarket("ca", market, "positive", caPos, modelProb),
+        ...auditSignalsForMarket("ca", market, "avoid", caAv, modelProb),
+        ...auditSignalsForMarket("sc", market, "positive", scPos, modelProb),
+        ...auditSignalsForMarket("sc", market, "avoid", scAv, modelProb),
+      ];
+
+      const family = Object.entries(SIGNAL_FAMILIES).find(([, ms]) => ms.includes(market))?.[0] ?? null;
+      audit.markets[market] = {
+        family,
+        odds: consensusOddsFor(f, market),
+        modelProb,
+        scFlag,
+        signals: entries,
+        sourcePresence: {
+          sa: entries.some(e => e.engine === "sa"),
+          ca: entries.some(e => e.engine === "ca"),
+          sc: entries.some(e => e.engine === "sc"),
+        },
+      };
+    }
+  }
+  return audit;
+}
+
+// ── CONSENSUS RANKING EXPERIMENT (roadmap Phase 3) ───────────────────────────
+// Pure/offline comparison helpers. These do NOT alter production Consensus.
+// They take the evidence audit already built above and compare four ranking
+// philosophies for each market: holdout HR, lift, verified edge, and a
+// reliability-aware score. The current production decision is preserved as
+// the control group alongside the alternatives.
+function experimentSignalScore(signal, method) {
+  const n = signal?.normalized || {};
+  const scored = signal?.scored || {};
+  if (n.holdoutHR == null) return null;
+  if (method === "holdoutHR") return n.holdoutHR;
+  if (method === "lift") return n.lift ?? -Infinity;
+  if (method === "verifiedEdge") return scored.edge ?? -Infinity;
+  if (method === "reliability") return scored.reliability ?? -Infinity;
+  return null;
+}
+
+export function buildConsensusRankingExperiment(audit, currentFamilies = {}) {
+  const result = { fixtureId: audit?.fixtureId ?? null, game: audit?.game ?? null, markets: {}, families: {} };
+  if (!audit?.markets) return result;
+
+  for (const [market, data] of Object.entries(audit.markets)) {
+    const positives = (data.signals || []).filter(s => s.direction === "positive");
+    const avoids = (data.signals || []).filter(s => s.direction === "avoid");
+    const methods = {};
+    for (const method of ["holdoutHR", "lift", "verifiedEdge", "reliability"]) {
+      let best = null;
+      for (const s of positives) {
+        const value = experimentSignalScore(s, method);
+        if (value == null || !Number.isFinite(value)) continue;
+        if (!best || value > best.value) best = { engine: s.engine, value, direction: "positive", signalKey: s.raw?.patternKey ?? s.raw?.key ?? null };
+      }
+      methods[method] = best;
+    }
+    const currentFamily = currentFamilies[data.family] || null;
+    result.markets[market] = {
+      family: data.family,
+      odds: data.odds,
+      modelProb: data.modelProb,
+      methods,
+      current: currentFamily?.strongest ? {
+        netScore: currentFamily.strongest.netScore,
+        engine: currentFamily.strongest.candidate?.engine ?? null,
+        signalKey: currentFamily.strongest.candidate?.raw?.patternKey ?? currentFamily.strongest.candidate?.raw?.key ?? null,
+        hadContradiction: !!currentFamily.strongest.hadContradiction,
+      } : null,
+    };
+  }
+
+  for (const [family, markets] of Object.entries(SIGNAL_FAMILIES)) {
+    const marketRows = Object.entries(result.markets).filter(([, x]) => x.family === family);
+    result.families[family] = {};
+    for (const method of ["holdoutHR", "lift", "verifiedEdge", "reliability"]) {
+      const ranked = marketRows
+        .map(([market, x]) => x.methods[method] ? { market, ...x.methods[method] } : null)
+        .filter(Boolean)
+        .sort((a,b) => b.value - a.value);
+      result.families[family][method] = ranked[0] ?? null;
+    }
+    const current = currentFamilies[family]?.strongest;
+    result.families[family].current = current ? {
+      market: current.market,
+      netScore: current.netScore,
+      engine: current.candidate?.engine ?? null,
+      signalKey: current.candidate?.raw?.patternKey ?? current.candidate?.raw?.key ?? null,
+      hadContradiction: !!current.hadContradiction,
+    } : null;
+  }
+  return result;
+}
+
 // Computes, for ONE fixture, the strongest (and where a distinct second
 // candidate clears the bar, secondary) lean in each of the four families —
 // cross-engine, baseline-adjusted. Only ever returns POSITIVE-direction
@@ -1966,7 +2123,7 @@ function consensusOddsFor(f, market) {
 // explicitly signing off on the exact complement rules first).
 // ctx: { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor }
 function computeFamilyConsensus(f, ctx) {
-  const { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor } = ctx;
+  const { saPatternsByMarket, caPositive, caAvoid, scFlags, scPositive = null, scAvoid = null, modelProbFor } = ctx;
   const families = {};
   for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
     const eligible = [];
@@ -1984,7 +2141,12 @@ function computeFamilyConsensus(f, ctx) {
       const caAv = (caAvoid || []).find(c => c.market === market);
       if (caAv) avoidByEngine.set("ca", caAv);
 
-      if (scFlags) {
+      if (Array.isArray(scPositive) || Array.isArray(scAvoid)) {
+        const scPos = (scPositive || []).find(c => c?.market === market);
+        const scAv = (scAvoid || []).find(c => c?.market === market);
+        if (scPos) posByEngine.set("sc", scPos);
+        if (scAv) avoidByEngine.set("sc", scAv);
+      } else if (scFlags) {
         const scKey = marketForEngine("sc", familyOfMarket("sa", market));
         const flag = scKey ? scFlags[scKey] : null;
         if (flag?.status === "favorable") posByEngine.set("sc", flag);
@@ -2007,6 +2169,18 @@ function computeFamilyConsensus(f, ctx) {
     families[familyId] = { strongest: eligible[0] ?? null, secondary: eligible[1] ?? null };
   }
   return families;
+}
+
+// Phase 3 only: same production Consensus calculation, but with the full SC
+// matched condition objects available to the experiment. This is intentionally
+// separate from computeFamilyConsensus so the current production control group
+// remains byte-for-byte on its existing SC-flag input.
+function computeFamilyConsensusAuditMode(f, ctx) {
+  const { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor } = ctx;
+  return computeFamilyConsensus(f, {
+    saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid,
+    scFlags: null, modelProbFor,
+  });
 }
 
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
@@ -15236,6 +15410,139 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     return map;
   }, [appSaPatterns]);
 
+  // Roadmap Phase 1/2 audit dataset: build a transparent evidence record for
+  // every fixture without changing the current qualifying pool or Consensus
+  // ranking. SC receives its full matched positive/avoid condition objects
+  // from the server endpoint, so this audit captures N/gap/train fields that
+  // the derived SC flags intentionally omit.
+  const consensusEvidenceAudit = useMemo(() => {
+    // Audit work is intentionally opt-in with Consensus. When the Consensus
+    // source is not selected, do not duplicate the Pattern Engine's existing
+    // SA/CA matching passes just to populate an unused diagnostic object.
+    if (!sources.has("consensus") || !fixtures?.length) return {};
+    const out = {};
+    for (const f of fixtures) {
+      if (!f?.id || !isBookableFixtureState(f, isPastDate)) continue;
+      const caMatches = appCaPatterns ? matchCAConditions(f, appCaPatterns) : null;
+      const sc = scResults?.[f.id] || null;
+      out[f.id] = buildConsensusEvidenceAudit(f, {
+        saPatternsByMarket,
+        caPositive: caMatches?.positive,
+        caAvoid: caMatches?.avoid,
+        scPositive: sc?.positive,
+        scAvoid: sc?.avoid,
+        scFlags: sc?.flags,
+        modelProbFor,
+      });
+    }
+    return out;
+  }, [fixtures, isPastDate, sources, appCaPatterns, scResults, saPatternsByMarket]);
+
+  // Read-only browser hook for QA/backtest inspection during Phase 1. It is
+  // intentionally non-visual and never feeds ticket construction. Consumers
+  // can inspect `window.__patternEngineConsensusAudit` while validating the
+  // evidence pipeline without changing the production UI.
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    window.__patternEngineConsensusAudit = consensusEvidenceAudit;
+    return () => {
+      if (window.__patternEngineConsensusAudit === consensusEvidenceAudit) {
+        delete window.__patternEngineConsensusAudit;
+      }
+    };
+  }, [consensusEvidenceAudit]);
+
+  // Phase 3 experiment view. It preserves the current production Consensus
+  // decision as control and computes alternative rankings from the same audit
+  // evidence. Nothing here feeds qualifyingLegs or ticket construction.
+  const consensusRankingExperiment = useMemo(() => {
+    if (!sources.has("consensus") || !fixtures?.length) return {};
+    const out = {};
+    for (const f of fixtures) {
+      if (!f?.id || !consensusEvidenceAudit?.[f.id]) continue;
+      const caMatches = appCaPatterns ? matchCAConditions(f, appCaPatterns) : null;
+      const sc = scResults?.[f.id] || null;
+      const auditFamilies = computeFamilyConsensusAuditMode(f, {
+        saPatternsByMarket,
+        caPositive: caMatches?.positive,
+        caAvoid: caMatches?.avoid,
+        scPositive: sc?.positive,
+        scAvoid: sc?.avoid,
+        modelProbFor,
+      });
+      const controlFamilies = computeFamilyConsensus(f, {
+        saPatternsByMarket,
+        caPositive: caMatches?.positive,
+        caAvoid: caMatches?.avoid,
+        scFlags: sc?.flags,
+        modelProbFor,
+      });
+      out[f.id] = buildConsensusRankingExperiment(consensusEvidenceAudit[f.id], controlFamilies);
+      out[f.id].auditModeFamilies = auditFamilies;
+    }
+    return out;
+  }, [fixtures, sources, consensusEvidenceAudit, appCaPatterns, scResults, saPatternsByMarket]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    window.__patternEngineConsensusRankingExperiment = consensusRankingExperiment;
+    return () => {
+      if (window.__patternEngineConsensusRankingExperiment === consensusRankingExperiment) {
+        delete window.__patternEngineConsensusRankingExperiment;
+      }
+    };
+  }, [consensusRankingExperiment]);
+
+  // Phase 3 forward logger: save today's observational evidence once it is
+  // available. Server-side deduplication makes repeated renders safe. Past
+  // dates are deliberately excluded so this cannot silently manufacture a
+  // retrospective test set from a newer snapshot.
+  useEffect(() => {
+    if (!sources.has("consensus") || !fixtures?.length || !Object.keys(consensusEvidenceAudit || {}).length) return;
+    if (isPastDate) return;
+    let cancelled = false;
+    const postAudit = async () => {
+      const rows = [];
+      for (const [fixtureId, audit] of Object.entries(consensusEvidenceAudit)) {
+        const experiment = consensusRankingExperiment?.[fixtureId];
+        if (!audit?.markets || !experiment?.families) continue;
+        for (const [market, data] of Object.entries(audit.markets)) {
+          for (const signal of data.signals || []) {
+            const methodRanks = {};
+            for (const [method, winner] of Object.entries(experiment.families[data.family] || {})) {
+              if (method === "current") continue;
+              if (winner?.market === market) methodRanks[method] = true;
+            }
+            rows.push({
+              fixtureId, market, family: data.family, engine: signal.engine, direction: signal.direction,
+              signalKey: signal.raw?.patternKey ?? signal.raw?.key ?? null,
+              normalized: signal.normalized, scored: signal.scored, modelProb: data.modelProb, odds: data.odds,
+              rankingMembership: methodRanks,
+              currentControlMarket: experiment.families[data.family]?.current?.market ?? null,
+              currentControlNetScore: experiment.families[data.family]?.current?.netScore ?? null,
+            });
+          }
+        }
+      }
+      if (cancelled || !rows.length) return;
+      try {
+        const snapshotMeta = {
+          appGeneratedAt: null,
+          auditGeneratedAt: new Date().toISOString(),
+          patternSource: "live-current-consensus",
+        };
+        await fetch("/api/consensus-audit-log", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: new Date().toISOString().slice(0, 10), rows, snapshotMeta }),
+        });
+      } catch (e) {
+        console.warn("[ConsensusAudit] Save failed:", e?.message || e);
+      }
+    };
+    postAudit();
+    return () => { cancelled = true; };
+  }, [sources, fixtures, isPastDate, consensusEvidenceAudit, consensusRankingExperiment]);
+
   // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
   // LEAST ONE selected source (OR across sources, not AND — requiring every
   // engine to agree at once would leave most days with an almost-empty
@@ -16843,7 +17150,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // Stake/Target Odds/Tickets/Max Same Market controls and the same Build
   // button — only how the candidate pool gets built differs.
   const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
-  const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
+  const [patternEnginePool, setPatternEnginePool] = useState([]);
   const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
   // 2026-08-16 fix (Sterling request): TGPControls reports its own
   // decompose/whole toggle up here so the shared Stake/Target Odds/
