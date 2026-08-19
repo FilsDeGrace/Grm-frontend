@@ -1869,7 +1869,7 @@ function signalModelAgreement(modelProb, baseline, isAvoid) {
 // trainHR/testHR/baseHR/lift/testN via isStrongSA; CA/SC: trainHitRate/
 // holdoutHitRate/holdoutBaselineHR/holdoutLift/holdoutSample/gap) rather than
 // assumed from one and applied to all three.
-export function normalizeConsensusSignal(engine, raw) {
+function normalizeSignal(engine, raw) {
   if (engine === "sa") {
     const trainHR = raw.trainHR ?? null, holdoutHR = raw.testHR ?? null;
     return {
@@ -1878,11 +1878,12 @@ export function normalizeConsensusSignal(engine, raw) {
       gap: (trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null,
     };
   }
-  // CA and SC both expose the same core condition-stat fields when Consensus
-  // receives the full matched condition objects: train/holdout HR, baseline,
-  // lift, holdout sample and gap. The current SC flag object is intentionally
-  // lighter, so the audit path must prefer scResults[f.id].positive/avoid over
-  // flags when full evidence is needed.
+  // ca and sc share one combo/flag shape — SC is a server-side mirror of the
+  // same field names (see the SC integration comment above) — EXCEPT SC's
+  // server-side flags carry no trainHitRate/holdoutSample/gap at all (see
+  // server.js's sc-match flag construction), so those come through as null
+  // for sc, handled explicitly in scoreSignal below rather than silently
+  // defaulting to a fabricated sample size.
   const trainHR = raw.trainHitRate ?? null, holdoutHR = raw.holdoutHitRate ?? null;
   return {
     holdoutHR, trainHR, baseHR: raw.holdoutBaselineHR ?? null, lift: raw.holdoutLift ?? null,
@@ -1890,10 +1891,6 @@ export function normalizeConsensusSignal(engine, raw) {
     gap: raw.gap ?? ((trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null),
   };
 }
-
-// Backward-compatible internal alias. Keep one canonical normalizer while the
-// audit/export path can use the descriptive public name directly.
-const normalizeSignal = normalizeConsensusSignal;
 
 function scoreSignal(sig, isAvoid, modelProb) {
   if (sig.holdoutHR == null) return null;
@@ -1903,9 +1900,12 @@ function scoreSignal(sig, isAvoid, modelProb) {
     const nEff = effectiveN(sig.n, sig.gap, SIGNAL_GAP_SHRINK_K);
     reliability = wilsonLowerBound(favP, nEff);
   } else {
-    // When a caller only has a derived signal object and no real sample size,
-    // do not fabricate N just to feed Wilson. The full Consensus audit path
-    // uses the underlying SC/CA condition objects where N is available.
+    // No sample size available (SC's flags don't carry one) — can't honestly
+    // apply n-based shrinkage without a real n, so this falls back to
+    // trusting the engine's own already-validated rate directly rather than
+    // fabricating a sample size to feed Wilson. Less conservative than the
+    // SA/CA path for that reason — a known, documented asymmetry, not an
+    // oversight.
     reliability = favP * 100;
   }
   const baseline = sig.baseHR ?? 50;
@@ -1955,163 +1955,6 @@ function consensusOddsFor(f, market) {
   return teamTotalOddsFor(f, market);
 }
 
-// ── CONSENSUS EVIDENCE AUDIT (roadmap Phase 1/2) ─────────────────────────────
-// This layer is deliberately observational first: it records the full evidence
-// available to each engine for a fixture+market without changing current
-// Consensus selection/ranking. The goal is to make the existing system
-// measurable before we introduce Evidence Consensus v2.
-//
-// SC MUST use the full matched condition arrays when available. Its flags are
-// a derived presentation/verdict representation and do not contain every raw
-// field needed for a faithful evidence audit.
-function auditSignalsForMarket(engine, market, direction, rawSignals, modelProb) {
-  return (rawSignals || [])
-    .filter(raw => raw?.market === market)
-    .map(raw => {
-      const normalized = normalizeConsensusSignal(engine, raw);
-      const scored = scoreSignal(normalized, direction === "avoid", modelProb);
-      return {
-        engine,
-        direction,
-        market,
-        raw,
-        normalized,
-        scored,
-      };
-    })
-    .filter(x => x.normalized.holdoutHR != null);
-}
-
-export function buildConsensusEvidenceAudit(f, {
-  saPatternsByMarket,
-  caPositive,
-  caAvoid,
-  scPositive,
-  scAvoid,
-  scFlags,
-  modelProbFor,
-}) {
-  const audit = {
-    fixtureId: f?.id ?? null,
-    game: `${f?.teams?.home || "?"} vs ${f?.teams?.away || "?"}`,
-    league: f?.league ?? null,
-    competitionRisk: f?.competitionRisk ?? null,
-    markets: {},
-  };
-  if (!f) return audit;
-
-  for (const familyMarkets of Object.values(SIGNAL_FAMILIES)) {
-    for (const market of familyMarkets) {
-      const modelProb = typeof modelProbFor === "function" ? modelProbFor(f, market) : null;
-      const saRaw = saPatternsByMarket?.get(market) || [];
-      const caPos = (caPositive || []).filter(c => c?.market === market);
-      const caAv = (caAvoid || []).filter(c => c?.market === market);
-
-      // SC's full matched conditions are preferred over derived flags.
-      const scPos = (scPositive || []).filter(c => c?.market === market);
-      const scAv = (scAvoid || []).filter(c => c?.market === market);
-      const scKey = marketForEngine("sc", familyOfMarket("sa", market));
-      const scFlag = scKey ? (scFlags?.[scKey] || null) : null;
-
-      const matchedSA = saRaw.length ? matchSAPatterns(f, market, saRaw) : { positive: [], avoid: [] };
-      const entries = [
-        ...auditSignalsForMarket("sa", market, "positive", matchedSA.positive, modelProb),
-        ...auditSignalsForMarket("sa", market, "avoid", matchedSA.avoid, modelProb),
-        ...auditSignalsForMarket("ca", market, "positive", caPos, modelProb),
-        ...auditSignalsForMarket("ca", market, "avoid", caAv, modelProb),
-        ...auditSignalsForMarket("sc", market, "positive", scPos, modelProb),
-        ...auditSignalsForMarket("sc", market, "avoid", scAv, modelProb),
-      ];
-
-      const family = Object.entries(SIGNAL_FAMILIES).find(([, ms]) => ms.includes(market))?.[0] ?? null;
-      audit.markets[market] = {
-        family,
-        odds: consensusOddsFor(f, market),
-        modelProb,
-        scFlag,
-        signals: entries,
-        sourcePresence: {
-          sa: entries.some(e => e.engine === "sa"),
-          ca: entries.some(e => e.engine === "ca"),
-          sc: entries.some(e => e.engine === "sc"),
-        },
-      };
-    }
-  }
-  return audit;
-}
-
-// ── CONSENSUS RANKING EXPERIMENT (roadmap Phase 3) ───────────────────────────
-// Pure/offline comparison helpers. These do NOT alter production Consensus.
-// They take the evidence audit already built above and compare four ranking
-// philosophies for each market: holdout HR, lift, verified edge, and a
-// reliability-aware score. The current production decision is preserved as
-// the control group alongside the alternatives.
-function experimentSignalScore(signal, method) {
-  const n = signal?.normalized || {};
-  const scored = signal?.scored || {};
-  if (n.holdoutHR == null) return null;
-  if (method === "holdoutHR") return n.holdoutHR;
-  if (method === "lift") return n.lift ?? -Infinity;
-  if (method === "verifiedEdge") return scored.edge ?? -Infinity;
-  if (method === "reliability") return scored.reliability ?? -Infinity;
-  return null;
-}
-
-export function buildConsensusRankingExperiment(audit, currentFamilies = {}) {
-  const result = { fixtureId: audit?.fixtureId ?? null, game: audit?.game ?? null, markets: {}, families: {} };
-  if (!audit?.markets) return result;
-
-  for (const [market, data] of Object.entries(audit.markets)) {
-    const positives = (data.signals || []).filter(s => s.direction === "positive");
-    const avoids = (data.signals || []).filter(s => s.direction === "avoid");
-    const methods = {};
-    for (const method of ["holdoutHR", "lift", "verifiedEdge", "reliability"]) {
-      let best = null;
-      for (const s of positives) {
-        const value = experimentSignalScore(s, method);
-        if (value == null || !Number.isFinite(value)) continue;
-        if (!best || value > best.value) best = { engine: s.engine, value, direction: "positive", signalKey: s.raw?.patternKey ?? s.raw?.key ?? null };
-      }
-      methods[method] = best;
-    }
-    const currentFamily = currentFamilies[data.family] || null;
-    result.markets[market] = {
-      family: data.family,
-      odds: data.odds,
-      modelProb: data.modelProb,
-      methods,
-      current: currentFamily?.strongest ? {
-        netScore: currentFamily.strongest.netScore,
-        engine: currentFamily.strongest.candidate?.engine ?? null,
-        signalKey: currentFamily.strongest.candidate?.raw?.patternKey ?? currentFamily.strongest.candidate?.raw?.key ?? null,
-        hadContradiction: !!currentFamily.strongest.hadContradiction,
-      } : null,
-    };
-  }
-
-  for (const [family, markets] of Object.entries(SIGNAL_FAMILIES)) {
-    const marketRows = Object.entries(result.markets).filter(([, x]) => x.family === family);
-    result.families[family] = {};
-    for (const method of ["holdoutHR", "lift", "verifiedEdge", "reliability"]) {
-      const ranked = marketRows
-        .map(([market, x]) => x.methods[method] ? { market, ...x.methods[method] } : null)
-        .filter(Boolean)
-        .sort((a,b) => b.value - a.value);
-      result.families[family][method] = ranked[0] ?? null;
-    }
-    const current = currentFamilies[family]?.strongest;
-    result.families[family].current = current ? {
-      market: current.market,
-      netScore: current.netScore,
-      engine: current.candidate?.engine ?? null,
-      signalKey: current.candidate?.raw?.patternKey ?? current.candidate?.raw?.key ?? null,
-      hadContradiction: !!current.hadContradiction,
-    } : null;
-  }
-  return result;
-}
-
 // Computes, for ONE fixture, the strongest (and where a distinct second
 // candidate clears the bar, secondary) lean in each of the four families —
 // cross-engine, baseline-adjusted. Only ever returns POSITIVE-direction
@@ -2123,7 +1966,7 @@ export function buildConsensusRankingExperiment(audit, currentFamilies = {}) {
 // explicitly signing off on the exact complement rules first).
 // ctx: { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor }
 function computeFamilyConsensus(f, ctx) {
-  const { saPatternsByMarket, caPositive, caAvoid, scFlags, scPositive = null, scAvoid = null, modelProbFor } = ctx;
+  const { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor } = ctx;
   const families = {};
   for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
     const eligible = [];
@@ -2141,12 +1984,7 @@ function computeFamilyConsensus(f, ctx) {
       const caAv = (caAvoid || []).find(c => c.market === market);
       if (caAv) avoidByEngine.set("ca", caAv);
 
-      if (Array.isArray(scPositive) || Array.isArray(scAvoid)) {
-        const scPos = (scPositive || []).find(c => c?.market === market);
-        const scAv = (scAvoid || []).find(c => c?.market === market);
-        if (scPos) posByEngine.set("sc", scPos);
-        if (scAv) avoidByEngine.set("sc", scAv);
-      } else if (scFlags) {
+      if (scFlags) {
         const scKey = marketForEngine("sc", familyOfMarket("sa", market));
         const flag = scKey ? scFlags[scKey] : null;
         if (flag?.status === "favorable") posByEngine.set("sc", flag);
@@ -2169,18 +2007,6 @@ function computeFamilyConsensus(f, ctx) {
     families[familyId] = { strongest: eligible[0] ?? null, secondary: eligible[1] ?? null };
   }
   return families;
-}
-
-// Phase 3 only: same production Consensus calculation, but with the full SC
-// matched condition objects available to the experiment. This is intentionally
-// separate from computeFamilyConsensus so the current production control group
-// remains byte-for-byte on its existing SC-flag input.
-function computeFamilyConsensusAuditMode(f, ctx) {
-  const { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor } = ctx;
-  return computeFamilyConsensus(f, {
-    saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid,
-    scFlags: null, modelProbFor,
-  });
 }
 
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
@@ -2545,6 +2371,45 @@ function addPendingBooking(entry) {
 }
 function removePendingBooking(jobId) {
   persistPendingBookings(loadPendingBookings().filter(p => p.jobId !== jobId));
+}
+
+// STOPPED-JOBS (2026-08-19, Alden report — "Stop tracking" clears the
+// app-shell banner but doesn't stop the pipeline in the ticket): book()'s
+// while(true) poll loop lives entirely inside whichever TicketBookNowButton
+// instance called it — it's a plain async function, not tied to React
+// lifecycle, with no cancellation path. "Stop tracking" only ever touched
+// PENDING_BOOKINGS_KEY (the list the fixed banner reads), which just hides
+// the banner and unblocks OTHER tickets' "Book Now" buttons — it never told
+// the actual in-flight poll loop for THAT jobId to stop, so it kept polling
+// /api/book-status every 1.5s in the background, and could still resolve
+// into a real booking (or let the user fire a second, overlapping book()
+// call for the same ticket from a remounted instance) after the user was
+// told it was "stopped". This is a small persisted Set of jobIds the poll
+// loop checks each iteration — separate from PENDING_BOOKINGS_KEY (the
+// banner's "what's currently tracked" list) because a job can be stopped
+// after being removed from that list. Self-pruning isn't needed: entries
+// are tiny (jobId strings) and get removed by clearStoppedJob once the
+// loop that was checking for them actually exits.
+const STOPPED_JOBS_KEY = "grm_stopped_jobs_v1";
+function loadStoppedJobs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(STOPPED_JOBS_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function markJobStopped(jobId) {
+  try {
+    const list = loadStoppedJobs().filter(id => id !== jobId);
+    localStorage.setItem(STOPPED_JOBS_KEY, JSON.stringify([...list, jobId]));
+  } catch {}
+}
+function isJobStopped(jobId) {
+  return loadStoppedJobs().includes(jobId);
+}
+function clearStoppedJob(jobId) {
+  try {
+    localStorage.setItem(STOPPED_JOBS_KEY, JSON.stringify(loadStoppedJobs().filter(id => id !== jobId)));
+  } catch {}
 }
 
 const BOOKED_LEGS_KEY = "grm_booked_legs_v1";
@@ -10064,6 +9929,11 @@ function PendingBookingsBanner() {
       "This won't cancel any booking already sent to the bookmaker — it only stops tracking it on this device so you can book again. Check your bookmaker's bet history to see if it went through. Continue?"
     );
     if (!ok) return;
+    // 2026-08-19 fix: mark each currently-pending jobId stopped BEFORE
+    // clearing the list — book()'s own poll loop checks this on its next
+    // tick and breaks itself out, instead of silently continuing to poll
+    // /api/book-status in the background after the user was told it stopped.
+    for (const p of pending) markJobStopped(p.jobId);
     persistPendingBookings([]);
     setPending([]);
     failCountRef.current = 0;
@@ -10255,6 +10125,18 @@ function TicketBookNowButton({ legs }) {
         const POLL_MS = 1500, MAX_MS = BOOKING_MAX_MS;
         while (true) {
           await new Promise(r => setTimeout(r, POLL_MS));
+          // 2026-08-19 fix (Alden report — "Stop tracking" clears the banner
+          // but doesn't stop the pipeline in the ticket): this while(true)
+          // loop is a plain async function, not tied to React lifecycle or
+          // to PendingBookingsBanner's own local state — clearing the
+          // banner's tracking list never reached in here, so the loop just
+          // kept polling silently in the background. Check the stop flag
+          // Stop tracking now sets, every tick, before doing anything else.
+          if (isJobStopped(data.jobId)) {
+            clearStoppedJob(data.jobId);
+            setRetryable(false); // don't let a retry race a job that may still resolve server-side
+            throw new Error("Stopped tracking this booking — check your bookmaker's bet history to see if it went through before booking again.");
+          }
           setBookingElapsed(Math.round((Date.now() - pollStart) / 1000));
           let job;
           try {
@@ -15361,22 +15243,37 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // every source, including CA/SA edges that intentionally diverge from the
   // model. Off preserves the original per-source-only behavior exactly.
   const [applyGlobalFloor, setApplyGlobalFloor] = useState(false);
-  const [scResults, setScResults] = useState(null);
+  // 2026-08-18 fix — same bug as TGPControls' identical block: fetching
+  // scResults ONCE and freezing on `if (scResults) return` meant any
+  // fixture that rotated into the list after the first fetch (new
+  // kickoffs added by the poll/auto-refresh cycles) never got an SC match,
+  // silently starving SC-sourced legs within minutes of the first load.
+  // Now tracks fetched fixture IDs and only fetches+merges the ones still
+  // missing. See TGPControls for the full writeup, including the accepted
+  // trade-off (an already-fetched fixture's SC match won't refresh even if
+  // its own markets/odds move later — only remounting this component does).
+  const [scResults, setScResults] = useState({});
   const [scLoading, setScLoading] = useState(false);
+  const scFetchedIdsRef = useRef(new Set());
 
   const needsSC = sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus");
   useEffect(() => {
-    if (!needsSC || !fixtures?.length || scResults || scLoading) return;
+    if (!needsSC || !fixtures?.length || scLoading) return;
+    const missing = fixtures.filter(f => f?.id != null && !scFetchedIdsRef.current.has(f.id));
+    if (!missing.length) return;
     setScLoading(true);
     fetch(`${SERVER}/api/sc-match`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+      body: JSON.stringify({ fixtures: missing.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
     })
-      .then(r => r.json())
-      .then(d => setScResults(d?.results || {}))
-      .catch(() => setScResults({}))
+      .then(r => r.ok ? r.json() : {})
+      .then(d => {
+        for (const f of missing) scFetchedIdsRef.current.add(f.id);
+        setScResults(prev => ({ ...prev, ...(d?.results || {}) }));
+      })
+      .catch(() => { for (const f of missing) scFetchedIdsRef.current.add(f.id); })
       .finally(() => setScLoading(false));
-  }, [needsSC, fixtures, scResults, scLoading]);
+  }, [needsSC, fixtures, scLoading]);
 
   // Model probability — the base model's own predicted probability for a
   // market, independent of any pattern-mining engine. "TB:..." labeled
@@ -15409,139 +15306,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     }
     return map;
   }, [appSaPatterns]);
-
-  // Roadmap Phase 1/2 audit dataset: build a transparent evidence record for
-  // every fixture without changing the current qualifying pool or Consensus
-  // ranking. SC receives its full matched positive/avoid condition objects
-  // from the server endpoint, so this audit captures N/gap/train fields that
-  // the derived SC flags intentionally omit.
-  const consensusEvidenceAudit = useMemo(() => {
-    // Audit work is intentionally opt-in with Consensus. When the Consensus
-    // source is not selected, do not duplicate the Pattern Engine's existing
-    // SA/CA matching passes just to populate an unused diagnostic object.
-    if (!sources.has("consensus") || !fixtures?.length) return {};
-    const out = {};
-    for (const f of fixtures) {
-      if (!f?.id || !isBookableFixtureState(f, isPastDate)) continue;
-      const caMatches = appCaPatterns ? matchCAConditions(f, appCaPatterns) : null;
-      const sc = scResults?.[f.id] || null;
-      out[f.id] = buildConsensusEvidenceAudit(f, {
-        saPatternsByMarket,
-        caPositive: caMatches?.positive,
-        caAvoid: caMatches?.avoid,
-        scPositive: sc?.positive,
-        scAvoid: sc?.avoid,
-        scFlags: sc?.flags,
-        modelProbFor,
-      });
-    }
-    return out;
-  }, [fixtures, isPastDate, sources, appCaPatterns, scResults, saPatternsByMarket]);
-
-  // Read-only browser hook for QA/backtest inspection during Phase 1. It is
-  // intentionally non-visual and never feeds ticket construction. Consumers
-  // can inspect `window.__patternEngineConsensusAudit` while validating the
-  // evidence pipeline without changing the production UI.
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    window.__patternEngineConsensusAudit = consensusEvidenceAudit;
-    return () => {
-      if (window.__patternEngineConsensusAudit === consensusEvidenceAudit) {
-        delete window.__patternEngineConsensusAudit;
-      }
-    };
-  }, [consensusEvidenceAudit]);
-
-  // Phase 3 experiment view. It preserves the current production Consensus
-  // decision as control and computes alternative rankings from the same audit
-  // evidence. Nothing here feeds qualifyingLegs or ticket construction.
-  const consensusRankingExperiment = useMemo(() => {
-    if (!sources.has("consensus") || !fixtures?.length) return {};
-    const out = {};
-    for (const f of fixtures) {
-      if (!f?.id || !consensusEvidenceAudit?.[f.id]) continue;
-      const caMatches = appCaPatterns ? matchCAConditions(f, appCaPatterns) : null;
-      const sc = scResults?.[f.id] || null;
-      const auditFamilies = computeFamilyConsensusAuditMode(f, {
-        saPatternsByMarket,
-        caPositive: caMatches?.positive,
-        caAvoid: caMatches?.avoid,
-        scPositive: sc?.positive,
-        scAvoid: sc?.avoid,
-        modelProbFor,
-      });
-      const controlFamilies = computeFamilyConsensus(f, {
-        saPatternsByMarket,
-        caPositive: caMatches?.positive,
-        caAvoid: caMatches?.avoid,
-        scFlags: sc?.flags,
-        modelProbFor,
-      });
-      out[f.id] = buildConsensusRankingExperiment(consensusEvidenceAudit[f.id], controlFamilies);
-      out[f.id].auditModeFamilies = auditFamilies;
-    }
-    return out;
-  }, [fixtures, sources, consensusEvidenceAudit, appCaPatterns, scResults, saPatternsByMarket]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    window.__patternEngineConsensusRankingExperiment = consensusRankingExperiment;
-    return () => {
-      if (window.__patternEngineConsensusRankingExperiment === consensusRankingExperiment) {
-        delete window.__patternEngineConsensusRankingExperiment;
-      }
-    };
-  }, [consensusRankingExperiment]);
-
-  // Phase 3 forward logger: save today's observational evidence once it is
-  // available. Server-side deduplication makes repeated renders safe. Past
-  // dates are deliberately excluded so this cannot silently manufacture a
-  // retrospective test set from a newer snapshot.
-  useEffect(() => {
-    if (!sources.has("consensus") || !fixtures?.length || !Object.keys(consensusEvidenceAudit || {}).length) return;
-    if (isPastDate) return;
-    let cancelled = false;
-    const postAudit = async () => {
-      const rows = [];
-      for (const [fixtureId, audit] of Object.entries(consensusEvidenceAudit)) {
-        const experiment = consensusRankingExperiment?.[fixtureId];
-        if (!audit?.markets || !experiment?.families) continue;
-        for (const [market, data] of Object.entries(audit.markets)) {
-          for (const signal of data.signals || []) {
-            const methodRanks = {};
-            for (const [method, winner] of Object.entries(experiment.families[data.family] || {})) {
-              if (method === "current") continue;
-              if (winner?.market === market) methodRanks[method] = true;
-            }
-            rows.push({
-              fixtureId, market, family: data.family, engine: signal.engine, direction: signal.direction,
-              signalKey: signal.raw?.patternKey ?? signal.raw?.key ?? null,
-              normalized: signal.normalized, scored: signal.scored, modelProb: data.modelProb, odds: data.odds,
-              rankingMembership: methodRanks,
-              currentControlMarket: experiment.families[data.family]?.current?.market ?? null,
-              currentControlNetScore: experiment.families[data.family]?.current?.netScore ?? null,
-            });
-          }
-        }
-      }
-      if (cancelled || !rows.length) return;
-      try {
-        const snapshotMeta = {
-          appGeneratedAt: null,
-          auditGeneratedAt: new Date().toISOString(),
-          patternSource: "live-current-consensus",
-        };
-        await fetch("/api/consensus-audit-log", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: new Date().toISOString().slice(0, 10), rows, snapshotMeta }),
-        });
-      } catch (e) {
-        console.warn("[ConsensusAudit] Save failed:", e?.message || e);
-      }
-    };
-    postAudit();
-    return () => { cancelled = true; };
-  }, [sources, fixtures, isPastDate, consensusEvidenceAudit, consensusRankingExperiment]);
 
   // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
   // LEAST ONE selected source (OR across sources, not AND — requiring every
@@ -16202,20 +15966,47 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       .finally(() => setTgpLoading(false));
   }, [tgpData, tgpLoading]);
 
-  const [scResults, setScResults] = useState(null);
+  // 2026-08-18 fix (Alden report — TGP goes to "no live legs" mid-session
+  // even on fresh fixtures): this used to fetch SC matches ONCE and freeze
+  // via `if (scResults) return`. Fixtures keeps rotating all day (games
+  // kick off and leave the bookable pool, new games/leagues get added by
+  // the poll/auto-refresh cycles), but that guard meant any fixture that
+  // showed up AFTER the first fetch could never get an SC match — starving
+  // decomposedPool/liveIndex of SC-sourced legs even though CA/SA matching
+  // (computed fresh per render, not fetched) kept working fine. That's why
+  // it looked like "day progressed" when only minutes had passed: it
+  // wasn't fewer live games, it was newly-rotated-in games with no SC
+  // coverage at all. Fix: track which fixture IDs have been SC-matched
+  // (scFetchedIdsRef) and only fetch the ones still missing, merging their
+  // results into scResults rather than replacing it wholesale. Fixtures
+  // that already have a result are never re-fetched (avoids re-hitting the
+  // endpoint on every 30s/90s poll tick for the same games) — the
+  // trade-off is that if a fixture's own markets/odds move after its first
+  // SC fetch, that update won't be reflected until this component remounts
+  // (e.g. switching tabs away and back). Failed fetches still mark their
+  // IDs as attempted, matching the old catch's give-up-after-one-try
+  // behavior, so a persistent server error can't cause a refetch loop on
+  // every fixtures change.
+  const [scResults, setScResults] = useState({});
   const [scLoading, setScLoading] = useState(false);
+  const scFetchedIdsRef = useRef(new Set());
   useEffect(() => {
-    if (!fixtures?.length || scResults || scLoading) return;
+    if (!fixtures?.length || scLoading) return;
+    const missing = fixtures.filter(f => f?.id != null && !scFetchedIdsRef.current.has(f.id));
+    if (!missing.length) return;
     setScLoading(true);
     fetch(`${SERVER}/api/sc-match`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+      body: JSON.stringify({ fixtures: missing.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
     })
-      .then(r => r.json())
-      .then(d => setScResults(d?.results || {}))
-      .catch(() => setScResults({}))
+      .then(r => r.ok ? r.json() : {})
+      .then(d => {
+        for (const f of missing) scFetchedIdsRef.current.add(f.id);
+        setScResults(prev => ({ ...prev, ...(d?.results || {}) }));
+      })
+      .catch(() => { for (const f of missing) scFetchedIdsRef.current.add(f.id); })
       .finally(() => setScLoading(false));
-  }, [fixtures, scResults, scLoading]);
+  }, [fixtures, scLoading]);
 
   const saPatternsByMarket = useMemo(() => {
     const map = new Map();
@@ -17150,7 +16941,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // Stake/Target Odds/Tickets/Max Same Market controls and the same Build
   // button — only how the candidate pool gets built differs.
   const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
-  const [patternEnginePool, setPatternEnginePool] = useState([]);
+  const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
   const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
   // 2026-08-16 fix (Sterling request): TGPControls reports its own
   // decompose/whole toggle up here so the shared Stake/Target Odds/
@@ -20257,6 +20048,26 @@ function GRMProInner() {
   const pollRef                   = useRef(null);
   const fetchStartTimeRef         = useRef(null);   // tracks when current fetch began
   const lastProgressRef           = useRef({ pct: 0, ts: Date.now() }); // stuck detection
+  // 2026-08-19 fix (Alden report — first fetch of a new day sometimes hangs
+  // at "DONE 100%" with fixture cards never rendering until a refresh or a
+  // tab switch): the 202 async path's own `loadWhenDone` interval and its
+  // deferred `setLoading(false)` setTimeout used to be plain local
+  // variables, never stored anywhere fetchData could reach on a later call.
+  // If fetchData() ran again before that interval saw stage==="done" — the
+  // 90s auto-refresh tick landing mid-fetch, a date change, StrictMode's
+  // double-invoke in dev, anything — the OLD interval just kept running
+  // untracked in the background while a NEW cycle reset `loading` to true
+  // and started its own session. Whichever cycle's deferred setLoading(false)
+  // fired last "won": if it was the stale one, `loading` could flip false
+  // mid-way through the new cycle (cards flash in half-built); if the new
+  // cycle's fires but the stale interval is still alive, it can later call
+  // setFixtures/setProgress(100)/setLoading(false) again out of nowhere.
+  // Tracking both in refs lets fetchData() explicitly cancel any leftover
+  // instance from a previous call before starting fresh — one cycle alive
+  // at a time, so "done" always actually means done and `loading` reliably
+  // reaches false without needing a tab switch to force a fresh render.
+  const loadWhenDoneRef           = useRef(null);   // setInterval id, async (202) path
+  const loadingTimeoutRef         = useRef(null);   // setTimeout id for the deferred setLoading(false)
 
   // sport: "football" | "basketball" — which data source the Live Model uses.
   // Everything else (date, loading, FETCH, progress, tabs, search) is shared.
@@ -20760,7 +20571,11 @@ function GRMProInner() {
       } catch {}
     }, 800);
   };
-  const stopPolling = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  const stopPolling = () => {
+    if (pollRef.current)         { clearInterval(pollRef.current); pollRef.current = null; }
+    if (loadWhenDoneRef.current) { clearInterval(loadWhenDoneRef.current); loadWhenDoneRef.current = null; }
+    if (loadingTimeoutRef.current) { clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null; }
+  };
   useEffect(() => () => stopPolling(), []);
 
   // Debounce ref — prevents rapid FETCH taps from spawning concurrent polls
@@ -20798,12 +20613,19 @@ function GRMProInner() {
       if (res.status === 202) {
         // Pipeline is running — keep loading, poll until done then load snapshot.
         isSyncPath = false; // don't let finally kill loading state
-        const loadWhenDone = setInterval(async () => {
+        loadWhenDoneRef.current = setInterval(async () => {
           try {
+            // Guard against a stale tick from a superseded fetchData() call —
+            // stopPolling() clears this interval up front on every new call,
+            // but a tick already in flight when that happens can still land
+            // here once more. sessionIdRef.current always holds the LATEST
+            // call's session id, so this is a cheap belt-and-suspenders check
+            // on top of the ref-based cancellation.
+            if (session !== sessionIdRef.current) { clearInterval(loadWhenDoneRef.current); return; }
             const check = await fetch(`${SERVER}/api/progress?session=${session}&date=${date}`);
             const d = await check.json();
             if (d.stage === "done") {
-              clearInterval(loadWhenDone);
+              clearInterval(loadWhenDoneRef.current); loadWhenDoneRef.current = null;
               const snap = await fetch(`${SERVER}/api/grm-pro-data?date=${date}&session=${session}`);
               if (!snap.ok) throw new Error(`Snapshot load failed: ${snap.status}`);
               const json = await snap.json();
@@ -20836,9 +20658,16 @@ function GRMProInner() {
                   if (pool.length) savePoolToServer(pool, capturedDate);
                 })();
               }
-              setTimeout(() => { setLoading(false); stopPolling(); }, 600);
+              loadingTimeoutRef.current = setTimeout(() => {
+                // Only this cycle's own timeout should ever flip loading —
+                // if a newer fetchData() call has since taken over, its
+                // stopPolling() already cleared this timeout via the ref,
+                // so reaching here means this cycle is still the current one.
+                loadingTimeoutRef.current = null;
+                setLoading(false); stopPolling();
+              }, 600);
             } else if (d.stage === "error") {
-              clearInterval(loadWhenDone);
+              clearInterval(loadWhenDoneRef.current); loadWhenDoneRef.current = null;
               setError(d.message || "Pipeline failed — try again.");
               setLoading(false); stopPolling();
             }

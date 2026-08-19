@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://7d44935708b2d4.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://d2596c2d443722.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
@@ -207,6 +207,21 @@ export const FORM_HOME_VENUE_WEIGHT   = 1.1;  // home games weighted +10% for al
 export const FORM_AWAY_VENUE_WEIGHT   = 0.9;  // away games weighted -10%
 export const FORM_MIN_ALLCOMP_GAMES   = 6;    // min all-comp games before form xG is used
 export const FORM_EARLY_SEASON_GAMES  = 10;   // sg threshold for FORM_WEIGHT_EARLY_SEASON
+
+// ── Per-Team Form Sample Shrinkage (2026-08-19) ─────────────────────────────
+// FORM_MIN_ALLCOMP_GAMES above only gates on the COMBINED game count across
+// both teams — a team with a single game on record (e.g. an opponent's
+// academy side with one friendly played) can still clear that gate riding on
+// the other side's bigger sample, then get used at full face value. Since
+// homeFormXG/awayFormXG cross-multiply one team's scored rate by the other's
+// conceded rate, a thin sample doesn't just weaken that team's own number —
+// it distorts the OPPONENT's projected xG too (see Wigan Athletic vs Aston
+// Villa U21, EFL Trophy, 2026-08-18: Villa's 1-game sample dragged Wigan's
+// own home xG down to 0.9 despite Wigan being the market's 69% favourite).
+// Below this many all-comp games, that team's own scored/conceded rate is
+// shrunk toward the league mean in proportion to how thin its own sample is,
+// independent of the other side's sample size.
+export const FORM_SHRINKAGE_MIN_GAMES = 8;    // games for a team's own rate to be trusted at full weight
 // Hard block: cup + fewer than this many combined all-comp games = no pick, "Insufficient Data"
 export const INSUFFICIENT_DATA_MIN_COMBINED = 12;
 
@@ -352,8 +367,9 @@ export const VOLATILE_LEAGUES = new Set([
 // ("Copa Argentina", "Cup, Round of 32", "Club Friendlies", "International
 // Friendlies", "World Championship" for the World Cup itself).
 export const CROSS_COMPETITION_RISK_PATTERNS = [
-  { type: "cup",          re: /\bcup\b/i },              // domestic cups, League Cup, League Cup, Copa del Rey-style "... Cup" names
+  { type: "cup",          re: /\bcup(en)?\b/i },          // domestic cups, League Cup, Copa del Rey-style "... Cup" names, Scandinavian "Cupen" form (Svenska Cupen etc. — \bcup\b alone doesn't match "Cupen" since it's one word)
   { type: "copa",         re: /\bcopa\b/i },              // Copa America, Copa Libertadores, Copa Argentina, etc.
+  { type: "trophy",       re: /\btrophy\b/i },            // EFL Trophy-style comps — senior clubs mixed with opponents' U21/academy sides, same cross-tier risk as a cup but never named "Cup" (2026-08-19)
   { type: "clubFriendly", re: /club friendl/i },          // covers "Club Friendlies" AND "Club Friendly Games" (SofaScore's actual string — see 2026-07-19 note below)
   { type: "intFriendly",  re: /\bint(?:ernational)?\.?\s*friendl/i }, // "International Friendlies" / "Int Friendlies" / "Int. Friendlies"
   { type: "worldCup",     re: /world championship/i },    // SofaScore's name for the World Cup itself
@@ -374,6 +390,21 @@ export const CROSS_MISMATCH_RANK_GAP_MIN = 40;   // min |rank gap| to trigger an
 export const CROSS_MISMATCH_RANK_GAP_MAX = 400;  // rank gap at which the shift caps out (e.g. a top-division team vs an amateur/regional side)
 export const CROSS_MISMATCH_SHIFT_MIN    = 0.05; // shift fraction at the minimum triggering gap
 export const CROSS_MISMATCH_SHIFT_MAX    = 0.20; // shift fraction at/beyond the max gap — NOTE: well under the BM guard's ceiling, on purpose (see above)
+
+// ── BM Quality-Gap Multiplier (odds path, 2026-08-19) ──────────────────────
+// Companion to CROSS_MISMATCH_* above, but for the ODDS-present branch of a
+// cup/trophy fixture (processFixture's _bmFinalMarkets). Was a flat 70%/8%
+// on-off switch — missed real market skew like a 63% BM favourite (e.g. a
+// senior club vs an opponent's academy side with a 1-game form sample), and
+// even when it did fire, the flat 8% shift barely nudged the number. Now
+// graduated the same way the no-odds guard already is: shift scales with
+// how far the BM-implied side is above BM_GAP_SKEW_MIN, capping at
+// BM_GAP_SHIFT_MAX once it clears BM_GAP_SKEW_CEIL.
+export const BM_GAP_SKEW_MIN     = 55;  // min BM-implied % for the stronger side before this can act at all (was 70)
+export const BM_GAP_SKEW_CEIL    = 95;  // BM-implied % at which the shift caps out
+export const BM_GAP_DISAGREE_MIN = 15;  // min pp gap between BM-implied and blended model prob to count as genuine disagreement — unchanged
+export const BM_GAP_SHIFT_MIN    = 0.08; // shift fraction right at BM_GAP_SKEW_MIN — same as the old flat value, so a borderline case shifts no harder than before
+export const BM_GAP_SHIFT_MAX    = 0.30; // shift fraction at/beyond BM_GAP_SKEW_CEIL — allowed higher than the no-odds guard's ceiling since this reads a live market price, not an inferred one
 
 // Used to select the right backtest prior in calibrateMarkets.
 // Tier based on long-run avg goals/game (multi-season):
