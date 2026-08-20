@@ -1869,7 +1869,7 @@ function signalModelAgreement(modelProb, baseline, isAvoid) {
 // trainHR/testHR/baseHR/lift/testN via isStrongSA; CA/SC: trainHitRate/
 // holdoutHitRate/holdoutBaselineHR/holdoutLift/holdoutSample/gap) rather than
 // assumed from one and applied to all three.
-function normalizeSignal(engine, raw) {
+function normalizeSignal(engine, raw, isAvoid) {
   if (engine === "sa") {
     const trainHR = raw.trainHR ?? null, holdoutHR = raw.testHR ?? null;
     return {
@@ -1878,17 +1878,32 @@ function normalizeSignal(engine, raw) {
       gap: (trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null,
     };
   }
-  // ca and sc share one combo/flag shape — SC is a server-side mirror of the
-  // same field names (see the SC integration comment above) — EXCEPT SC's
-  // server-side flags carry no trainHitRate/holdoutSample/gap at all (see
-  // server.js's sc-match flag construction), so those come through as null
-  // for sc, handled explicitly in scoreSignal below rather than silently
-  // defaulting to a fabricated sample size.
-  const trainHR = raw.trainHitRate ?? null, holdoutHR = raw.holdoutHitRate ?? null;
+  // ca and sc share one combo shape — SC is a server-side mirror of the same
+  // field names (see the SC integration comment above). Consensus's only
+  // caller of this function feeds SC the rich combo objects from
+  // scResults[f.id].positive/.avoid (holdoutSample/gap included), not the
+  // collapsed flags object server.js also builds for the favorable/
+  // unfavorable UI badges elsewhere — that flags object has no
+  // trainHitRate/holdoutSample/gap and would fall through to null here if it
+  // were ever passed in, handled explicitly in scoreSignal below rather than
+  // silently defaulting to a fabricated sample size, but that's not the path
+  // Consensus actually takes.
+  //
+  // 2026-08-20 fix — CA's raw holdoutHitRate is known-biased (the fitted
+  // 486-fixture recalibration curve computeCAVerdicts/caStoryVerdict.js both
+  // already apply exists specifically to correct that), but this function
+  // was feeding CA's RAW combo straight through, uncorrected — a gap I
+  // introduced building Evidence Consensus, not an intentional asymmetry.
+  // SC's recalibration is identity (scRecalibratedHR in server.js — SC has
+  // no verdict-log history yet to fit a real curve from), so this only
+  // actually changes anything for engine === "ca".
+  const rawHR = raw.holdoutHitRate ?? null;
+  const trainHR = raw.trainHitRate ?? null;
+  const holdoutHR = engine === "ca" ? caRecalibratedHR(rawHR, !!isAvoid) : rawHR;
   return {
     holdoutHR, trainHR, baseHR: raw.holdoutBaselineHR ?? null, lift: raw.holdoutLift ?? null,
     n: raw.holdoutSample ?? null,
-    gap: raw.gap ?? ((trainHR != null && holdoutHR != null) ? (trainHR - holdoutHR) : null),
+    gap: raw.gap ?? ((trainHR != null && rawHR != null) ? (trainHR - rawHR) : null),
   };
 }
 
@@ -1900,12 +1915,13 @@ function scoreSignal(sig, isAvoid, modelProb) {
     const nEff = effectiveN(sig.n, sig.gap, SIGNAL_GAP_SHRINK_K);
     reliability = wilsonLowerBound(favP, nEff);
   } else {
-    // No sample size available (SC's flags don't carry one) — can't honestly
-    // apply n-based shrinkage without a real n, so this falls back to
-    // trusting the engine's own already-validated rate directly rather than
-    // fabricating a sample size to feed Wilson. Less conservative than the
-    // SA/CA path for that reason — a known, documented asymmetry, not an
-    // oversight.
+    // Defensive fallback only — Consensus's actual SC path always supplies a
+    // real holdoutSample now (see normalizeSignal), so this branch shouldn't
+    // fire for sc/ca in practice. Kept for sa (whose testN can legitimately
+    // be null on a thin pattern) and as a guard against some future caller
+    // of scoreSignal that isn't Consensus. No fabricated sample size — just
+    // trusts the engine's own already-validated rate directly, which is less
+    // conservative than the Wilson-shrunk path above.
     reliability = favP * 100;
   }
   const baseline = sig.baseHR ?? 50;
@@ -1915,22 +1931,177 @@ function scoreSignal(sig, isAvoid, modelProb) {
   return { reliability, edge, agreement, score: edge + agreement * SIGNAL_MODEL_AGREEMENT_WEIGHT };
 }
 
-// Best single-engine candidate for one (market, direction), plus how many
-// independent engines corroborated it.
-function bestSignalCandidate(rawByEngine, isAvoid, modelProb) {
-  let best = null;
-  const engines = [];
-  for (const [engine, raw] of rawByEngine) {
-    const sig = normalizeSignal(engine, raw);
-    const scored = scoreSignal(sig, isAvoid, modelProb);
-    if (!scored) continue;
-    engines.push(engine);
-    if (!best || scored.score > best.scored.score) best = { engine, raw, sig, scored };
-  }
-  if (!best) return null;
-  const corroborationBonus = Math.max(0, engines.length - 1) * SIGNAL_CORROBORATION_BONUS;
-  return { ...best, engines, netScore: best.scored.score + corroborationBonus };
+// ── EVIDENCE CONSENSUS (2026-08-20) ─────────────────────────────────────────
+// Replaces the original per-market bestSignalCandidate/computeFamilyConsensus
+// pair (2026-08-08, Davies's spec) with the architecture from
+// Pattern_Engine_Consensus_Analysis_1-38.md + roadmap.md, adapted to what
+// this codebase's actual data supports rather than implemented blindly off
+// the doc. Verified against real code before writing a line of this,
+// specifically: SC's /api/sc-match ALREADY returns full combo objects
+// (holdoutSample/gap/trainHitRate, identical shape to CA) — the richness gap
+// was a plumbing bug (Consensus was reading scResults[f.id].flags, the
+// collapsed UI summary, instead of .positive/.avoid), not a missing
+// statistical framework. Fixed separately, feeds this.
+//
+// Three changes from the old bestSignalCandidate, matching the analysis's
+// Stage 2/3 (Stage 1 — the normalizeSignal/scoreSignal foundation above — was
+// already solid and is unchanged):
+//
+//   1. RE-RANK, DON'T TRUST SOURCE ORDER (Stage 2). The old code took SA's
+//      positive[0] (sorted by lift) and CA/SC's first array match (sorted by
+//      holdout HR) as given. Now every candidate an engine offers for a
+//      thesis gets scored under Consensus's OWN framework and the best ONE
+//      wins — the source engine's own sort order is just a starting list,
+//      not the final answer.
+//
+//   2. QUALITY-WEIGHTED, DIMINISHING CORROBORATION (Stage 3). The old bonus
+//      was flat: (engines.length - 1) * SIGNAL_CORROBORATION_BONUS, so three
+//      engines "mentioning" a market scored the same as three engines
+//      STRONGLY agreeing. Now each corroborating engine is classified
+//      strong/weak off its OWN reliability+edge, and contributes at a
+//      shrinking weight per rank — second engine matters, third matters
+//      less, weak mentions barely move the needle. See
+//      CORROB_WEIGHTS_STRONG/WEAK below.
+//
+//   3. CONSENSUS GRADE. Every winning candidate now carries A (Converged —
+//      2+ genuinely strong independent engines) / B (Supported — one strong
+//      engine plus real backup) / C (Isolated — one engine, nothing else) so
+//      "Consensus" stops meaning one undifferentiated thing.
+//
+// Deliberately NOT changed here (same reasoning the roadmap gives, and I
+// independently agree with it): SA/CA's own lift-vs-HR ranking internals,
+// odds folded into the score as a value signal, and the single-positive-
+// engine-is-enough admission rule (still true — this raises the bar on how
+// GOOD the winning evidence has to look, it doesn't add a quorum
+// requirement). Adding a hard quorum wasn't asked for and isn't free —
+// "SA alone at 91%" losing to nothing at all would need real backtesting to
+// justify, exactly the caution roadmap.md itself argues for on that specific
+// point.
+
+// Minimum bar to count as "strong" rather than merely "qualifying" evidence
+// — used only for corroboration weighting/consensus grade, not admission
+// (SIGNAL_MIN_RELIABILITY/SIGNAL_MIN_EDGE below still gate admission).
+const CONSENSUS_STRONG_RELIABILITY = 62;
+const CONSENSUS_STRONG_EDGE = 10;
+function signalStrengthClass(scored) {
+  return (scored.reliability >= CONSENSUS_STRONG_RELIABILITY && scored.edge >= CONSENSUS_STRONG_EDGE) ? "strong" : "weak";
 }
+// Diminishing-returns weight for the Nth corroborating engine beyond the
+// winner (rank 0 = first extra engine, rank 1 = second extra). Only ever
+// indexed 0 or 1 in this app (max 3 engines: sa/ca/sc) — table goes to 2 for
+// headroom, not because a 4th engine can currently exist.
+const CORROB_WEIGHTS_STRONG = [1, 0.55, 0.3];
+const CORROB_WEIGHTS_WEAK   = [0.35, 0.18, 0.1];
+function corroborationWeight(rank, strengthClass) {
+  const table = strengthClass === "strong" ? CORROB_WEIGHTS_STRONG : CORROB_WEIGHTS_WEAK;
+  return table[Math.min(rank, table.length - 1)] ?? 0;
+}
+
+// Stage 2 — considers EVERY candidate an engine offers for a thesis (not
+// just that engine's own top pick) and keeps whichever one scores best under
+// Consensus's own framework once the thesis's specificity discount is
+// applied. `candidates`: [{ raw, market, specificity }]. Each candidate must
+// independently clear SIGNAL_MIN_RELIABILITY to be considered at all — a
+// weak candidate from an engine's list shouldn't win just because it's
+// attached to a more "specific" market.
+function bestEngineCandidateForThesis(engine, candidates, isAvoid, modelProb) {
+  let best = null;
+  for (const cand of candidates) {
+    const sig = normalizeSignal(engine, cand.raw, isAvoid);
+    const scored = scoreSignal(sig, isAvoid, modelProb);
+    if (!scored || scored.reliability < SIGNAL_MIN_RELIABILITY) continue;
+    const thesisScore = scored.score * cand.specificity;
+    if (!best || thesisScore > best.thesisScore) {
+      best = { engine, raw: cand.raw, market: cand.market, specificity: cand.specificity, sig, scored, thesisScore };
+    }
+  }
+  return best;
+}
+
+// Stage 3 — fuses each engine's best candidate for a thesis into one
+// evidence object: winning market/odds come from whichever candidate has the
+// single highest thesisScore, but if a MORE SPECIFIC candidate (higher
+// specificity) is within CONSENSUS_SPECIFICITY_TOLERANCE of that top score,
+// prefer surfacing/pricing the more specific one instead — don't book DC1X
+// as the headline when Home Win itself has good evidence sitting right next
+// to it, matching the doc's "Home Win is more specific than DC1X, don't
+// treat them as equal votes" principle at the pricing decision, not just the
+// scoring one.
+const CONSENSUS_SPECIFICITY_TOLERANCE = 0.85;
+function fuseThesisEvidence(perEngineBest /* [{engine, raw, market, specificity, sig, scored, thesisScore}] */) {
+  if (!perEngineBest.length) return null;
+  const ranked = [...perEngineBest].sort((a, b) => b.thesisScore - a.thesisScore);
+  const top = ranked[0];
+  const moreSpecific = ranked.find(c => c.specificity > top.specificity && c.thesisScore >= top.thesisScore * CONSENSUS_SPECIFICITY_TOLERANCE);
+  const winner = moreSpecific || top;
+
+  const corroborators = ranked.filter(c => c !== winner);
+  let corroborationBonus = 0;
+  const strongEngines = [], weakEngines = [];
+  (winner.scored && signalStrengthClass(winner.scored) === "strong" ? strongEngines : weakEngines).push(winner.engine);
+  corroborators.forEach((c, i) => {
+    const cls = signalStrengthClass(c.scored);
+    (cls === "strong" ? strongEngines : weakEngines).push(c.engine);
+    corroborationBonus += corroborationWeight(i, cls) * SIGNAL_CORROBORATION_BONUS;
+  });
+
+  const grade =
+    strongEngines.length >= 2 ? "A" :
+    (strongEngines.length === 1 && (weakEngines.length >= 1 || winner.scored.agreement > 0.3)) ? "B" :
+    (strongEngines.length === 0 && weakEngines.length >= 2) ? "B" :
+    "C";
+
+  return {
+    market: winner.market, specificity: winner.specificity,
+    candidate: winner, // .sig.holdoutHR / .sig.lift — kept for pushLeg's existing call shape
+    thesisScore: top.thesisScore, // ranking uses the BEST evidence found, even if a different market gets priced
+    netScore: winner.scored.score + corroborationBonus,
+    supportingEngines: [...strongEngines, ...weakEngines],
+    strongEngines, weakEngines, consensusGrade: grade,
+  };
+}
+
+// Thesis maps — RESULT is the only family with genuine logical overlap
+// between its markets (DC1X = Home ∪ Draw, DCX2 = Away ∪ Draw are literal
+// supersets of two of the three 1X2 outcomes), so it's the only one that
+// gets Stage 4's thesis grouping (doc sections 15/20/21 — all three of the
+// doc's own worked examples are RESULT-family). GOALS/DOMINANCE/RADAR keep
+// one-market-one-thesis (specificity 1.0, identical to the old per-market
+// behavior) — Over 2.5 and Under 3.5 aren't mutually exclusive alternatives
+// the way Home/Draw/Away are, and merging them into a shared thesis would
+// mean inventing correlation weights with no real basis. Scoping decision,
+// not an oversight.
+//
+// Specificity 0.5/0.5 for DC1X/DCX2 (not an asymmetric split toward whichever
+// side "feels" stronger) — a market covering 2 of 3 mutually exclusive
+// outcomes conveys proportionally less information about EACH one than a
+// market naming exactly 1, and splitting it evenly is the only version of
+// that idea that doesn't require fabricating data-fitted weights I don't
+// have.
+const FAMILY_THESIS_MAP = {
+  RESULT: {
+    "TB:1X2-Home": [{ thesis: "HOME", specificity: 1.0 }],
+    "TB:1X2-Draw": [{ thesis: "DRAW", specificity: 1.0 }],
+    "TB:1X2-Away": [{ thesis: "AWAY", specificity: 1.0 }],
+    "TB:DC1X":     [{ thesis: "HOME", specificity: 0.5 }, { thesis: "DRAW", specificity: 0.5 }],
+    "TB:DCX2":     [{ thesis: "AWAY", specificity: 0.5 }, { thesis: "DRAW", specificity: 0.5 }],
+  },
+};
+function thesisMapFor(familyId, markets) {
+  if (FAMILY_THESIS_MAP[familyId]) return FAMILY_THESIS_MAP[familyId];
+  const identity = {};
+  for (const m of markets) identity[m] = [{ thesis: m, specificity: 1.0 }];
+  return identity;
+}
+// RESULT's theses are genuine mutually-exclusive outcomes (a match can't
+// finish both Home and Away) — "contested" (section 16/21: refuse to force a
+// winner when meaningful evidence supports two different outcomes) only
+// makes logical sense there. GOALS/DOMINANCE/RADAR markets can be
+// simultaneously true (2 goals = Over 1.5 AND Under 3.5 both correct), so
+// they keep the original "pick the single strongest market in the family"
+// behavior — there's no genuine two-sided contest to detect.
+const EXCLUSIVE_THESIS_FAMILIES = new Set(["RESULT"]);
+const CONSENSUS_CONTEST_CLOSENESS = 0.85; // same convention as SC_SECOND_LEAN_CLOSENESS/CA's equivalent elsewhere in the app
 
 // Odds for the 4 TeamTotal markets SA_MARKETS deliberately leaves
 // oddsKey:null for (Home/Away Over 0.5/1.5) — they don't fit the one-field
@@ -1957,54 +2128,141 @@ function consensusOddsFor(f, market) {
 
 // Computes, for ONE fixture, the strongest (and where a distinct second
 // candidate clears the bar, secondary) lean in each of the four families —
-// cross-engine, baseline-adjusted. Only ever returns POSITIVE-direction
-// candidates as actual leans (avoid-direction signals still count — they
-// penalize a contradicted market via SIGNAL_CONTRADICTION_PENALTY — but are
-// deliberately never auto-converted into a "back the complement" pick:
-// getting a complement mapping wrong would silently produce a wrongly-priced
-// leg, not a risk worth taking in a betting product without Davies
-// explicitly signing off on the exact complement rules first).
-// ctx: { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor }
+// cross-engine, baseline-adjusted, thesis-grouped where that's logically
+// sound (RESULT only — see FAMILY_THESIS_MAP above). Only ever returns
+// POSITIVE-direction candidates as actual leans (avoid-direction signals
+// still count — they penalize a contradicted thesis via
+// SIGNAL_CONTRADICTION_PENALTY — but are deliberately never auto-converted
+// into a "back the complement" pick: getting a complement mapping wrong
+// would silently produce a wrongly-priced leg, not a risk worth taking in a
+// betting product without Davies explicitly signing off on the exact
+// complement rules first).
+// ctx: { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor }
 function computeFamilyConsensus(f, ctx) {
-  const { saPatternsByMarket, caPositive, caAvoid, scFlags, modelProbFor } = ctx;
+  // 2026-08-20 (priority per Alden — cross-competition mismatch guard was
+  // missing from Consensus entirely). server.js's applyCrossMismatchGuard
+  // already corrects the MODEL's own homeWin/draw/awayWin for a risk-flagged
+  // fixture before it ever reaches the client, so modelProbFor here is
+  // already guard-adjusted — that part was never the gap.
+  // The gap is SA/CA/SC: their mined pattern stats come from
+  // settlement-pool-v2.jsonl without excluding cup/friendly/international
+  // fixtures (same contamination TGP's 2026-08-16 fix already documents —
+  // see computeTgpLiveIndex's `if (f.competitionRisk) continue`), so a
+  // pattern's holdout HR/baseline was never validated against fixtures like
+  // this one in the first place. dominanceGate (~line 1592) already excludes
+  // xG-dominance picks the same way, but only for the DOMINANCE family.
+  // Consensus is built entirely out of the same mined SA/CA/SC populations
+  // TGP is — not just the dominance signal — so this excludes ALL families
+  // for a risk-flagged fixture, matching TGP's broader precedent rather than
+  // dominanceGate's narrower one. f.competitionRisk is set server-side by
+  // getCompetitionRisk (config.js's CROSS_COMPETITION_RISK_PATTERNS) — same
+  // field, no separate client-side pattern list to keep in sync.
+  if (f.competitionRisk) return {};
+  const { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor } = ctx;
   const families = {};
   for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
-    const eligible = [];
+    const thesisMap = thesisMapFor(familyId, markets);
+    const thesesPos = new Map();   // thesis -> Map(engine -> [{raw, market, specificity}])
+    const thesesAvoid = new Map();
+
     for (const market of markets) {
-      const posByEngine = new Map(), avoidByEngine = new Map();
+      const entries = thesisMap[market];
+      if (!entries?.length) continue;
 
+      // Stage 2 prep: gather EVERY candidate each engine offers for this
+      // market (not just index [0]) — bestEngineCandidateForThesis does the
+      // actual re-ranking once everything below is pooled by thesis.
       const saPatterns = saPatternsByMarket?.get(market) || [];
-      if (saPatterns.length) {
-        const { positive, avoid } = matchSAPatterns(f, market, saPatterns);
-        if (positive[0]) posByEngine.set("sa", positive[0]);
-        if (avoid[0]) avoidByEngine.set("sa", avoid[0]);
-      }
-      const caPos = (caPositive || []).find(c => c.market === market);
-      if (caPos) posByEngine.set("ca", caPos);
-      const caAv = (caAvoid || []).find(c => c.market === market);
-      if (caAv) avoidByEngine.set("ca", caAv);
+      const saMatch = saPatterns.length ? matchSAPatterns(f, market, saPatterns) : { positive: [], avoid: [] };
+      const caPos = (caPositive || []).filter(c => c.market === market);
+      const caAv  = (caAvoid || []).filter(c => c.market === market);
+      const scKey = marketForEngine("sc", familyOfMarket("sa", market));
+      const scPos = scKey ? (scPositive || []).filter(c => c.market === scKey) : [];
+      const scAv  = scKey ? (scAvoid || []).filter(c => c.market === scKey) : [];
 
-      if (scFlags) {
-        const scKey = marketForEngine("sc", familyOfMarket("sa", market));
-        const flag = scKey ? scFlags[scKey] : null;
-        if (flag?.status === "favorable") posByEngine.set("sc", flag);
-        if (flag?.status === "unfavorable") avoidByEngine.set("sc", flag);
+      for (const { thesis, specificity } of entries) {
+        const pushInto = (bucket, engine, list) => {
+          if (!list.length) return;
+          if (!bucket.has(thesis)) bucket.set(thesis, new Map());
+          const byEngine = bucket.get(thesis);
+          if (!byEngine.has(engine)) byEngine.set(engine, []);
+          byEngine.get(engine).push(...list.map(raw => ({ raw, market, specificity })));
+        };
+        pushInto(thesesPos, "sa", saMatch.positive);
+        pushInto(thesesAvoid, "sa", saMatch.avoid);
+        pushInto(thesesPos, "ca", caPos);
+        pushInto(thesesAvoid, "ca", caAv);
+        pushInto(thesesPos, "sc", scPos);
+        pushInto(thesesAvoid, "sc", scAv);
+      }
+    }
+
+    // Model prob for a thesis comes off whichever of its member markets has
+    // the highest specificity (Home Win's own prob for the HOME thesis, not
+    // DC1X's, when both feed it) — same field modelProbFor already reads
+    // per-market, just resolved through the thesis's most specific member.
+    const modelProbForThesis = (thesis) => {
+      let bestMarket = null, bestSpec = -1;
+      for (const [market, entries] of Object.entries(thesisMap)) {
+        const e = entries.find(x => x.thesis === thesis);
+        if (e && e.specificity > bestSpec) { bestSpec = e.specificity; bestMarket = market; }
+      }
+      return bestMarket ? modelProbFor(f, bestMarket) : null;
+    };
+
+    const resolvedTheses = [];
+    for (const [thesis, byEngine] of thesesPos) {
+      const modelProb = modelProbForThesis(thesis);
+      const perEngineBest = [];
+      for (const [engine, candidates] of byEngine) {
+        const best = bestEngineCandidateForThesis(engine, candidates, false, modelProb);
+        if (best) perEngineBest.push(best);
+      }
+      if (!perEngineBest.length) continue;
+      const fused = fuseThesisEvidence(perEngineBest);
+      if (!fused) continue;
+
+      // Contradiction — avoid-direction evidence for the SAME thesis still
+      // penalizes it (soft, not a veto — same spirit as before).
+      let avoidFused = null;
+      const avoidByEngine = thesesAvoid.get(thesis);
+      if (avoidByEngine) {
+        const perEngineAvoid = [];
+        for (const [engine, candidates] of avoidByEngine) {
+          const best = bestEngineCandidateForThesis(engine, candidates, true, modelProb);
+          if (best) perEngineAvoid.push(best);
+        }
+        if (perEngineAvoid.length) avoidFused = fuseThesisEvidence(perEngineAvoid);
       }
 
-      if (!posByEngine.size) continue; // nothing backable here regardless of any avoid signal
-      const odds = consensusOddsFor(f, market);
+      const netScore = fused.netScore - (avoidFused ? avoidFused.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
+      if (fused.candidate.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) continue;
+
+      const odds = consensusOddsFor(f, fused.market);
       if (!(odds > 1)) continue; // no priceable leg, don't surface a lean that can't be booked
 
-      const modelProb = modelProbFor(f, market);
-      const pos = bestSignalCandidate(posByEngine, false, modelProb);
-      if (!pos) continue;
-      const avoid = avoidByEngine.size ? bestSignalCandidate(avoidByEngine, true, modelProb) : null;
-      const netScore = pos.netScore - (avoid ? avoid.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
-      if (pos.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) continue;
-      eligible.push({ market, odds, netScore, candidate: pos, hadContradiction: !!avoid });
+      resolvedTheses.push({
+        thesis, market: fused.market, odds, netScore, candidate: fused.candidate,
+        consensusGrade: fused.consensusGrade, supportingEngines: fused.supportingEngines,
+        hadContradiction: !!avoidFused,
+      });
     }
-    eligible.sort((a, b) => b.netScore - a.netScore);
-    families[familyId] = { strongest: eligible[0] ?? null, secondary: eligible[1] ?? null };
+
+    resolvedTheses.sort((a, b) => b.netScore - a.netScore);
+
+    // Contested — RESULT only (see EXCLUSIVE_THESIS_FAMILIES). Two
+    // independently-qualifying, mutually exclusive theses within striking
+    // distance of each other means the fixture is genuinely calling both
+    // ways — forcing a winner there is fake confidence (doc section 21).
+    // Contested families surface NO leg at all rather than a flagged-but-
+    // still-present one, so this actually changes what Pattern Engine builds
+    // from, not just how it's labeled.
+    const contested = EXCLUSIVE_THESIS_FAMILIES.has(familyId) && resolvedTheses.length >= 2 &&
+      resolvedTheses[1].netScore >= resolvedTheses[0].netScore * CONSENSUS_CONTEST_CLOSENESS;
+
+    families[familyId] = contested
+      ? { strongest: null, secondary: null, contested: true }
+      : { strongest: resolvedTheses[0] ?? null, secondary: resolvedTheses[1] ?? null, contested: false };
   }
   return families;
 }
@@ -15336,7 +15594,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       }
       return out;
     };
-    const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source) => {
+    const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source, extra) => {
       const oddsNum = parseFloat(odds);
       if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
       const fam = familyOfMarket(engineOfSource(source), market);
@@ -15349,7 +15607,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       if (applyGlobalFloor && (mp == null || mp < modelMinProb)) return;
       legs.push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league,
         market, marketLabel, odds: oddsNum, hitRate: hitRate ?? null, lift: lift ?? 0,
-        modelProb: mp, source });
+        modelProb: mp, source, ...extra });
     };
     for (const f of fixtures || []) {
       // BUGFIX (2026-08-08): live in-play and cancelled fixtures had no gate
@@ -15428,13 +15686,15 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       if (sources.has("consensus")) {
         const consensus = computeFamilyConsensus(f, {
           saPatternsByMarket, caPositive: caMatchesForFixture?.positive, caAvoid: caMatchesForFixture?.avoid,
-          scFlags: scResults?.[f.id]?.flags, modelProbFor,
+          scPositive: scResults?.[f.id]?.positive, scAvoid: scResults?.[f.id]?.avoid, modelProbFor,
         });
         for (const [familyId, verdict] of Object.entries(consensus)) {
           const win = verdict.strongest;
           if (!win) continue;
-          const label = `${SIGNAL_FAMILY_LABELS[familyId]}: ${win.market.replace(/^TB:/, "")}`;
-          pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, "Consensus");
+          const engineTag = win.supportingEngines.map(e => e.toUpperCase()).join("+");
+          const label = `${SIGNAL_FAMILY_LABELS[familyId]}: ${win.market.replace(/^TB:/, "")} · Consensus ${win.consensusGrade} (${engineTag})`;
+          pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, "Consensus",
+            { consensusGrade: win.consensusGrade, supportingEngines: win.supportingEngines });
         }
       }
       // Model — the raw base model's own probability, no pattern-mining
