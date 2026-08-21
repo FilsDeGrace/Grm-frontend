@@ -37,6 +37,9 @@ import {
   resolveCAVerdictHeadline,
   caPatternStrength,
   SC_MARKET_LABELS,
+  computeEngineVerdict,
+  engineVerdictEntries,
+  caModelProbFor,
 } from "./App.jsx";
 import { getMarketStyle, getDataSections } from "./sportConfig.js";
 
@@ -1864,6 +1867,13 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
           const Icon = flag.status === "favorable" ? CAIconCheck : flag.status === "conflicted" ? CAIconVerdict : CAIconAvoid;
           const showGroupHeader = flag.status !== lastStatus;
           lastStatus = flag.status;
+          // Conflicted markets have no single winning combo (a favorable AND
+          // an unfavorable pattern both matched), so there's no one holdout/
+          // train/depth/n set to show — same reason CA doesn't show numbers
+          // for its own conflicted rows. Favorable/unfavorable always have
+          // holdoutHitRate since bestPerMarket only flags a market off a
+          // real matched combo.
+          const hasNumbers = typeof flag.holdoutHitRate === "number";
           return (
             <div key={marketKey}>
               {showGroupHeader && (
@@ -1873,9 +1883,25 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
               )}
               <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 14px" }}>
                 <Icon size={12} color={color} />
-                <div>
+                <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{label}</div>
                   <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 2 }}>{flag.reason}</div>
+                  {hasNumbers && (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                        <CAConfidenceBar holdout={flag.holdoutHitRate} baseline={flag.holdoutBaselineHR} color={color} />
+                        <span style={{ fontSize: 10, fontWeight: 800, color }}>{flag.holdoutHitRate}%</span>
+                        <span style={{ fontSize: 8, color: C.text, opacity: 0.62 }}>
+                          vs {flag.holdoutBaselineHR}% base · {flag.holdoutLift > 0 ? "+" : ""}{flag.holdoutLift}pp ({CA_STRENGTH_LABEL[caPatternStrength(flag.holdoutLift)]})
+                        </span>
+                      </div>
+                      {flag.trainHitRate != null && (
+                        <div style={{ fontSize: 8, color: C.text, opacity: 0.62, marginTop: 4 }}>
+                          Train {flag.trainHitRate}% → Holdout {flag.holdoutHitRate}% (depth {flag.depth}, n={flag.holdoutSample})
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -1895,7 +1921,7 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
                   <div>
                     <div style={{ fontSize: 9, fontWeight: 700, color: C.text }}>{label}</div>
                     <div style={{ fontSize: 8, color: C.text, opacity: 0.65, lineHeight: 1.5, marginTop: 1 }}>
-                      Holdout {c.holdoutHitRate}% vs {c.holdoutBaselineHR}% baseline ({c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp), n={c.holdoutSample} — below the test-size floor, not yet a validated pattern.
+                      Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% vs {c.holdoutBaselineHR}% baseline ({c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp), depth {c.depth}, n={c.holdoutSample} — below the test-size floor, not yet a validated pattern.
                     </div>
                   </div>
                 </div>
@@ -2619,11 +2645,13 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
   // since FMP only ever needs this one game's flags.
   const [scFlags, setScFlags] = useState(null);
   const [scVerdicts, setScVerdicts] = useState([]);
+  const [scPositive, setScPositive] = useState([]);
+  const [scAvoid, setScAvoid] = useState([]);
   const [scEmerging, setScEmerging] = useState({ positive: [], avoid: [] });
   const [scError, setScError] = useState(null);
   const [scLoading, setScLoading] = useState(false);
   useEffect(() => {
-    if (!scModeEnabled) { setScFlags(null); setScVerdicts([]); setScEmerging({ positive: [], avoid: [] }); setScError(null); setScLoading(false); return; }
+    if (!scModeEnabled) { setScFlags(null); setScVerdicts([]); setScPositive([]); setScAvoid([]); setScEmerging({ positive: [], avoid: [] }); setScError(null); setScLoading(false); return; }
     let cancelled = false;
     setScLoading(true);
     fetch(`${SERVER}/api/sc-match`, {
@@ -2634,13 +2662,35 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
       .then(d => {
         if (cancelled) return;
         const r = d?.results?.[f.id];
-        if (r) { setScFlags(r.flags); setScVerdicts(r.verdicts || []); setScEmerging({ positive: r.emergingPositive || [], avoid: r.emergingAvoid || [] }); }
+        if (r) {
+          setScFlags(r.flags); setScVerdicts(r.verdicts || []);
+          setScPositive(r.positive || []); setScAvoid(r.avoid || []);
+          setScEmerging({ positive: r.emergingPositive || [], avoid: r.emergingAvoid || [] });
+        }
         else setScError(d?.error || "No settlement-condition data");
       })
       .catch(e => { if (!cancelled) setScError(e.message); })
       .finally(() => { if (!cancelled) setScLoading(false); });
     return () => { cancelled = true; };
   }, [scModeEnabled, f.id]);
+  // SC unified verdict (2026-08-21) — scComputeVerdicts on the server no
+  // longer emits strongest-lean/second-lean itself (App.jsx's SC:Verdict
+  // market was rewired onto computeEngineVerdict, the same function CA:
+  // Verdict and Consensus run on, and the server-side ranking that used to
+  // back this became dead weight once nothing read it — see server.js's
+  // scComputeVerdicts comment). This FMP panel was the one place still
+  // reading the old server array for those two entry types, so it's
+  // rebuilt the same way App.jsx's own SC:Verdict branch does: run
+  // computeEngineVerdict client-side off the raw positive/avoid combo
+  // arrays (still returned by /api/sc-match), turn that into entries via
+  // engineVerdictEntries, then append scVerdicts as-is — that array is now
+  // just the contradiction-pair diagnostic, the one entry type the server
+  // still produces.
+  const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m;
+  const { top: scTopV, second: scSecondV } = scModeEnabled
+    ? computeEngineVerdict("sc", f, scPositive, scAvoid, caModelProbFor)
+    : { top: null, second: null };
+  const scUnifiedVerdicts = [...engineVerdictEntries(scTopV, scSecondV, scLabelOf), ...scVerdicts];
 
   // All explainers computed once
   const isBBSport = f._sport === "basketball";
@@ -3746,7 +3796,7 @@ export default function FullModelPage({ f, date, onBack, onAddToParlay, draftLeg
             Self-gates on caModeEnabled and renders nothing at all when off or
             when there are no matches, so it never adds empty visual clutter. */}
         <ConditionStrategySection f={f} caMatches={caMatches} caError={caError} caModeEnabled={caModeEnabled} caLoading={caLoading} />
-        <SettlementConditionsSection scFlags={scFlags} scVerdicts={scVerdicts} scEmerging={scEmerging} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
+        <SettlementConditionsSection scFlags={scFlags} scVerdicts={scUnifiedVerdicts} scEmerging={scEmerging} scError={scError} scModeEnabled={scModeEnabled} scLoading={scLoading} />
 
         {/* External Predictions — football only */}
         {sections.has("external") && (

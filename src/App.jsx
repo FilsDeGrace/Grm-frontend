@@ -10,14 +10,15 @@ import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
 import { enrichGamesForDate, buildBasketballRolloverPool, buildBasketballRolloverPick } from "./BasketballEngine";
 import { toFixtureShape, getPickFamilies, getMarketStyle, getProgressLabel, getSportConfig } from "./sportConfig";
-// TEMP (2026-07-31): story-first CA verdict resolver. See caStoryVerdict.js's
-// own banner comment for the "steer away only" bug this fixes in
-// computeCAVerdicts' Rule 3 below. resolveStoryVerdict is still used by the
-// live CA Mix view (single best market per fixture); resolveAllStoryVerdicts,
-// legFromVerdict, runSystems, and parlaySystemEngine.mjs were only consumed
-// by the removed "CA Parlays" tab (2026-08-06) and have no other caller —
-// dropped rather than left as dead imports.
-import { resolveStoryVerdict } from "./caStoryVerdict.js";
+// 2026-08-21 (Alden — "too many files, duplicate stuff, merge it"):
+// caStoryVerdict.js's resolveStoryVerdict is now defined directly below
+// (search resolveStoryVerdict) instead of imported from a separate file —
+// that file existed mainly to dodge a circular import that was never
+// actually necessary once its logic lives in the same module as
+// normalizeSignal/scoreSignal/tierWeightOf, which it now reuses directly
+// instead of hand-keeping its own copies of CA_MIN_HOLDOUT_HR/recalibration/
+// etc in sync. caStoryVerdict.js itself should be deleted from the project —
+// nothing imports it anymore.
 
 // A10-FIX: SAVED_TICKETS_KEY declared at module top so loadSavedTickets()
 // and persistTickets() — both hoisted function declarations — never hit a
@@ -583,6 +584,21 @@ function scScanTierWeightOf(poolMarket) {
   const tb = SC_SCAN_POOL_TO_TB[poolMarket];
   return tb ? caScanTierWeightOf(tb) : null;
 }
+// 2026-08-21 (Alden report — RADAR/Team Total Over 0.5 was dominating actual
+// picks): specificity (added for RESULT's thesis grouping) discounts how
+// much ONE market's evidence counts toward a THESIS IT SHARES with others —
+// it does nothing to stop a structurally weak market like Home/Away Over 0.5
+// from competing on equal footing against a Tier-A market when there's no
+// shared thesis at all (RADAR has no thesis-mates — see FAMILY_THESIS_MAP,
+// it's identity-mapped). That's a different axis: market TRUSTWORTHINESS,
+// not thesis overlap. Tier weight already exists for exactly this (Scan,
+// 2026-08-13) — this just makes it a real input to the core scoring instead
+// of a second, separate ranking system Consensus/Verdict never saw. Same
+// engine-dispatch Scan already needs (SC carries pool-market ids, CA/SA
+// carry TB: keys).
+function tierWeightOf(engine, market) {
+  return engine === "sc" ? scScanTierWeightOf(market) : caScanTierWeightOf(market);
+}
 const SA_TO_FAMILY_ID = {
   "TB:Over 1.5": "over15", "TB:Over 2.5": "over25",
   "TB:Under 3.5": "under35", "TB:Under 4.5": "under45",
@@ -654,17 +670,17 @@ for (const alts of Object.values(CA_FAMILY_ALTERNATES)) {
 // CA:Mix removed (2026-08-08) — was a "best market across all of them" view;
 // CA:Verdict is the intended replacement for that (already does its own
 // cross-market ranking, via computeCAVerdicts, rather than a flatter score-max).
-// CA:Scan (2026-08-13, Sterling request — cross-market threshold scan): a
-// second virtual entry alongside CA:Verdict. Verdict picks ONE best headline
-// per fixture off its own fixed internal floors, ignoring caStrongThresholds
-// entirely. Scan is the opposite: it runs the SAME cleanPositive/cleanAvoid
-// pool the single-market path already computes (so it fully respects
-// whichever caMode/caStrongThresholds/caEmergingMinHR the user has picked —
-// that respect is the entire point of it existing) but skips the
-// `c.market === caMarket` narrowing step, surfacing every market on a
-// fixture that clears the bar instead of just one.
-const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Verdict", "CA:Scan"].map(id => ({
-  id, label: id === "CA:Verdict" ? "Verdict" : id === "CA:Scan" ? "Scan" : id.replace(/^TB:/, ""),
+// CA:Scan (2026-08-13 → retired 2026-08-21, Alden — "one universal system,
+// scan will be just redundant"): existed because Verdict used to pick off
+// fixed internal floors ignoring tier weight entirely, while Scan respected
+// it. Now that tier weight is folded directly into computeFamilyConsensus/
+// computeEngineVerdict (the same engine Verdict runs on), that gap is
+// closed — a second cross-market scan mode duplicated exactly what Verdict
+// now already does, with weaker statistics behind it (raw HR × tier, no
+// Wilson shrinkage, no specificity, no corroboration). Deleted, not kept
+// alongside.
+const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Verdict"].map(id => ({
+  id, label: id === "CA:Verdict" ? "Verdict" : id.replace(/^TB:/, ""),
 }));
 
 function saTheReadToTBMarket(anchor) {
@@ -1279,7 +1295,7 @@ function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) 
 // agreement credit for sitting ABOVE its own normal level, exactly the
 // same standard lift already holds every market to.
 export const CA_MODEL_AGREEMENT_BONUS = 0.20;
-function caModelProbFor(f, market) {
+export function caModelProbFor(f, market) {
   const def = SA_MARKETS[market];
   if (!def || def._isPEMix) return null;
   const m = f.markets || {};
@@ -1531,153 +1547,38 @@ export function computeCAVerdicts(caMatches, f) {
     }
   }
 
-  // Rule 3 — Safest lean + optional second + Best value (2026-07-13 full
-  // rewrite, replaces the old Holdout-HR-dominant composite score entirely).
-  // caSafestScore (shrunk |lift| × family corroboration × model agreement) can now win in
-  // EITHER direction — a well-corroborated avoid signal can be the fixture's
-  // actual safest lean, not just a caveat sentence buried under a positive
-  // pick. Same exclusions as before: conflicting-signal markets (Rule 0) and
-  // unclear-origin markets (Rule 1's stronger flag) never candidate. Two
-  // floor gates apply: CA_MIN_HOLDOUT_HR/CA_MAX_AVOID_HR (genuinely
-  // bettable/avoidable in absolute terms) AND CA_MIN_ELIGIBLE_LIFT (not
-  // structurally trivial even if the absolute number looks fine — mirrors
-  // POOL_MIN_EMPIRICAL_RATE's role in the main engine's pool).
+  // Rule 3 — headline lean + optional second (2026-08-21, replaces the
+  // caSafestScore/resolveStoryVerdict system entirely — see
+  // computeEngineVerdict's own comment for why). Same exclusions as before:
+  // conflicting-signal markets (Rule 0) and unclear/fragile-origin markets
+  // (Rule 1) never candidate. What's RETIRED here, deliberately, not kept
+  // alongside the new path: CA_MIN_HOLDOUT_HR/CA_MAX_AVOID_HR/
+  // CA_MIN_ELIGIBLE_LIFT(_AVOID) as a separate pre-filter, caSafestScore's
+  // shrunk-lift/family-corroboration/model-agreement scoring, and
+  // caStoryVerdict.js's resolveStoryVerdict (that file has no remaining
+  // caller — delete it from the project). Admission now runs entirely
+  // through computeFamilyConsensus's own SIGNAL_MIN_RELIABILITY/
+  // SIGNAL_MIN_EDGE floor — one bar, not two different ones that happened
+  // to usually agree. Also retired: the old avoid-direction "headline"
+  // fallback (steer-away-as-verdict when nothing positive cleared the
+  // floor) — computeFamilyConsensus never surfaces avoid as a headline for
+  // Consensus either (see its own comment: avoid only ever penalizes a
+  // thesis, never wins one), so Verdict doesn't get a special case Consensus
+  // doesn't have. A fixture with nothing positive strong enough now
+  // genuinely has no verdict, full stop — the caStoryVerdict-era "insight,
+  // not a verdict" compromise is gone, not replaced with a new version of
+  // itself.
   const unclearOriginMarkets = new Set(
     verdicts.filter(v => v.type === "unclear-origin" || v.type === "fragile-origin").map(v => v.market)
   );
   const contradictorySet = new Set(contradictoryMarkets);
-  // 2026-07-16: lift floor and HR floor both now check the RECALIBRATED
-  // rate — a claimed 96% that's really ~82% shouldn't sail through
-  // CA_MIN_HOLDOUT_HR just because the raw number looked fine. Avoid
-  // direction also gets the stricter CA_MIN_ELIGIBLE_LIFT_AVOID floor (see
-  // that constant's comment — weak avoid lift doesn't discriminate real
-  // outcomes the way weak positive lift's absence of a pattern suggested).
-  const eligible = (c, isAvoid) => {
-    if (contradictorySet.has(c.market) || unclearOriginMarkets.has(c.market)) return false;
-    const liftFloor = isAvoid ? CA_MIN_ELIGIBLE_LIFT_AVOID : CA_MIN_ELIGIBLE_LIFT;
-    return Math.abs(c.holdoutLift ?? 0) >= liftFloor;
-  };
-  const cleanPositive = positive.filter(c => eligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
-  const cleanAvoid = avoid.filter(c => eligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
+  const excludedMarkets = new Set([...contradictorySet, ...unclearOriginMarkets]);
+  const verdictPositive = positive.filter(c => !excludedMarkets.has(c.market));
+  const verdictAvoid = avoid.filter(c => !excludedMarkets.has(c.market));
 
-  // 2026-07-31 REPLACED (caStoryVerdict.js): the old top-pick here was
-  // `scored` (cleanPositive+cleanAvoid combined, ranked by caSafestScore,
-  // single winner in EITHER direction). Root cause of the "steer away only"
-  // complaint: when the winner happened to be an avoid signal and nothing
-  // positive independently cleared CA_MIN_HOLDOUT_HR, the fixture's
-  // headline verdict was "steer away from X" with nothing stakeable —
-  // insight, not a verdict. caStoryVerdict.js's resolveStoryVerdict fixes
-  // this by grouping evidence into match theses (home/away dominance, open
-  // game, slow game) and walking them best-first through MAIN then
-  // SUBSIDIARY markets until one clears the SAME bettable floor this file
-  // already uses (CA_MIN_HOLDOUT_HR/CA_MIN_ELIGIBLE_LIFT — it mirrors both
-  // constants rather than importing them, see that file's DUPLICATION NOTE
-  // for why). Only when every coherent thesis fails to produce a bettable
-  // market does it fall back to an avoid-direction headline — same
-  // "insight, not verdict" outcome as before, just no longer the FIRST
-  // thing tried. `cleanPositive`/`cleanAvoid` above stay in place — the
-  // second-lean pick below still uses caSafestScore off those pools
-  // unchanged, that's a different, unrelated feature (secondary lean from
-  // a different market family) than the "which is the top pick" bug fixed
-  // here.
-  // 2026-07-31: dominanceGate reuses xgHomeDominant/xgAwayDominant (already
-  // defined for the SA filter list — home/away xG at least 2x the other side
-  // AND a >=1.0 gap) plus f.competitionRisk (server.js's existing cup/
-  // friendly/international classifier, newly exposed on the fixture object)
-  // — a market clearing its statistical gate on a cup-tie mismatch or a
-  // weakened-squad friendly isn't the same signal as clearing it in a normal
-  // league fixture with a real quality gap behind it.
-  const caStoryCtx = {
-    getModelProb: market => caModelProbFor(f, market),
-    dominanceGate: { home: xgHomeDominant(f) && !f.competitionRisk, away: xgAwayDominant(f) && !f.competitionRisk },
-  };
-  const storyVerdict = resolveStoryVerdict(caMatches, caStoryCtx);
-  let topMarket = null;
-  if (storyVerdict.status === "MAIN" || storyVerdict.status === "SUBSIDIARY") {
-    topMarket = storyVerdict.market;
-    const topTripletMS = caSafestScore(storyVerdict.combo, false, cleanPositive, cleanAvoid, f);
-    verdicts.push({
-      type: "strongest-lean", market: storyVerdict.market, holdoutHitRate: storyVerdict.combo.holdoutHitRate,
-      direction: "positive", thesis: storyVerdict.thesis, confidence: storyVerdict.confidence,
-      predictiveStrength: topTripletMS.predictiveStrength, reliability: topTripletMS.reliability, verifiedEdge: topTripletMS.verifiedEdge,
-      text: storyVerdict.status === "MAIN"
-        ? `${CA_MARKET_SHORT(storyVerdict.market)} looks like the strongest clean lean here — holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp vs baseline).`
-        : `${CA_MARKET_SHORT(storyVerdict.market)} — fallback expression of the ${storyVerdict.thesis} story (main market not trusted enough), holdout ${storyVerdict.combo.holdoutHitRate}% (+${storyVerdict.combo.holdoutLift}pp).`,
-    });
-    if (storyVerdict.avoidNote) {
-      const avoidCombo = cleanAvoid.find(c => c.market === storyVerdict.avoidNote.market);
-      const avoidTriplet = avoidCombo ? caSafestScore(avoidCombo, true, cleanPositive, cleanAvoid, f) : null;
-      verdicts.push({
-        type: "second-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
-        direction: "avoid",
-        ...(avoidTriplet ? { predictiveStrength: avoidTriplet.predictiveStrength, reliability: avoidTriplet.reliability, verifiedEdge: avoidTriplet.verifiedEdge } : {}),
-        text: `Also worth noting: steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp), a different market family.`,
-      });
-    }
-  } else if (storyVerdict.avoidNote) {
-    // Genuine no-verdict: no coherent thesis produced a bettable market.
-    // The avoid note surfaces honestly as the headline (CAVerdictBlock
-    // already renders avoid-direction with no CTA — "insight, not a
-    // verdict" is a UI-level fact here, not something this function needs
-    // to encode further).
-    topMarket = storyVerdict.avoidNote.market;
-    const headlineAvoidCombo = cleanAvoid.find(c => c.market === storyVerdict.avoidNote.market);
-    const headlineAvoidTriplet = headlineAvoidCombo ? caSafestScore(headlineAvoidCombo, true, cleanPositive, cleanAvoid, f) : null;
-    verdicts.push({
-      type: "strongest-lean", market: storyVerdict.avoidNote.market, holdoutHitRate: storyVerdict.avoidNote.holdoutHitRate,
-      direction: "avoid",
-      ...(headlineAvoidTriplet ? { predictiveStrength: headlineAvoidTriplet.predictiveStrength, reliability: headlineAvoidTriplet.reliability, verifiedEdge: headlineAvoidTriplet.verifiedEdge } : {}),
-      text: `Steer away from ${CA_MARKET_SHORT(storyVerdict.avoidNote.market)} — holdout only ${storyVerdict.avoidNote.holdoutHitRate}% (${storyVerdict.avoidNote.holdoutLift}pp vs baseline). No positive story clears the floor on this fixture.`,
-    });
-  }
-
-  // Second lean (unchanged feature, re-scoped to exclude whatever market
-  // just became the headline above so the same market can't appear twice).
-  // Closeness gate preserved: only worth a second line if it scores within
-  // CA_SECOND_LEAN_CLOSENESS of the headline's own caSafestScore. The
-  // headline no longer comes from a caSafestScore ranking (it comes from
-  // resolveStoryVerdict), so its score is looked up here instead of reused
-  // from a prior sort — same floors (cleanPositive/cleanAvoid), so the
-  // headline's combo is found there whenever it cleared this function's
-  // own unclear-origin exclusion (the one case computeCAVerdicts checks
-  // that caStoryVerdict's own marketPasses doesn't). If it isn't found
-  // there, skip the closeness gate rather than guess — no second lean.
-  if (topMarket) {
-    const headlineInPositive = cleanPositive.find(c => c.market === topMarket);
-    const headlineInAvoid = !headlineInPositive ? cleanAvoid.find(c => c.market === topMarket) : null;
-    const headlineCombo = headlineInPositive || headlineInAvoid;
-    const topTriplet = headlineCombo
-      ? caSafestScore(headlineCombo, !!headlineInAvoid, cleanPositive, cleanAvoid, f)
-      : null;
-    const scored = [
-      ...cleanPositive.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: false, triplet: caSafestScore(c, false, cleanPositive, cleanAvoid, f) })),
-      ...cleanAvoid.filter(c => c.market !== topMarket).map(c => ({ c, isAvoid: true, triplet: caSafestScore(c, true, cleanPositive, cleanAvoid, f) })),
-    ];
-    if (scored.length && topTriplet != null && !verdicts.some(v => v.type === "second-lean")) {
-      // Rank by verifiedEdge (spec Step 5) — already folds in recalibration
-      // and gap-adjusted sample size. familyCorrobCount/modelAgreementFactor
-      // only break ties within ~1pp, not used as primary sort keys.
-      scored.sort((a, b) => {
-        const d = b.triplet.verifiedEdge - a.triplet.verifiedEdge;
-        if (Math.abs(d) > 1) return d;
-        const tieA = a.triplet.familyCorrobCount + a.triplet.modelAgreementFactor;
-        const tieB = b.triplet.familyCorrobCount + b.triplet.modelAgreementFactor;
-        return tieB - tieA;
-      });
-      const topFamily = caFamilyOf(topMarket);
-      const second = scored.find(e => caFamilyOf(e.c.market) !== topFamily && e.triplet.verifiedEdge >= topTriplet.verifiedEdge * CA_SECOND_LEAN_CLOSENESS);
-      if (second) {
-        verdicts.push({
-          type: "second-lean", market: second.c.market, holdoutHitRate: second.c.holdoutHitRate,
-          direction: second.isAvoid ? "avoid" : "positive",
-          predictiveStrength: second.triplet.predictiveStrength, reliability: second.triplet.reliability, verifiedEdge: second.triplet.verifiedEdge,
-          text: second.isAvoid
-            ? `Also worth noting: steer away from ${CA_MARKET_SHORT(second.c.market)} — holdout ${second.c.holdoutHitRate}% (${second.c.holdoutLift}pp), a different market family.`
-            : `Also worth noting: ${CA_MARKET_SHORT(second.c.market)} as a secondary lean — holdout ${second.c.holdoutHitRate}% (+${second.c.holdoutLift}pp), a different market family.`,
-        });
-      }
-    }
-  }
+  const { top, second } = computeEngineVerdict("ca", f, verdictPositive, verdictAvoid, caModelProbFor);
+  const topMarket = top?.market ?? null;
+  verdicts.push(...engineVerdictEntries(top, second, CA_MARKET_SHORT));
 
   // Best value — positive direction only (you stake something; "avoid" isn't
   // itself a stakeable market). Requires real odds AND a real edge (CA's own
@@ -1730,8 +1631,9 @@ export const SC_MARKET_LABELS = Object.entries({
   // SC:Verdict (2026-08-08) — same virtual-entry pattern CA_MARKET_LABELS
   // already uses for "CA:Verdict" below: not a real market id, a picker
   // option the SC row's own useMemo (scRows) branches on early to surface
-  // scResults[f.id].verdicts' headline instead of one fixed market.
-  .concat([{ id: "SC:Verdict", label: "Verdict" }, { id: "SC:Scan", label: "Scan" }]);
+  // a headline pick instead of one fixed market. SC:Scan retired 2026-08-21 —
+  // same reasoning as CA:Scan's retirement (see CA_MARKET_LABELS comment).
+  .concat([{ id: "SC:Verdict", label: "Verdict" }]);
 // Same family ids SA_TO_FAMILY_ID's values already use (over15/under35/
 // bttsyes/dc1x/dc2x/homewin/draw/awaywin/homeo05/homeo15/awayo05/awayo15) —
 // SC's pool keys just differ in case/spelling, not in what they mean, so
@@ -1999,20 +1901,30 @@ function corroborationWeight(rank, strengthClass) {
 
 // Stage 2 — considers EVERY candidate an engine offers for a thesis (not
 // just that engine's own top pick) and keeps whichever one scores best under
-// Consensus's own framework once the thesis's specificity discount is
-// applied. `candidates`: [{ raw, market, specificity }]. Each candidate must
-// independently clear SIGNAL_MIN_RELIABILITY to be considered at all — a
-// weak candidate from an engine's list shouldn't win just because it's
-// attached to a more "specific" market.
+// Consensus's own framework once the thesis's specificity discount AND the
+// market's own tier weight are applied. `candidates`: [{ raw, market,
+// specificity }]. Each candidate must independently clear
+// SIGNAL_MIN_RELIABILITY to be considered at all — a weak candidate from an
+// engine's list shouldn't win just because it's attached to a more
+// "specific" market or a Tier-A one.
+//
+// A market with NO tier entry (tierWeightOf returns null — currently only
+// Draw) is rejected outright, not defaulted to some weight — same policy
+// Scan already established ("Draw ain't a market I even consider, drop
+// it"). Per Alden: tier logic stays IDENTICAL everywhere, so Draw is now
+// excluded from Consensus/Verdict too, not just Scan. Real behavior change,
+// not a side effect to gloss over.
 function bestEngineCandidateForThesis(engine, candidates, isAvoid, modelProb) {
   let best = null;
   for (const cand of candidates) {
+    const tier = tierWeightOf(engine, cand.market);
+    if (tier == null) continue;
     const sig = normalizeSignal(engine, cand.raw, isAvoid);
     const scored = scoreSignal(sig, isAvoid, modelProb);
     if (!scored || scored.reliability < SIGNAL_MIN_RELIABILITY) continue;
-    const thesisScore = scored.score * cand.specificity;
+    const thesisScore = scored.score * cand.specificity * tier;
     if (!best || thesisScore > best.thesisScore) {
-      best = { engine, raw: cand.raw, market: cand.market, specificity: cand.specificity, sig, scored, thesisScore };
+      best = { engine, raw: cand.raw, market: cand.market, specificity: cand.specificity, tier, sig, scored, thesisScore };
     }
   }
   return best;
@@ -2044,6 +1956,11 @@ function fuseThesisEvidence(perEngineBest /* [{engine, raw, market, specificity,
     (cls === "strong" ? strongEngines : weakEngines).push(c.engine);
     corroborationBonus += corroborationWeight(i, cls) * SIGNAL_CORROBORATION_BONUS;
   });
+  // Scale by the WINNING market's own tier — otherwise a Tier-C pick's
+  // already-discounted base thesisScore could get rescued back up to
+  // Tier-A strength just because a second engine also mentioned it,
+  // defeating the point of discounting it in the first place.
+  corroborationBonus *= winner.tier ?? 1;
 
   const grade =
     strongEngines.length >= 2 ? "A" :
@@ -2052,10 +1969,18 @@ function fuseThesisEvidence(perEngineBest /* [{engine, raw, market, specificity,
     "C";
 
   return {
-    market: winner.market, specificity: winner.specificity,
+    market: winner.market, specificity: winner.specificity, tier: winner.tier,
     candidate: winner, // .sig.holdoutHR / .sig.lift — kept for pushLeg's existing call shape
     thesisScore: top.thesisScore, // ranking uses the BEST evidence found, even if a different market gets priced
-    netScore: winner.scored.score + corroborationBonus,
+    // 2026-08-21 fix: this used to be winner.scored.score (RAW, undiscounted)
+    // — specificity/tier only affected which candidate WON the internal
+    // comparison, then the discount silently vanished at the one point that
+    // actually gates admission (SIGNAL_MIN_EDGE, in computeFamilyConsensus).
+    // A DC1X or Tier-C pick could win its own comparison discounted, then
+    // get admitted at full undiscounted strength anyway. netScore now uses
+    // winner.thesisScore (already ×specificity×tier) so the discount is real
+    // all the way through, not just cosmetic at the ranking step.
+    netScore: winner.thesisScore + corroborationBonus,
     supportingEngines: [...strongEngines, ...weakEngines],
     strongEngines, weakEngines, consensusGrade: grade,
   };
@@ -2138,6 +2063,71 @@ function consensusOddsFor(f, market) {
 // betting product without Davies explicitly signing off on the exact
 // complement rules first).
 // ctx: { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor }
+// ── SINGLE-ENGINE VERDICT (2026-08-21, corrected per Alden) ────────────────
+// First pass at this reused caStoryVerdict.js's narrative-thesis structure
+// (home dominance/away dominance/open game/slow game, hand-tuned weights) —
+// wrong call, caught before shipping: "everything should be Evidence
+// Consensus type logic... why merging old stuff... I said a unified
+// system." Correct reading: CA Verdict and SC Verdict aren't a DIFFERENT
+// system that happens to reuse some pieces — they're THIS EXACT function,
+// computeFamilyConsensus, called with only one engine's data instead of
+// three. No separate thesis table, no separate weight table, no separate
+// admission floor. Same RESULT thesis grouping, same tier weights, same
+// specificity discount, same competitionRisk guard (already built into
+// computeFamilyConsensus itself, so it's on here automatically — "guard
+// all" is satisfied by construction, not by adding a second check).
+//
+// The only thing genuinely different about "Verdict" vs "Consensus" is the
+// OUTPUT SHAPE: Consensus keeps one leg per family (up to 4 legs feeding a
+// ticket); Verdict flattens that down to a single headline pick — whichever
+// family's strongest candidate has the best netScore overall — plus a
+// second only if another family's pick is within the same closeness margin
+// families already use internally. Corroboration/grade naturally cap lower
+// with one engine feeding it (no second engine ever exists to corroborate
+// with) — that's the model being honest about single-engine evidence being
+// weaker, not a separate rule bolted on.
+const ENGINE_VERDICT_CLOSENESS = CONSENSUS_CONTEST_CLOSENESS; // one number, not a second copy of 0.85
+export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor) {
+  const ctx = engine === "sc"
+    ? { saPatternsByMarket: null, caPositive: [], caAvoid: [], scPositive: positiveList || [], scAvoid: avoidList || [], modelProbFor }
+    : { saPatternsByMarket: null, caPositive: positiveList || [], caAvoid: avoidList || [], scPositive: [], scAvoid: [], modelProbFor };
+  const families = computeFamilyConsensus(f, ctx);
+  const picks = Object.values(families)
+    .filter(v => v && v.strongest)
+    .map(v => v.strongest)
+    .sort((a, b) => b.netScore - a.netScore);
+  if (!picks.length) return { top: null, second: null };
+  const top = picks[0];
+  const second = picks.find(p => p !== top && p.market !== top.market && p.netScore >= top.netScore * ENGINE_VERDICT_CLOSENESS) ?? null;
+  return { top, second };
+}
+
+// Turns computeEngineVerdict's {top, second} into the same verdicts-array
+// shape computeCAVerdicts already produces ({type, market, direction, text,
+// ...}) — one function, reused for both CA and SC, so SC:Verdict doesn't
+// grow its own copy of this text-building. marketLabelFn: engine-specific
+// display-label lookup (CA_MARKET_SHORT for TB: keys, SC_MARKET_LABELS
+// lookup for SC's bare pool-market ids).
+export function engineVerdictEntries(top, second, marketLabelFn) {
+  const entries = [];
+  if (!top) return entries;
+  entries.push({
+    type: "strongest-lean", market: top.market, holdoutHitRate: top.candidate.raw.holdoutHitRate,
+    direction: "positive", consensusGrade: top.consensusGrade,
+    predictiveStrength: top.candidate.sig.holdoutHR, reliability: top.candidate.scored.reliability, verifiedEdge: top.candidate.scored.edge,
+    text: `${marketLabelFn(top.market)} — Consensus ${top.consensusGrade}, holdout ${top.candidate.raw.holdoutHitRate}% (+${top.candidate.raw.holdoutLift}pp vs baseline).`,
+  });
+  if (second) {
+    entries.push({
+      type: "second-lean", market: second.market, holdoutHitRate: second.candidate.raw.holdoutHitRate,
+      direction: "positive", consensusGrade: second.consensusGrade,
+      predictiveStrength: second.candidate.sig.holdoutHR, reliability: second.candidate.scored.reliability, verifiedEdge: second.candidate.scored.edge,
+      text: `Also worth noting: ${marketLabelFn(second.market)} — Consensus ${second.consensusGrade}, holdout ${second.candidate.raw.holdoutHitRate}% (+${second.candidate.raw.holdoutLift}pp), a different market family.`,
+    });
+  }
+  return entries;
+}
+
 function computeFamilyConsensus(f, ctx) {
   // 2026-08-20 (priority per Alden — cross-competition mismatch guard was
   // missing from Consensus entirely). server.js's applyCrossMismatchGuard
@@ -7186,77 +7176,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       const scoreOf = (c, isAvoid) => caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f).verifiedEdge;
       // CA:Mix removed (2026-08-08) — this used to branch here on isMix into
       // a "best market across all of them" picker; now always the single-
-      // market path (previously the else branch).
-      let bestPositive, bestAvoid, marketLabel, family, scanMatches;
-      let caScanNoComplementAvoid = false; // set below only on the CA:Scan branch
-      if (caMarket === "CA:Scan") {
-        // CA:SCAN (2026-08-13) — dedupe cleanPositive/cleanAvoid down to one
-        // (the best-scoring) combo per market, same reduce this block always
-        // did per-market, just run across every market instead of one.
-        // cleanPositive/cleanAvoid already exclude contradictorySet markets
-        // (via mixEligible → originClean above), so a market can never land
-        // in both arrays at once — no positive/avoid collision to resolve.
-        const byMarket = new Map();
-        for (const c of cleanPositive) {
-          const cur = byMarket.get(c.market);
-          if (!cur || scoreOf(c, false) > scoreOf(cur, false)) byMarket.set(c.market, c);
-        }
-        const posGrouped = [...byMarket.values()];
-        byMarket.clear();
-        for (const c of cleanAvoid) {
-          const cur = byMarket.get(c.market);
-          if (!cur || scoreOf(c, true) > scoreOf(cur, true)) byMarket.set(c.market, c);
-        }
-        const avoidGrouped = [...byMarket.values()];
-        // Single ranked list across both directions — an avoid combo's
-        // "strength" is the mirror of its holdout HR (a 12% holdout HR avoid
-        // signal is as strong as an 88% positive one), so rank on that
-        // common scale rather than sorting positives and avoids separately.
-        // 2026-08-13 fix (Sterling report — Under 4.5/team-total-Over 0.5/
-        // Over 1.5 wrongly winning the scan): raw hit rate alone let those
-        // naturally-high-base-rate, lower-value markets outrank markets
-        // Sterling actually trusts more at a similar HR. Multiplying in
-        // caScanTierWeightOf fixes that — a Tier C market now needs a
-        // meaningfully higher HR to outrank a Tier A one, matching the same
-        // tier waterfall the genetic search already uses to select markets.
-        // Untiered markets (tierWeightOf → null, i.e. Draw) are dropped from
-        // the scan entirely rather than defaulted to some weight — same
-        // "drop it" rule validateGene already enforces on the search side.
-        scanMatches = [
-          ...posGrouped.map(c => ({ combo: c, isAvoid: false, tierWeight: caScanTierWeightOf(c.market), rank: 0 }))
-            .filter(m => m.tierWeight != null)
-            .map(m => ({ ...m, rank: (m.combo.holdoutHitRate ?? 0) * m.tierWeight })),
-          ...avoidGrouped.map(c => ({ combo: c, isAvoid: true, tierWeight: caScanTierWeightOf(c.market), rank: 0 }))
-            .filter(m => m.tierWeight != null)
-            .map(m => ({ ...m, rank: (100 - (m.combo.holdoutHitRate ?? 100)) * m.tierWeight })),
-        ].sort((a, b) => b.rank - a.rank);
-        if (!scanMatches.length) continue;
-        const top = scanMatches[0];
-        bestPositive = top.isAvoid ? null : top.combo;
-        bestAvoid = top.isAvoid ? top.combo : null;
-        marketLabel = top.combo.market.replace(/^TB:/, "");
-        // 2026-08-16 fix (Sterling report) — CA:Scan runs its own separate
-        // peak-market selection path, so the earlier CA:Verdict fix (see
-        // FAMILY_ID_COMPLEMENT comment near the top of the file) never
-        // touched it: an Avoid pattern winning the scan was being resolved
-        // straight through caResolveFamily's own-direction default and
-        // handed to getCustomPick as if it were a real pick, i.e. the Avoid
-        // pattern itself became the "peak market." Same fix as Verdict: an
-        // Avoid winner must resolve to its complement/opposite market, and
-        // if that market has no valid complement, it must NOT be promoted
-        // into a same-direction peak pick at all — caScanNoComplementAvoid
-        // makes the shared pick-construction block below fall back to a
-        // plain "Avoid: X" notice instead, exactly like CA:Verdict does.
-        const scanDefaultFamily = (CA_FAMILY_ALTERNATES[top.combo.market] || [SA_TO_FAMILY_ID[top.combo.market]])[0];
-        family = caResolveFamily(top.combo.market, pickMarketFamily);
-        if (top.isAvoid && family === scanDefaultFamily && FAMILY_ID_COMPLEMENT[scanDefaultFamily]) {
-          family = FAMILY_ID_COMPLEMENT[scanDefaultFamily];
-        }
-        caScanNoComplementAvoid = top.isAvoid && family === scanDefaultFamily;
-      } else {
+      // market path (previously the else branch). CA:Scan (2026-08-13 →
+      // retired 2026-08-21) used to be a second branch here, scanning every
+      // market with its own raw-HR × tier ranking. Deleted along with the
+      // market-picker entry (see CA_MARKET_LABELS) — Verdict's
+      // computeEngineVerdict does the same cross-market comparison now, with
+      // Wilson shrinkage/specificity/corroboration behind it, so a separate
+      // scan mode had nothing left to offer that Verdict didn't already do
+      // better. caScanNoComplementAvoid is gone with it — that flag only
+      // ever came out of the Scan branch.
+      let bestPositive, bestAvoid, marketLabel, family;
+      {
         // A single market can still have more than one VALID combo matching
         // this fixture at once (different thresholds) — score them too,
-
         // rather than just taking the first one off the array's holdout-HR
         // sort order (the same high-baseline-style bias, just at the
         // within-market level).
@@ -7272,17 +7204,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         marketLabel = caMarket.replace(/^TB:/, "");
         family = caResolveFamily(caMarket, pickMarketFamily);
       }
-      // caScanNoComplementAvoid is only ever true coming out of the CA:Scan
-      // branch above (an Avoid pattern won the scan with no valid opposite
-      // to flip to) — every other path leaves it false and behaves exactly
-      // as before.
-      const primaryPick = caScanNoComplementAvoid ? null : getCustomPick(f, family, C);
+      const primaryPick = getCustomPick(f, family, C);
       const flagged = !bestPositive;
-      const pick = caScanNoComplementAvoid
-        ? { label: `Avoid: ${marketLabel}`, prob: bestAvoid?.holdoutHitRate ?? null, odds: null, color: C.red, market: bestAvoid?.market }
-        : primaryPick
-          ? { ...primaryPick, color: flagged ? C.red : C.green }
-          : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.green };
+      const pick = primaryPick
+        ? { ...primaryPick, color: flagged ? C.red : C.green }
+        : { label: marketLabel, prob: 0, odds: null, color: flagged ? C.red : C.green };
       if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
       if (probFilter && pick.prob != null) {
         if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
@@ -7308,11 +7234,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         _caPositive: bestPositive ? [bestPositive] : [],
         _caAvoid: bestAvoid ? [bestAvoid] : [],
         _caFlagged: flagged,
-        // CA:SCAN — full ranked cross-market list, only ever populated on
-        // this branch. undefined everywhere else, so the existing badge
-        // rendering (which only ever reads _caPositive[0]/_caAvoid[0]) is
-        // untouched; only the new additive chip row below reads this.
-        _caScanAll: caMarket === "CA:Scan" ? scanMatches : undefined,
+        // _caScanAll retired along with CA:Scan (2026-08-21) — was only ever
+        // populated on that branch; nothing reads it anymore.
       });
     }
     out.sort((a, b) => {
@@ -7367,20 +7290,30 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return sf ? !sf.fn(f) : false;
       })) continue;
 
-      // ── SC:Verdict (2026-08-08) — same isolated-early-branch pattern
-      // CA:Verdict above uses, mirrored for SC. scResults[f.id].verdicts is
-      // already computed server-side (scComputeVerdicts) — resolveCAVerdictHeadline
-      // is generic (just {type,direction,text,market}), so this is the exact
-      // same promotion rule SCVerdictBlock on FMP uses, not a re-derivation —
-      // this list and FMP can't disagree. Duplicates the tail-end filters
-      // rather than falling through, same trade-off CA:Verdict makes.
+      // ── SC:Verdict (2026-08-21, rewired per Alden — "one universal
+      // system"): used to read scResults[f.id].verdicts, computed
+      // server-side by scComputeVerdicts (its own hand-copied re-
+      // implementation of CA's old caSafestScore-style ranking, no thesis
+      // grouping, no tier weight). Now calls computeEngineVerdict("sc", ...)
+      // — the literal same function CA:Verdict and Consensus run on — fed
+      // scResults[f.id].positive/.avoid (the full combo arrays, already
+      // fetched for Consensus's own SC integration). resolveCAVerdictHeadline
+      // is unchanged and still generic; engineVerdictEntries builds the same
+      // verdicts-array shape CA produces, so this list and FMP's SC block
+      // can share one code path once that's wired too. Duplicates the
+      // tail-end filters rather than falling through, same trade-off
+      // CA:Verdict makes.
       if (scMarket === "SC:Verdict") {
-        const verdicts = scResults[f.id]?.verdicts || [];
+        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m;
+        const { top: scTop, second: scSecond } = computeEngineVerdict(
+          "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
+        );
+        const verdicts = engineVerdictEntries(scTop, scSecond, scLabelOf);
         const headline = resolveCAVerdictHeadline(verdicts);
         if (!headline) { continue; } // no verdict at all for this fixture
         const isAvoidLean = headline.direction === "avoid";
         const scFamilyForHeadline = headline.market ? SC_MARKET_TO_FAMILY_ID[headline.market] : null;
-        const marketLabel = headline.market ? (SC_MARKET_LABELS.find(m => m.id === headline.market)?.label || headline.market) : "";
+        const marketLabel = headline.market ? scLabelOf(headline.market) : "";
         // 2026-08-16 fix — same bug/fix as CA:Verdict above, SC_MARKET_TO_
         // FAMILY_ID already maps onto the SAME family ids FAMILY_ID_
         // COMPLEMENT is keyed by, so no separate table needed here.
@@ -7422,119 +7355,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         continue;
       }
 
-      // ── SC:SCAN (2026-08-13) — same idea as CA:Scan: instead of narrowing
-      // to one market, surface every market that qualifies under whichever
-      // scMode is active, ranked on one shared scale. No caSafestScore-style
-      // corroboration pass here (SC has none — the server already decided
-      // favorable/unfavorable per market, this just stops narrowing that
-      // decision down to one market at a time), and no positive/avoid
-      // dedup-by-market needed for Standard mode since flags is already
-      // one entry per market. Mirrors scRows' own mode branching exactly so
-      // Scan can never disagree with what Standard/Strong/Emerging show for
-      // any single market.
-      if (scMarket === "SC:Scan") {
-        let scanMatches;
-        if (scMode === "strong") {
-          const byMarket = new Map();
-          for (const c of (scResults[f.id]?.positive || [])) {
-            if (!isStrongCA(c, false, scStrongParsed)) continue;
-            const cur = byMarket.get(c.market);
-            if (!cur || (c.holdoutHitRate ?? 0) > (cur.holdoutHitRate ?? 0)) byMarket.set(c.market, c);
-          }
-          const pos = [...byMarket.values()];
-          byMarket.clear();
-          for (const c of (scResults[f.id]?.avoid || [])) {
-            if (!isStrongCA(c, true, scStrongParsed)) continue;
-            const cur = byMarket.get(c.market);
-            if (!cur || (c.holdoutHitRate ?? 100) < (cur.holdoutHitRate ?? 100)) byMarket.set(c.market, c);
-          }
-          const avd = [...byMarket.values()];
-          // 2026-08-13 tier-weight fix — same reasoning as CA:Scan above.
-          scanMatches = [
-            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
-              .filter(m => m.tw != null).map(m => ({ ...m, rank: (m.holdoutHitRate ?? 0) * m.tw })),
-            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
-              .filter(m => m.tw != null).map(m => ({ ...m, rank: (100 - (m.holdoutHitRate ?? 100)) * m.tw })),
-          ].sort((a, b) => b.rank - a.rank);
-        } else if (scMode === "emerging") {
-          const avoidCeiling = 100 - scEmergingMinHR;
-          const byMarket = new Map();
-          for (const c of (scResults[f.id]?.emergingPositive || [])) {
-            if ((c.holdoutHitRate ?? 0) < scEmergingMinHR) continue;
-            const cur = byMarket.get(c.market);
-            if (!cur || (c.holdoutHitRate ?? 0) > (cur.holdoutHitRate ?? 0)) byMarket.set(c.market, c);
-          }
-          const pos = [...byMarket.values()];
-          byMarket.clear();
-          for (const c of (scResults[f.id]?.emergingAvoid || [])) {
-            if ((c.holdoutHitRate ?? 100) > avoidCeiling) continue;
-            const cur = byMarket.get(c.market);
-            if (!cur || (c.holdoutHitRate ?? 100) < (cur.holdoutHitRate ?? 100)) byMarket.set(c.market, c);
-          }
-          const avd = [...byMarket.values()];
-          scanMatches = [
-            ...pos.map(c => ({ market: c.market, isAvoid: false, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
-              .filter(m => m.tw != null).map(m => ({ ...m, rank: (m.holdoutHitRate ?? 0) * m.tw })),
-            ...avd.map(c => ({ market: c.market, isAvoid: true, holdoutHitRate: c.holdoutHitRate, holdoutLift: c.holdoutLift, tw: scScanTierWeightOf(c.market) }))
-              .filter(m => m.tw != null).map(m => ({ ...m, rank: (100 - (m.holdoutHitRate ?? 100)) * m.tw })),
-          ].sort((a, b) => b.rank - a.rank);
-        } else {
-          // Standard — flags is already one entry per market, just walk it
-          // instead of narrowing to scResults[f.id].flags[scMarket].
-          const flags = scResults[f.id]?.flags || {};
-          scanMatches = Object.entries(flags).map(([market, fl]) => {
-            const tw = scScanTierWeightOf(market);
-            return { market, isAvoid: fl.status !== "favorable", holdoutHitRate: fl.holdoutHitRate, holdoutLift: fl.holdoutLift, tw };
-          }).filter(m => m.tw != null)
-            .map(m => ({ ...m, rank: m.isAvoid ? (100 - (m.holdoutHitRate ?? 100)) * m.tw : (m.holdoutHitRate ?? 0) * m.tw }))
-            .sort((a, b) => b.rank - a.rank);
-        }
-        if (!scanMatches.length) continue;
-        const top = scanMatches[0];
-        const marketLabel = SC_MARKET_LABELS.find(m => m.id === top.market)?.label || top.market;
-        // 2026-08-16 fix (Sterling report) — same bug/fix as CA:Scan's mirror
-        // fix above, and the same pattern SC:Verdict already uses: an Avoid
-        // pattern winning the scan must resolve to its complement family
-        // before being usable as the peak pick, never straight through as
-        // the avoid market's own (same-direction) family. If no valid
-        // complement exists, fall back to a plain "Avoid: X" notice instead
-        // of fabricating a same-direction recommendation.
-        const scanFamilyForTop = SC_MARKET_TO_FAMILY_ID[top.market];
-        let topFamily = scanFamilyForTop;
-        if (top.isAvoid && topFamily && FAMILY_ID_COMPLEMENT[topFamily]) {
-          topFamily = FAMILY_ID_COMPLEMENT[topFamily];
-        }
-        const scanIsComplementFamily = top.isAvoid && topFamily !== scanFamilyForTop;
-        const scanNoComplementAvoid = top.isAvoid && !scanIsComplementFamily;
-        const primaryPick = scanNoComplementAvoid ? null : getCustomPick(f, topFamily, C);
-        const pick = scanNoComplementAvoid
-          ? { label: `Avoid: ${marketLabel}`, prob: top.holdoutHitRate ?? null, odds: null, color: C.red, market: top.market }
-          : primaryPick
-            ? { ...primaryPick, color: scanIsComplementFamily ? C.purple : (top.isAvoid ? C.red : C.purple) }
-            : { label: marketLabel, prob: 0, odds: null, color: top.isAvoid ? C.red : C.purple };
-        if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
-        if (probFilter && pick.prob != null) {
-          if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
-          if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
-        }
-        if (kickoffFilter && f.time) {
-          const [hh, mm] = f.time.split(":").map(Number);
-          const mins = hh * 60 + (mm || 0);
-          const crossesDay = getFixtureLocalDate(f) !== f.date;
-          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue
-          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue
-        }
-        if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
-        if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
-        if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
-        out.push({
-          f, pick,
-          _scFlag: { status: top.isAvoid ? "unfavorable" : "favorable", holdoutHitRate: top.holdoutHitRate, holdoutLift: top.holdoutLift },
-          _scFlagged: top.isAvoid,
-          _scScanAll: scanMatches,
-        });
-        continue;
-      }
+      // SC:Scan (2026-08-13 → retired 2026-08-21) — same reasoning as
+      // CA:Scan's retirement (see CA_MARKET_LABELS comment): tier weight is
+      // now inside computeFamilyConsensus/computeEngineVerdict itself, so a
+      // separate cross-market scan branch had nothing left to offer that
+      // SC:Verdict doesn't already do, with real Wilson shrinkage/
+      // specificity/corroboration behind it instead of raw HR × tier.
 
       // Standard vs Strong vs Emerging — mirrors CA's caMode split (minus the
       // pos/avoid direction split CA has, since SC has no direction
@@ -8244,7 +8070,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {caMarket && (
               <span style={{ fontSize:8,background:`${C.amber}20`,color:C.amber,border:`1px solid ${C.amber}40`,
                              borderRadius:4,padding:"1px 6px",fontWeight:800 }}>
-                {caMarket === "CA:Verdict" ? "Verdict" : caMarket === "CA:Scan" ? "Scan" : caMarket.replace(/^TB:/,"")}
+                {caMarket === "CA:Verdict" ? "Verdict" : caMarket.replace(/^TB:/,"")}
               </span>
             )}
             {caLoadingRow && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
@@ -8308,16 +8134,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 );
               })}
             </div>
-            {caMarket && caMarket !== "CA:Verdict" && caMarket !== "CA:Scan" && (
+            {caMarket && caMarket !== "CA:Verdict" && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing only fixtures matching a holdout-validated condition for <strong>{caMarket.replace(/^TB:/,"")}</strong>.
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
-              </div>
-            )}
-            {caMarket === "CA:Scan" && (
-              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
-                Showing every market that clears the Pattern Quality threshold below, for every fixture — not just one market at a time.
-                Each fixture is ranked by its strongest qualifying market; the rest are listed underneath it, best first.
               </div>
             )}
 
@@ -8544,7 +8364,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 );
               })}
             </div>
-            {scMarket && scMarket !== "SC:Verdict" && scMarket !== "SC:Scan" && (
+            {scMarket && scMarket !== "SC:Verdict" && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing fixtures where <strong>{SC_MARKET_LABELS.find(m => m.id === scMarket)?.label}</strong> has a settlement-condition flag. Unfavorable-only games (⚑) sort to the bottom.
               </div>
@@ -8552,12 +8372,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {scMarket === "SC:Verdict" && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing each fixture's single strongest settlement-condition verdict, whichever market it's on. Steer-away verdicts are marked ⚑ and sorted to the bottom.
-              </div>
-            )}
-            {scMarket === "SC:Scan" && (
-              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
-                Showing every market that clears the Pattern Quality threshold below, for every fixture — not just one market at a time.
-                Each fixture is ranked by its strongest qualifying market; the rest are listed underneath it, best first.
               </div>
             )}
             {/* ── STANDARD / STRONG / EMERGING (2026-08-04) — now mirrors
@@ -9128,7 +8942,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Rows */}
       <div style={{ display:"flex",flexDirection:"column",gap:2,paddingBottom:selectedIds.size > 0 ? 60 : 0 }}>
-        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged, _caScanAll, _scFlag, _scFlagged, _scScanAll }) => {
+        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged, _scFlag, _scFlagged }) => {
           const probColor = pick.prob >= 75 ? C.green : pick.prob >= 60 ? C.gold : C.muted;
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
@@ -9224,47 +9038,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                 </div>
-                {/* CA:SCAN (2026-08-13) — purely additive chip row: the headline
-                    match is already shown by the badge above (_caPositive[0]/
-                    _caAvoid[0]), so this only renders the REST of this fixture's
-                    qualifying markets, already ranked (scanMatches sort in
-                    caRows). Only appears when _caScanAll has more than the one
-                    headline entry — never touches the existing badge markup. */}
-                {_caScanAll?.length > 1 && (
-                  <div style={{ display:"flex",flexWrap:"wrap",gap:3,marginTop:3 }}>
-                    {_caScanAll.slice(1, 5).map((m, i) => (
-                      <span key={i} title={`${m.combo.key} — holdout ${m.combo.holdoutHitRate}%`}
-                        style={{ fontSize:6,color:m.isAvoid ? C.red : C.amber,
-                                 background:m.isAvoid ? `${C.red}12` : `${C.amber}12`,
-                                 border:`1px solid ${m.isAvoid ? C.red : C.amber}25`,
-                                 borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
-                        {m.isAvoid ? "⚠" : "✓"} {m.combo.market.replace(/^TB:/,"")} {m.combo.holdoutHitRate}%
-                      </span>
-                    ))}
-                    {_caScanAll.length > 5 && (
-                      <span style={{ fontSize:6,color:C.muted,padding:"1px 4px" }}>+{_caScanAll.length - 5} more</span>
-                    )}
-                  </div>
-                )}
-                {/* SC:SCAN (2026-08-13) — same additive pattern as CA:Scan
-                    above, adapted to SC's bare (non-TB:-prefixed) market ids
-                    via SC_MARKET_LABELS. */}
-                {_scScanAll?.length > 1 && (
-                  <div style={{ display:"flex",flexWrap:"wrap",gap:3,marginTop:3 }}>
-                    {_scScanAll.slice(1, 5).map((m, i) => (
-                      <span key={i} title={`${SC_MARKET_LABELS.find(l => l.id === m.market)?.label || m.market} — holdout ${m.holdoutHitRate}%`}
-                        style={{ fontSize:6,color:m.isAvoid ? C.red : C.purple,
-                                 background:m.isAvoid ? `${C.red}12` : `${C.purple}12`,
-                                 border:`1px solid ${m.isAvoid ? C.red : C.purple}25`,
-                                 borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
-                        {m.isAvoid ? "⚠" : "✓"} {SC_MARKET_LABELS.find(l => l.id === m.market)?.label || m.market} {m.holdoutHitRate}%
-                      </span>
-                    ))}
-                    {_scScanAll.length > 5 && (
-                      <span style={{ fontSize:6,color:C.muted,padding:"1px 4px" }}>+{_scScanAll.length - 5} more</span>
-                    )}
-                  </div>
-                )}
+                {/* CA:Scan/SC:Scan chip rows retired 2026-08-21 along with
+                    Scan itself — _caScanAll/_scScanAll are no longer
+                    populated by anything. */}
                 <div className="cb" style={{ marginTop:3 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
               <div style={{ textAlign:"right",fontSize:12,fontWeight:800,color:probColor }}>{Math.round(pick.prob)}%</div>
@@ -9354,38 +9130,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </span>
                   )}
                 </div>
-                {_caScanAll?.length > 1 && (
-                  <div style={{ display:"flex",flexWrap:"wrap",gap:4,marginTop:4 }}>
-                    {_caScanAll.slice(1, 6).map((m, i) => (
-                      <span key={i} title={`${m.combo.key} — holdout ${m.combo.holdoutHitRate}%`}
-                        style={{ fontSize:7,color:m.isAvoid ? C.red : C.amber,
-                                 background:m.isAvoid ? `${C.red}12` : `${C.amber}12`,
-                                 border:`1px solid ${m.isAvoid ? C.red : C.amber}25`,
-                                 borderRadius:3,padding:"1px 5px",flexShrink:0 }}>
-                        {m.isAvoid ? "⚠" : "✓"} {m.combo.market.replace(/^TB:/,"")} {m.combo.holdoutHitRate}%
-                      </span>
-                    ))}
-                    {_caScanAll.length > 6 && (
-                      <span style={{ fontSize:7,color:C.muted,padding:"1px 5px" }}>+{_caScanAll.length - 6} more</span>
-                    )}
-                  </div>
-                )}
-                {_scScanAll?.length > 1 && (
-                  <div style={{ display:"flex",flexWrap:"wrap",gap:4,marginTop:4 }}>
-                    {_scScanAll.slice(1, 6).map((m, i) => (
-                      <span key={i} title={`${SC_MARKET_LABELS.find(l => l.id === m.market)?.label || m.market} — holdout ${m.holdoutHitRate}%`}
-                        style={{ fontSize:7,color:m.isAvoid ? C.red : C.purple,
-                                 background:m.isAvoid ? `${C.red}12` : `${C.purple}12`,
-                                 border:`1px solid ${m.isAvoid ? C.red : C.purple}25`,
-                                 borderRadius:3,padding:"1px 5px",flexShrink:0 }}>
-                        {m.isAvoid ? "⚠" : "✓"} {SC_MARKET_LABELS.find(l => l.id === m.market)?.label || m.market} {m.holdoutHitRate}%
-                      </span>
-                    ))}
-                    {_scScanAll.length > 6 && (
-                      <span style={{ fontSize:7,color:C.muted,padding:"1px 5px" }}>+{_scScanAll.length - 6} more</span>
-                    )}
-                  </div>
-                )}
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
               <span style={{ fontSize:12,fontWeight:800,color:probColor,alignSelf:"center" }}>{Math.round(pick.prob)}%</span>
@@ -15629,7 +15373,23 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       }
       let scVerdictsForFixture = null;
       if ((sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && scResults) {
-        scVerdictsForFixture = scResults[f.id]?.verdicts || [];
+        // 2026-08-21 fix — this used to read scResults[f.id].verdicts
+        // wholesale (server-side scComputeVerdicts' strongest-lean/
+        // second-lean picks), which would now DISAGREE with what
+        // SC:Verdict's UI shows (rewired to computeEngineVerdict client-side
+        // — see scRows' SC:Verdict branch). Rebuilt the lean entries the
+        // same way here so veto-family extraction can't contradict the
+        // headline the user actually sees. The "contradiction" diagnostic
+        // (SC_CONTRADICTION_PAIRS) hasn't been ported client-side yet, so
+        // still reading that ONE entry type from the server response rather
+        // than silently dropping that veto signal — everything else from
+        // the server array is ignored now.
+        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m;
+        const { top: scTopV, second: scSecondV } = computeEngineVerdict(
+          "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
+        );
+        const serverContradictions = (scResults[f.id]?.verdicts || []).filter(v => v.type === "contradiction");
+        scVerdictsForFixture = [...engineVerdictEntries(scTopV, scSecondV, scLabelOf), ...serverContradictions];
         for (const m of extractVetoMarkets(scVerdictsForFixture)) {
           const fam = familyOfMarket("sc", m);
           if (fam != null) currentVetoFamilies.add(fam);
