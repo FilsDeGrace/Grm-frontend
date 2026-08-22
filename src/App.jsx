@@ -18286,7 +18286,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                      borderRadius:8,background:"#fff",transition:"left .15s" }} />
                     </button>
                   </div>
-                  )}
 
                   {customEngine === "manual" && (<>
                   {/* League filter — Custom tab only */}
