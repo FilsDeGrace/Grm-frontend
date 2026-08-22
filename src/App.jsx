@@ -2429,6 +2429,18 @@ const EXCLUDE_SELECTION_GROUPS = [
 function getExcludeSelectionId(pick, f) {
   const label  = (pick?.label ?? pick?.pick ?? "").trim();
   const market = pick?.market || "";
+  // Pattern/TGP SC legs use bare pool-market ids (e.g. over25) while the
+  // exclusion UI uses human labels ("Over 2.5"). Normalize those ids here
+  // so the same exclusion toggle works across Manual, Pattern Engine and TGP.
+  const scPoolExclusionId = {
+    homeWin: "homewin", draw: "draw", awayWin: "awaywin",
+    dc1X: "dc_1x", dcX2: "dc_x2",
+    bttsYes: "bttsyes", bttsNo: "bttsno",
+    over15: "Over 1.5", over25: "Over 2.5", over35: "Over 3.5",
+    under15: "Under 1.5", under25: "Under 2.5", under35: "Under 3.5", under45: "Under 4.5",
+    homeOver05: "home_tt", homeOver15: "home_tt", awayOver05: "away_tt", awayOver15: "away_tt",
+  };
+  if (scPoolExclusionId[market]) return scPoolExclusionId[market];
   const pLow   = label.toLowerCase();
   const home = f?.teams?.home, away = f?.teams?.away;
 
@@ -15330,11 +15342,11 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // 34% while the floor read 65%, because the floor never touched CA legs
   // at all. That's not a bug in the filter — but the control sits directly
   // under the full Sources row with everything checked, so it reads as a
-  // global floor. applyGlobalFloor makes that reading actually true, opt-in
-  // (default off) — turning it on suppresses low-model-confidence legs from
-  // every source, including CA/SA edges that intentionally diverge from the
-  // model. Off preserves the original per-source-only behavior exactly.
-  const [applyGlobalFloor, setApplyGlobalFloor] = useState(false);
+  // global floor. applyGlobalFloor makes that reading actually true — it
+  // suppresses low-model-confidence legs from every source, including CA/SA
+  // edges that intentionally diverge from the model. The UI can still turn
+  // the floor off explicitly when that behavior is desired.
+  const [applyGlobalFloor, setApplyGlobalFloor] = useState(true);
   // 2026-08-18 fix — same bug as TGPControls' identical block: fetching
   // scResults ONCE and freezing on `if (scResults) return` meant any
   // fixture that rotated into the list after the first fetch (new
@@ -15677,6 +15689,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         strategyLabel,
         strategyTags: [],
         isVolatile: isLeagueVolatile(l.league || ""),
+        modelProb: l.modelProb ?? null,
       };
     });
     onPoolChange(pool);
@@ -15726,9 +15739,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
             onChange={e => setModelMinProb(Math.max(50, Math.min(99, parseInt(e.target.value) || 65)))}
             className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
           <div style={{ fontSize: 8, color: C.muted }}>
-            {applyGlobalFloor
-              ? "% — the minimum model confidence a leg needs, from any source, to be included."
-              : "% — the minimum model confidence a leg needs to qualify through the Model source."}
+            "% — the minimum model confidence a leg needs, from any selected source, to be included."
           </div>
         </div>
       )}
@@ -15876,11 +15887,11 @@ function tgpApplyFixtureDiversity(rankedCandidates, maxPerFixture = 3) {
 // above, since shapes can number in the thousands but fixtures are a
 // handful of hundred at most.
 function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }) {
-  const index = new Map(); // key -> [{fixtureId, home, away, league, odds}]
-  const add = (key, f, odds) => {
+  const index = new Map(); // key -> [{fixtureId, home, away, league, odds, modelProb}]
+  const add = (key, f, odds, modelProb) => {
     if (!(odds > 1)) return; // unpriced legs can't be staked or combined into odds
     if (!index.has(key)) index.set(key, []);
-    index.get(key).push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league, odds });
+    index.get(key).push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league, odds, modelProb: Number.isFinite(Number(modelProb)) ? Number(modelProb) : null });
   };
   for (const f of fixtures || []) {
     if (!isBookableFixtureState(f, isPastDate)) continue; // same live/cancelled gate Pattern Engine uses
@@ -15902,7 +15913,9 @@ function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPattern
       const { positive } = matchCAConditions(f, appCaPatterns);
       for (const c of positive) {
         const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
-        add(`${c.market}/ca:${tgpComboKey(c)}`, f, odds);
+        const def = SA_MARKETS[c.market];
+        const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
+        add(`${c.market}/ca:${tgpComboKey(c)}`, f, odds, modelProb);
       }
     }
     if (appSaPatterns?.length) {
@@ -15911,7 +15924,8 @@ function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPattern
         const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
         const def = SA_MARKETS[mkt];
         const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
-        for (const p of positive) add(`${mkt}/sa:${tgpSaKey(p)}`, f, odds);
+        const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
+        for (const p of positive) add(`${mkt}/sa:${tgpSaKey(p)}`, f, odds, modelProb);
       }
     }
     // SC's matched combos come back from POST /api/sc-match's own
@@ -15924,7 +15938,8 @@ function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPattern
     if (scPositive?.length) {
       for (const c of scPositive) {
         const odds = SC_MARKET_ODDS_FIELD[c.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[c.market]] : null;
-        add(`${c.market}/sc:${tgpComboKey(c)}`, f, odds);
+        const modelProb = f.markets?.[c.market] ?? null;
+        add(`${c.market}/sc:${tgpComboKey(c)}`, f, odds, modelProb);
       }
     }
   }
@@ -16136,6 +16151,8 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   useEffect(() => { onModeChange?.(mode); }, [mode, onModeChange]);
   const [cutFilter, setCutFilter] = useState("all"); // "all" | 2 | 3
   const [sourceFilter, setSourceFilter] = useState(() => new Set(["ca", "sc", "sa"]));
+  const [modelMinProb, setModelMinProb] = useState(65);
+  const [applyModelFloor, setApplyModelFloor] = useState(true);
   const [minLift, setMinLift] = useState(5);
   const [minHoldoutN, setMinHoldoutN] = useState(15);
   const [marketFilter, setMarketFilter] = useState(null); // null = all markets
@@ -16227,10 +16244,12 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
         const dedupeKey = `${cand.fixtureId}|${marketPart}`;
         if (seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
+        if (applyModelFloor && (cand.modelProb == null || cand.modelProb < modelMinProb)) continue;
         pool.push({
           fixtureId: cand.fixtureId, game: `${cand.home || "?"} vs ${cand.away || "?"}`,
           pick: marketPart.replace(/^TB:/, ""), market: marketPart, league: cand.league,
           odds: cand.odds, conf: Math.round(stats.holdoutHR), empiricalRate: Math.round(stats.holdoutHR),
+          modelProb: cand.modelProb,
           score: Math.max(0, Math.min(1, (stats.holdoutHR + stats.lift) / 100)),
           strategyLabel: `TGP ${source.toUpperCase()}`, strategyTags: [], isVolatile: isLeagueVolatile(cand.league || ""),
           isRisky: riskyLegKeys.has(key),
@@ -16238,7 +16257,7 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       }
     }
     return pool;
-  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
+  }, [mode, filteredShapes, liveIndex, riskyLegKeys, modelMinProb, applyModelFloor]);
 
   useEffect(() => { if (mode === "decompose") onPoolChange(decomposedPool); }, [mode, decomposedPool, onPoolChange]);
   // Whole-shape mode builds complete tickets directly, not a pool for the
@@ -16462,6 +16481,22 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
           <input type="number" value={minHoldoutN} onChange={e => setMinHoldoutN(+e.target.value)} onFocus={e => e.target.select()} className="gi" />
         </div>
       </div>
+      {mode === "decompose" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em" }}>Min model prob</div>
+          <input type="number" value={modelMinProb} min={50} max={99}
+            onChange={e => setModelMinProb(Math.max(50, Math.min(99, parseInt(e.target.value) || 65)))}
+            onFocus={e => e.target.select()} className="gi" style={{ width: 58 }} />
+          <span style={{ fontSize: 8, color: C.muted }}>% — final live pick must meet this base-model confidence</span>
+          <button onClick={() => setApplyModelFloor(v => !v)}
+            style={{ fontSize: 8, padding: "4px 8px", borderRadius: 6, cursor: "pointer", fontFamily: C.font,
+              background: applyModelFloor ? `${C.accent}18` : "transparent",
+              color: applyModelFloor ? C.accent : C.muted,
+              border: `1px solid ${applyModelFloor ? C.accent + "50" : C.border}` }}>
+            {applyModelFloor ? "ON" : "OFF"}
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         {[{ id: "ca", label: "CA" }, { id: "sc", label: "SC" }, { id: "sa", label: "SA" }].map(s => (
           <button key={s.id} onClick={() => setSourceFilter(prev => {
@@ -17636,11 +17671,20 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setAutoMessage("No qualifying legs yet — try adding another source or lowering the model probability floor.");
         setBuilding(false); return;
       }
-      if (patternEnginePool.length < numParlays * 3) {
-        setAutoMessage(`⚠ Pool has ${patternEnginePool.length} qualifying leg${patternEnginePool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
+      const filteredPatternPool = patternEnginePool.filter(e => {
+        const f = fixtures.find(fx => fx.id === e.fixtureId);
+        const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
+        return !excluded;
+      });
+      if (filteredPatternPool.length < numParlays * 3) {
+        setAutoMessage(`⚠ Pool has ${filteredPatternPool.length} qualifying leg${filteredPatternPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
         setTimeout(() => setAutoMessage(""), 5000);
       }
-      const results = buildManualParlaysFromPool(patternEnginePool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
+      if (filteredPatternPool.length < 2) {
+        setAutoMessage("No qualifying Pattern Engine legs remain after the active market filters.");
+        setBuilding(false); return;
+      }
+      const results = buildManualParlaysFromPool(filteredPatternPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
       if (results.length === 0) {
         setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
       }
@@ -17669,11 +17713,20 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setAutoMessage("No live TGP shape legs match today — in Whole Shapes mode, use each shape's own \"Add to draft\" button instead of Build.");
         setBuilding(false); return;
       }
-      if (tgpPool.length < numParlays * 3) {
-        setAutoMessage(`⚠ Pool has ${tgpPool.length} qualifying leg${tgpPool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
+      const filteredTgpPool = tgpPool.filter(e => {
+        const f = fixtures.find(fx => fx.id === e.fixtureId);
+        const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
+        return !excluded;
+      });
+      if (filteredTgpPool.length < numParlays * 3) {
+        setAutoMessage(`⚠ Pool has ${filteredTgpPool.length} qualifying leg${filteredTgpPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
         setTimeout(() => setAutoMessage(""), 5000);
       }
-      const results = buildManualParlaysFromPool(tgpPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
+      if (filteredTgpPool.length < 2) {
+        setAutoMessage("No qualifying TGP legs remain after the active market filters.");
+        setBuilding(false); return;
+      }
+      const results = buildManualParlaysFromPool(filteredTgpPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
       if (results.length === 0) {
         setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
       }
@@ -18100,6 +18153,15 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   </>)}
 
+                  {/* Shared market exclusion: Manual + Pattern Engine + TGP Decompose. */}
+                  {!tgpWholeModeActive && (
+                    <ExcludeMarketsPanel
+                      excluded={parlayExcludedMarkets}
+                      toggle={toggleParlayExcludeMarket}
+                      clear={() => setParlayExcludedMarkets(new Set())}
+                    />
+                  )}
+
                   {/* SHARED across both engines — Stake, Target Odds, Tickets,
                       Max Same Market drive whichever pool is active (Manual's
                       rawPool or Pattern Engine's patternEnginePool).
@@ -18160,6 +18222,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       )}
                     </div>
                   </div>
+                  </>
 
                   {/* Leg order toggle — shared across Manual/Pattern Engine/
                       TGP Decompose, all three build through the same pool
@@ -18184,7 +18247,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                      borderRadius:8,background:"#fff",transition:"left .15s" }} />
                     </button>
                   </div>
-                  </>
                   )}
 
                   {customEngine === "manual" && (<>
@@ -18212,13 +18274,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       })()}
                     </div>
                   )}
-
-                  {/* H2-FIX: Market exclusion — collapsible, engine pool markets only */}
-                  <ExcludeMarketsPanel
-                    excluded={parlayExcludedMarkets}
-                    toggle={toggleParlayExcludeMarket}
-                    clear={() => setParlayExcludedMarkets(new Set())}
-                  />
 
                   {/* Research Mode toggle — pre-scores top candidates with live web context */}
                   <button onClick={() => setJarvisResearch(r => !r)}
