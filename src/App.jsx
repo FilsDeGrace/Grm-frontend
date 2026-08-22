@@ -18109,6 +18109,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       own onPoolChange, which reports an empty pool on
                       purpose while in Whole Shape mode). */}
                   {!tgpWholeModeActive && (
+                  <>
                   <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
                     <div>
                       <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Stake ($)</div>
@@ -18183,6 +18184,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                      borderRadius:8,background:"#fff",transition:"left .15s" }} />
                     </button>
                   </div>
+                  </>
                   )}
 
                   {customEngine === "manual" && (<>
