@@ -18261,7 +18261,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       )}
                     </div>
                   </div>
-                  </>
+                  </>)}
 
                   {/* Leg order toggle — shared across Manual/Pattern Engine/
                       TGP Decompose, all three build through the same pool
