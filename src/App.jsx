@@ -2087,16 +2087,16 @@ function consensusOddsFor(f, market) {
 // with) — that's the model being honest about single-engine evidence being
 // weaker, not a separate rule bolted on.
 const ENGINE_VERDICT_CLOSENESS = CONSENSUS_CONTEST_CLOSENESS; // one number, not a second copy of 0.85
-export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor) {
+export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor, opts = {}) {
   const ctx = engine === "sc"
     ? { saPatternsByMarket: null, caPositive: [], caAvoid: [], scPositive: positiveList || [], scAvoid: avoidList || [], modelProbFor }
     : { saPatternsByMarket: null, caPositive: positiveList || [], caAvoid: avoidList || [], scPositive: [], scAvoid: [], modelProbFor };
-  const families = computeFamilyConsensus(f, ctx);
+  const families = computeFamilyConsensus(f, ctx, opts);
   const picks = Object.values(families)
     .filter(v => v && v.strongest)
     .map(v => v.strongest)
     .sort((a, b) => b.netScore - a.netScore);
-  if (!picks.length) return { top: null, second: null };
+  if (!picks.length) return { top: null, second: null, rejected: families.__rejected || null };
   const top = picks[0];
   const second = picks.find(p => p !== top && p.market !== top.market && p.netScore >= top.netScore * ENGINE_VERDICT_CLOSENESS) ?? null;
   return { top, second };
@@ -2128,7 +2128,7 @@ export function engineVerdictEntries(top, second, marketLabelFn) {
   return entries;
 }
 
-function computeFamilyConsensus(f, ctx) {
+function computeFamilyConsensus(f, ctx, opts = {}) {
   // 2026-08-20 (priority per Alden — cross-competition mismatch guard was
   // missing from Consensus entirely). server.js's applyCrossMismatchGuard
   // already corrects the MODEL's own homeWin/draw/awayWin for a risk-flagged
@@ -2149,6 +2149,16 @@ function computeFamilyConsensus(f, ctx) {
   // field, no separate client-side pattern list to keep in sync.
   if (f.competitionRisk) return {};
   const { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor } = ctx;
+  // Debug/telemetry only (2026-08-22, Alden request) — opt-in, off by
+  // default, never read by the real admission logic below. Lets a caller
+  // ask "what almost qualified but got rejected, and by how much" instead
+  // of only ever seeing a silent `continue`. Attached as a non-family key on
+  // the returned object rather than changing the return shape, so every
+  // existing caller (Object.values(families).filter(v => v && v.strongest),
+  // families[familyId] lookups) keeps working unmodified — an array has no
+  // .strongest property, so it's harmlessly filtered out where not read.
+  const debug = !!opts.debug;
+  const rejected = debug ? [] : null;
   const families = {};
   for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
     const thesisMap = thesisMapFor(familyId, markets);
@@ -2226,7 +2236,17 @@ function computeFamilyConsensus(f, ctx) {
       }
 
       const netScore = fused.netScore - (avoidFused ? avoidFused.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
-      if (fused.candidate.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) continue;
+      if (fused.candidate.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) {
+        if (debug) {
+          rejected.push({
+            familyId, thesis, market: fused.market,
+            reliability: Math.round(fused.candidate.scored.reliability * 10) / 10,
+            edge: Math.round(netScore * 10) / 10,
+            supportingEngines: fused.supportingEngines,
+          });
+        }
+        continue;
+      }
 
       const odds = consensusOddsFor(f, fused.market);
       if (!(odds > 1)) continue; // no priceable leg, don't surface a lean that can't be booked
@@ -2254,6 +2274,7 @@ function computeFamilyConsensus(f, ctx) {
       ? { strongest: null, secondary: null, contested: true }
       : { strongest: resolvedTheses[0] ?? null, secondary: resolvedTheses[1] ?? null, contested: false };
   }
+  if (debug) families.__rejected = rejected;
   return families;
 }
 
@@ -3133,7 +3154,7 @@ function buildUniversalParley(fixtures, { targetOdds, historicalRates, budget = 
 // Manual mode — N non-overlapping tickets from the same pool.
 // Accepts a pre-built (and optionally pre-scored) pool directly.
 // Used by Research Mode so Jarvis adjustments aren't thrown away by a new pool build.
-function buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRates, budget = 0, budgetPct = 100, maxSameMarket = 2 }) {
+function buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRates, budget = 0, budgetPct = 100, maxSameMarket = 2, rankOrder = false }) {
   const target = parseFloat(targetOdds) || 5.0;
   const n      = Math.max(1, Math.min(numParlays || 2, 10));
   const totalStake = parseFloat((budget * (budgetPct / 100)).toFixed(2));
@@ -3145,18 +3166,23 @@ function buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRa
   for (let i = 0; i < n; i++) {
     const remaining = pool.filter(e => !globalUsed.has(e.fixtureId));
     if (remaining.length < 2) break;
-    const tierA = remaining.filter(e => e.score > 0.8);
-    const tierB = remaining.filter(e => e.score > 0.6 && e.score <= 0.8);
-    const tierC = remaining.filter(e => e.score <= 0.6);
-    const shuffled = [
-      ...shuffle(tierA),
-      ...shuffle(tierB),
-      ...shuffle(tierC),
-    ];
+    // rankOrder: deterministic, strongest-score-first — same candidate order
+    // every build; ticket #2+ simply continues down the ranked list past
+    // whatever ticket #1 already used. Default (false) keeps the original
+    // tier-banded shuffle (score >0.8 / 0.6-0.8 / <=0.6, shuffled within each
+    // band) so repeat builds vary instead of always surfacing the same legs.
+    const ordered = rankOrder
+      ? [...remaining].sort((a, b) => b.score - a.score)
+      : (() => {
+          const tierA = remaining.filter(e => e.score > 0.8);
+          const tierB = remaining.filter(e => e.score > 0.6 && e.score <= 0.8);
+          const tierC = remaining.filter(e => e.score <= 0.6);
+          return [...shuffle(tierA), ...shuffle(tierB), ...shuffle(tierC)];
+        })();
     const localUsed = new Set(globalUsed);
     const marketCount = {}; const saturatedMarkets = new Set();
     const legs = []; let prod = 1.0; let hitTarget = false;
-    for (const entry of shuffled) {
+    for (const entry of ordered) {
       if (localUsed.has(entry.fixtureId)) continue;
       const mkt = entry.market; const mktCount = marketCount[mkt] || 0;
       if (mktCount >= maxSameMarket) { saturatedMarkets.add(mkt); continue; }
@@ -7446,6 +7472,59 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     return out;
   }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scEmergingMinHR, scStrongParsed]);
 
+  // ── VERDICT COVERAGE DIAGNOSTIC (2026-08-22, Alden request) ──────────────
+  // CA:Verdict/SC:Verdict's own "N matches" count only ever shows fixtures
+  // that cleared the FULL admission bar (SIGNAL_MIN_RELIABILITY/
+  // SIGNAL_MIN_EDGE inside computeEngineVerdict) — it can't tell you whether
+  // a low count means "the engine had data and rejected most of it" (real
+  // strictness) or "the engine had nothing to work with for most of today's
+  // fixtures" (a coverage gap upstream of the scoring math entirely — those
+  // are different problems needing different fixes). This counts, separately
+  // from the scoring pipeline, how many fixtures had ANY raw positive/avoid
+  // signal at all before Consensus ever touches it, AND — for SC specifically,
+  // since that's the one coming back at 0 — how close the closest-rejected
+  // candidate actually got to the admission bar (computeFamilyConsensus's
+  // new opt-in debug:true param, see its own comment). That distinguishes
+  // "everything is failing by a hair" (bar is arguably too strict) from
+  // "everything is failing by a mile" (a real calibration gap, not a
+  // threshold-tuning problem). Only computed when a Verdict mode is active —
+  // this re-runs matching/scoring per fixture, which the real rows already
+  // do, so it's skipped otherwise rather than paying the cost every render.
+  const verdictCoverageDiag = useMemo(() => {
+    const wantCA = caMarket === "CA:Verdict" && !!caPatternsRow;
+    const wantSC = scMarket === "SC:Verdict";
+    if (!wantCA && !wantSC) return null;
+    let caHasData = 0, scHasData = 0;
+    let scCleared = 0;
+    let scClosestMiss = null; // rejected candidate with the smallest combined shortfall
+    for (const f of fixtures) {
+      if (wantCA) {
+        const { positive, avoid } = matchCAConditions(f, caPatternsRow);
+        if ((positive?.length || 0) > 0 || (avoid?.length || 0) > 0) caHasData++;
+      }
+      if (wantSC) {
+        const p = scResults[f.id]?.positive, a = scResults[f.id]?.avoid;
+        if ((p?.length || 0) > 0 || (a?.length || 0) > 0) scHasData++;
+        const { top, rejected } = computeEngineVerdict("sc", f, p, a, caModelProbFor, { debug: true });
+        if (top) { scCleared++; continue; }
+        for (const r of (rejected || [])) {
+          // Shortfall = how far below EACH floor it fell, in the floor's own
+          // units (reliability points, edge points) — summed so a candidate
+          // missing both by a little ranks closer than one missing either by
+          // a lot. Only candidates already past both floors are cleared
+          // (counted in scCleared above), so every r here failed at least one.
+          const relShortfall = Math.max(0, SIGNAL_MIN_RELIABILITY - r.reliability);
+          const edgeShortfall = Math.max(0, SIGNAL_MIN_EDGE - r.edge);
+          const shortfall = relShortfall + edgeShortfall;
+          if (!scClosestMiss || shortfall < scClosestMiss.shortfall) {
+            scClosestMiss = { ...r, shortfall, game: `${f.teams?.home || "?"} vs ${f.teams?.away || "?"}` };
+          }
+        }
+      }
+    }
+    return { wantCA, wantSC, caHasData, scHasData, scCleared, scClosestMiss, total: fixtures.length };
+  }, [caMarket, caPatternsRow, scMarket, scResults, fixtures]);
+
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
   // market (given whatever Mode/Direction each row currently has set; this is
@@ -8860,6 +8939,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </button>
             );
           })()}
+          {verdictCoverageDiag && (
+            <span style={{ fontSize:8,color:C.muted }}>
+              {verdictCoverageDiag.wantCA && `CA: ${verdictCoverageDiag.caHasData}/${verdictCoverageDiag.total} fixtures had any pattern data · ${displayRows.length} cleared to a verdict`}
+              {verdictCoverageDiag.wantSC && (() => {
+                const m = verdictCoverageDiag.scClosestMiss;
+                const base = `SC: ${verdictCoverageDiag.scHasData}/${verdictCoverageDiag.total} fixtures had any pattern data · ${verdictCoverageDiag.scCleared} cleared to a verdict`;
+                if (!m) return base;
+                return `${base} · closest miss: ${(m.market||"").replace(/^TB:/,"")} on ${m.game} — reliability ${m.reliability} (need ${SIGNAL_MIN_RELIABILITY}), edge ${m.edge} (need ${SIGNAL_MIN_EDGE})`;
+              })()}
+            </span>
+          )}
           {selectedIds.size > 0 && (
             <span style={{ display:"flex",alignItems:"center",gap:8 }}>
               <span style={{ fontSize:9,fontWeight:800,color:C.edge }}>{selectedIds.size} selected</span>
@@ -16971,6 +17061,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // instead of shown but inert.
   const [tgpMode, setTgpMode] = useState("decompose"); // "decompose" | "whole"
   const tgpWholeModeActive = customEngine === "tgp" && tgpMode === "whole";
+  // Leg order toggle (2026-08-22, Alden request) — shared across Manual/
+  // Pattern Engine/TGP Decompose since all three route through the same
+  // buildManualParlaysFromPool. Off (default) = original tier-banded shuffle
+  // (varied builds). On = deterministic strongest-score-first order, same
+  // result every time for the same pool.
+  const [rankOrderMode, setRankOrderMode] = useState(false);
   const [focusFixture, setFocus] = useState(null);
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
@@ -17544,7 +17640,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setAutoMessage(`⚠ Pool has ${patternEnginePool.length} qualifying leg${patternEnginePool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
         setTimeout(() => setAutoMessage(""), 5000);
       }
-      const results = buildManualParlaysFromPool(patternEnginePool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity });
+      const results = buildManualParlaysFromPool(patternEnginePool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
       if (results.length === 0) {
         setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
       }
@@ -17577,7 +17673,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setAutoMessage(`⚠ Pool has ${tgpPool.length} qualifying leg${tgpPool.length!==1?"s":""} for ${numParlays} tickets — some tickets may share legs.`);
         setTimeout(() => setAutoMessage(""), 5000);
       }
-      const results = buildManualParlaysFromPool(tgpPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity });
+      const results = buildManualParlaysFromPool(tgpPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
       if (results.length === 0) {
         setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
       }
@@ -17612,7 +17708,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         setTimeout(() => setAutoMessage(""), 5000);
       }
       const pool    = await applyJarvisPreScore(rawPool);
-      const results = buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity });
+      const results = buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
       setTickets(results);
     }
     setBuilding(false);
@@ -18062,6 +18158,30 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                         </div>
                       )}
                     </div>
+                  </div>
+
+                  {/* Leg order toggle — shared across Manual/Pattern Engine/
+                      TGP Decompose, all three build through the same pool
+                      builder. Off = varied builds (default). On = ticket
+                      always fills from strongest score down, deterministic. */}
+                  <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",
+                                background:C.faint,border:`1px solid ${C.border}`,borderRadius:8,
+                                padding:"9px 12px",marginBottom:12 }}>
+                    <div>
+                      <div style={{ fontSize:9,color:C.text,fontWeight:700 }}>Rank Order</div>
+                      <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>
+                        {rankOrderMode ? "Fills tickets strongest-score-first, same order every build." : "Fills tickets from a shuffled mix for variety between builds."}
+                      </div>
+                    </div>
+                    <button onClick={() => setRankOrderMode(v => !v)}
+                      style={{ width:38,height:20,borderRadius:10,border:`1px solid ${C.border}`,
+                               background:rankOrderMode?C.accent:C.border,position:"relative",cursor:"pointer",
+                               flexShrink:0,padding:0 }}
+                      aria-label="Toggle deterministic rank order"
+                      title={rankOrderMode ? "Rank order: on" : "Rank order: off"}>
+                      <span style={{ position:"absolute",top:1,left:rankOrderMode?19:1,width:16,height:16,
+                                     borderRadius:8,background:"#fff",transition:"left .15s" }} />
+                    </button>
                   </div>
                   )}
 
