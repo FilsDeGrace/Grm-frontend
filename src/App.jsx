@@ -1914,14 +1914,33 @@ function corroborationWeight(rank, strengthClass) {
 // it"). Per Alden: tier logic stays IDENTICAL everywhere, so Draw is now
 // excluded from Consensus/Verdict too, not just Scan. Real behavior change,
 // not a side effect to gloss over.
-function bestEngineCandidateForThesis(engine, candidates, isAvoid, modelProb) {
+function bestEngineCandidateForThesis(engine, candidates, isAvoid, modelProb, onDebugReject) {
   let best = null;
   for (const cand of candidates) {
     const tier = tierWeightOf(engine, cand.market);
-    if (tier == null) continue;
+    if (tier == null) {
+      if (onDebugReject) onDebugReject({ engine, market: cand.market, raw: cand.raw, reason: "no-tier", reliability: null, edge: null });
+      continue;
+    }
     const sig = normalizeSignal(engine, cand.raw, isAvoid);
     const scored = scoreSignal(sig, isAvoid, modelProb);
-    if (!scored || scored.reliability < SIGNAL_MIN_RELIABILITY) continue;
+    if (!scored) {
+      if (onDebugReject) onDebugReject({ engine, market: cand.market, raw: cand.raw, reason: "unscorable", reliability: null, edge: null });
+      continue;
+    }
+    if (scored.reliability < SIGNAL_MIN_RELIABILITY) {
+      // IMPORTANT: this is where the old diagnostic went blind.
+      // Candidates below the reliability floor were silently discarded BEFORE
+      // computeFamilyConsensus could record its admission rejection.
+      // In debug mode, preserve the scored near-miss so Verdict diagnostics can
+      // distinguish "failed reliability" from "passed reliability but failed edge".
+      if (onDebugReject) onDebugReject({
+        engine, market: cand.market, raw: cand.raw, reason: "reliability",
+        reliability: Math.round(scored.reliability * 10) / 10,
+        edge: Math.round(scored.edge * 10) / 10,
+      });
+      continue;
+    }
     const thesisScore = scored.score * cand.specificity * tier;
     if (!best || thesisScore > best.thesisScore) {
       best = { engine, raw: cand.raw, market: cand.market, specificity: cand.specificity, tier, sig, scored, thesisScore };
@@ -2215,7 +2234,15 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       const modelProb = modelProbForThesis(thesis);
       const perEngineBest = [];
       for (const [engine, candidates] of byEngine) {
-        const best = bestEngineCandidateForThesis(engine, candidates, false, modelProb);
+        const best = bestEngineCandidateForThesis(
+          engine, candidates, false, modelProb,
+          debug ? (r) => rejected.push({
+            familyId, thesis, market: r.market,
+            reliability: r.reliability, edge: r.edge,
+            supportingEngines: [engine], reason: r.reason,
+            avoid: false,
+          }) : null
+        );
         if (best) perEngineBest.push(best);
       }
       if (!perEngineBest.length) continue;
@@ -2229,7 +2256,15 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       if (avoidByEngine) {
         const perEngineAvoid = [];
         for (const [engine, candidates] of avoidByEngine) {
-          const best = bestEngineCandidateForThesis(engine, candidates, true, modelProb);
+          const best = bestEngineCandidateForThesis(
+            engine, candidates, true, modelProb,
+            debug ? (r) => rejected.push({
+              familyId, thesis, market: r.market,
+              reliability: r.reliability, edge: r.edge,
+              supportingEngines: [engine], reason: r.reason,
+              avoid: true,
+            }) : null
+          );
           if (best) perEngineAvoid.push(best);
         }
         if (perEngineAvoid.length) avoidFused = fuseThesisEvidence(perEngineAvoid);
@@ -7520,6 +7555,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const { top, rejected } = computeEngineVerdict("sc", f, p, a, caModelProbFor, { debug: true });
         if (top) { scCleared++; continue; }
         for (const r of (rejected || [])) {
+          // Only scored candidates can be ranked as a quantitative near-miss.
+          // `no-tier`/`unscorable` debug records are useful for diagnosis but
+          // have no meaningful reliability/edge shortfall to compare.
+          if (!Number.isFinite(r.reliability) || !Number.isFinite(r.edge)) continue;
           // Shortfall = how far below EACH floor it fell, in the floor's own
           // units (reliability points, edge points) — summed so a candidate
           // missing both by a little ranks closer than one missing either by
