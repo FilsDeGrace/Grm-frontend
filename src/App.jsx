@@ -2270,13 +2270,27 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
         if (perEngineAvoid.length) avoidFused = fuseThesisEvidence(perEngineAvoid);
       }
 
-      const netScore = fused.netScore - (avoidFused ? avoidFused.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
-      if (fused.candidate.scored.reliability < SIGNAL_MIN_RELIABILITY || netScore < SIGNAL_MIN_EDGE) {
+      // ADMISSION FIX (2026-08-22): tier/specificity are ranking weights, not
+      // statistical confidence. The previous version multiplied the raw edge
+      // by `specificity * tier` and then used that discounted number as the
+      // admission gate. That made a perfectly valid Tier-B/C signal need a
+      // much larger real edge to become a verdict (e.g. Tier-C 0.60 meant a
+      // 6-point edge had to be ~10 points before it could clear the same 6-point
+      // bar). This was silently converting a market-quality ranking weight into
+      // a second confidence threshold and is a major reason Verdict coverage
+      // collapsed. Keep tier/specificity in `thesisScore` for choosing/ranking
+      // candidates, but gate the actual signal on the candidate's own reliability
+      // and raw edge. Contradiction remains a soft penalty only for ranking.
+      const baseReliability = fused.candidate.scored.reliability;
+      const baseEdge = fused.candidate.scored.edge;
+      const netAdmissionEdge = baseEdge - (avoidFused ? avoidFused.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
+      const netRankScore = fused.netScore - (avoidFused ? avoidFused.netScore * SIGNAL_CONTRADICTION_PENALTY : 0);
+      if (baseReliability < SIGNAL_MIN_RELIABILITY || netAdmissionEdge < SIGNAL_MIN_EDGE) {
         if (debug) {
           rejected.push({
             familyId, thesis, market: fused.market,
-            reliability: Math.round(fused.candidate.scored.reliability * 10) / 10,
-            edge: Math.round(netScore * 10) / 10,
+            reliability: Math.round(baseReliability * 10) / 10,
+            edge: Math.round(netAdmissionEdge * 10) / 10,
             supportingEngines: fused.supportingEngines,
           });
         }
@@ -2287,7 +2301,7 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       if (!(odds > 1)) continue; // no priceable leg, don't surface a lean that can't be booked
 
       resolvedTheses.push({
-        thesis, market: fused.market, odds, netScore, candidate: fused.candidate,
+        thesis, market: fused.market, odds, netScore: netRankScore, candidate: fused.candidate,
         consensusGrade: fused.consensusGrade, supportingEngines: fused.supportingEngines,
         hadContradiction: !!avoidFused,
       });
