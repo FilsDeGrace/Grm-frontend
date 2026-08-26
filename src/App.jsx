@@ -5,6 +5,27 @@ import CodeAnalyzer from "./CodeAnalyzer";
 import ChatLayout from "./ChatLayout";
 import { SERVER, LEAGUE_RANK, POOL_MIN_EMPIRICAL_RATE, POOL_SCORE_P_EXP } from "./config";
 export { SERVER };
+import {
+  isBookableFixtureState,
+  SA_MARKETS, SC_MARKET_ODDS_FIELD,
+  caOddsFor, matchCAConditions, matchSAPatterns,
+  tgpShapeSignature,
+} from "./tgp-v1-live.mjs";
+// 2026-08-25 extraction: this whole block used to be defined inline here.
+// Moved to tgp-v1-live.mjs so server.js can import the exact same matching
+// engine instead of waiting on the client to POST its own client-computed
+// V1 lock once a day — see that file's header comment for the full reason.
+// 2026-08-26: computeTgpLiveIndex/tgpAssignDistinctFixtures/
+// tgpAssignStackFixtures/tgpApplyFixtureDiversity/tgpComboKey/tgpSaKey/
+// caExtractDims/caConditionMatches/computeSAFeatures/
+// FIXTURE_ALWAYS_BLOCKED_STATES/FIXTURE_FINISHED_STATES/normalizeFixtureState
+// dropped from this import — TGPControls no longer computes any of this
+// client-side (see server.js's buildTgpV1LiveContext/computeTgpV1Output),
+// and nothing else in this file called them directly; they're still in
+// tgp-v1-live.mjs for server.js and for their own internal use within that
+// file (e.g. matchSAPatterns still calls computeSAFeatures locally there).
+// Re-exported below for anything importing these directly from App.jsx.
+export { SC_MARKET_ODDS_FIELD, matchCAConditions };
 import { THEMES, THEME_MAP, loadSavedTheme, saveTheme, clampR } from "./themes";
 import FullModelPage from "./FullModelPage";
 import { FAB_FEATURE_TIPS, tipReadDuration } from "./jarvisStore";
@@ -519,30 +540,11 @@ const CUSTOM_FAMILIES = [
 // a pattern during training matches it here too. Admin-only feature.
 // ══════════════════════════════════════════════════════════════════════════
 
-// Market name → how to read its probability/odds off a live fixture.
-const SA_MARKETS = {
-  "TB:Over 1.5":      { probKey:"over15",  oddsKey:"over15odds"  },
-  "TB:Over 2.5":      { probKey:"over25",  oddsKey:"over25odds"  },
-  "TB:Under 3.5":     { probKey:"under35", oddsKey:"under35odds" },
-  "TB:Under 4.5":     { probKey:"under45", oddsKey:"under45odds" },
-  "TB:BTTS":          { probKey:"bttsYes", oddsKey:"bttsYesOdds" },
-  "TB:DC1X":          { computeProb: m => (+(m.homeWin??0)) + (+(m.draw??0)), oddsKey:"dc1X" },
-  "TB:DCX2":          { computeProb: m => (+(m.draw??0)) + (+(m.awayWin??0)), oddsKey:"dcX2" },
-  "TB:1X2-Home":      { probKey:"homeWin", oddsKey:"o1" },
-  "TB:1X2-Draw":      { probKey:"draw",    oddsKey:"oX" },
-  "TB:1X2-Away":      { probKey:"awayWin", oddsKey:"o2" },
-  "TB:Home Over 0.5": { probKey:"homeOver05", oddsKey:null },
-  "TB:Home Over 1.5": { probKey:"homeOver15", oddsKey:null },
-  "TB:Away Over 0.5": { probKey:"awayOver05", oddsKey:null },
-  "TB:Away Over 1.5": { probKey:"awayOver15", oddsKey:null },
-  // PE Mix — virtual view: each fixture shows whichever gated market PE assigned
-  // as its home market (strongest SA signal for that game today). Not a real market
-  // key — handled as a special case in the saRows memo below.
-  "PE:Mix":           { _isPEMix: true },
-};
+// SA_MARKETS now imported from ./tgp-v1-live.mjs (2026-08-25 extraction) —
+// see the import block near the top of this file.
 const SA_MARKET_LABELS = [...Object.keys(SA_MARKETS)].map(id => ({
   id,
-  label: id === "PE:Mix" ? "Mix" : id.replace(/^TB:/, ""),
+  label: id.replace(/^TB:/, ""),
 }));
 
 // Selecting an SA Pattern market should make the normal Pick Market filter
@@ -664,7 +666,7 @@ for (const alts of Object.values(CA_FAMILY_ALTERNATES)) {
 }
 
 // CA row market list — same 13 TB: market strings as SA (CA and SA mine the
-// identical 14-market scope, minus PE:Mix which is SA-specific), plus its
+// identical 14-market scope), plus its
 // own "CA:Verdict" virtual entry. Reuses SA_TO_FAMILY_ID's keys directly
 // rather than a second hardcoded list of the same 13 strings.
 // CA:Mix removed (2026-08-08) — was a "best market across all of them" view;
@@ -683,228 +685,15 @@ const CA_MARKET_LABELS = [...Object.keys(SA_TO_FAMILY_ID), "CA:Verdict"].map(id 
   id, label: id === "CA:Verdict" ? "Verdict" : id.replace(/^TB:/, ""),
 }));
 
-function saTheReadToTBMarket(anchor) {
-  if (!anchor) return null;
-  const mkt = anchor.market, dcV = anchor.dcVariant;
-  if (mkt === "DC") return dcV === "1X" ? "TB:DC1X" : dcV === "X2" ? "TB:DCX2" : null;
-  const MAP = {
-    "Over 1.5":"TB:Over 1.5","Over 2.5":"TB:Over 2.5","Under 3.5":"TB:Under 3.5","Under 4.5":"TB:Under 4.5",
-    "BTTS":"TB:BTTS","Home Over 0.5":"TB:Home Over 0.5","Away Over 0.5":"TB:Away Over 0.5",
-    "Home Win":"TB:1X2-Home","Away Win":"TB:1X2-Away","Draw":"TB:1X2-Draw",
-  };
-  return MAP[mkt] ?? null;
-}
-
-const saProbBand = p => p>=90?"90+":p>=85?"85-90":p>=80?"80-85":p>=75?"75-80":p>=70?"70-75":p>=65?"65-70":"<65";
-const saCalBand = w => w==null?"unknown":w>=80?"80+":w>=60?"60-80":w>=40?"40-60":w>=20?"20-40":"<20";
-const saSeasonBand = n => !n?"unknown":n>=30?"30+":n>=20?"20-30":n>=8?"8-20":"<8";
-const saGamesUsedBand = n => !n?"unknown":n>=60?"60+":n>=30?"30-60":n>=15?"15-30":"<15";
-const saLeagueTier = rank => !rank?"unknown":rank<=10?"elite":rank<=20?"top":rank<=50?"mid":"lower";
-const saXgRatioBand = (h,a) => { if(!h||!a||h<=0||a<=0) return "unknown"; const r=Math.max(h/a,a/h); return r>=3?"3+":r>=2?"2-3":r>=1.5?"1.5-2":"<1.5"; };
-const saTotalXGBand = t => !t||t<=0?"unknown":t>=4?"4+":t>=3?"3-4":t>=2?"2-3":"<2";
-const saOddsDiscrepBand = (modelProb, bkOdds) => {
-  if (!bkOdds || bkOdds<=1) return "no-bk";
-  const bkP = (1/bkOdds)*100, d = modelProb - bkP;
-  return d>15?"strong-edge":d>5?"mild-edge":d>-5?"aligned":d>-15?"mild-against":"strong-against";
-};
-const saTablePosBand = pos => pos==null?"unknown":pos<=3?"top3":pos<=6?"top6":pos<=10?"mid":"bottom";
-const saPosDiffBand  = d => d==null?"unknown":d<=3?"close":d<=7?"mid":"large";
-const saBacktestWtBand = w => w==null?"unknown":w>=50?"50+":w>=30?"30-50":w>=15?"15-30":"<15";
-
-// Computes the same feature dimensions strategy-analyst.mjs mined patterns
-// against, off a LIVE fixture instead of a snapshot file. Returned object is
-// keyed identically to sa-patterns.json's `conditions`, values stringified
-// the same way (DIMS in the miner wraps booleans/bands in String()).
-function computeSAFeatures(f, market) {
-  const def = SA_MARKETS[market];
-  if (!def) return null;
-  const m = f.markets || {};
-  const prob   = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
-  const bkOdds = def.oddsKey ? +(f.odds?.[def.oddsKey] ?? 0) : 0;
-
-  const hXG = +(m.homeXG ?? 0), aXG = +(m.awayXG ?? 0);
-  const tot = hXG + aXG, gap = Math.abs(hXG - aXG);
-
-  const calW   = m._calibrationWeight ?? null;
-  const sGames = m._seasonGames ?? null;
-  const gUsed  = m._gamesUsed ?? null;
-  const btW    = m._backtestWeight ?? null;
-  const isLowConf = !!(m._lowConfidence ?? false);
-
-  const lRank = f.leagueRank ?? null;
-  const isVol = !!(f.volatileLeague ?? false);
-
-  const hAtk = +(m.homeAttackStrength ?? 0), aAtk = +(m.awayAttackStrength ?? 0);
-  const hDef = +(m.homeDefenceStrength ?? 0), aDef = +(m.awayDefenceStrength ?? 0);
-
-  const tp = f.tablePosition || {};
-  const hPos = tp.homePosition ?? null, aPos = tp.awayPosition ?? null;
-  const posDiff = (hPos!=null && aPos!=null) ? Math.abs(hPos-aPos) : null;
-
-  const hSt = f.teamStats?.home || {}, aSt = f.teamStats?.away || {};
-
-  const readAnchor     = f.theRead?.anchor;
-  const readStrong     = !!(readAnchor?.strong ?? false);
-  const readTBMkt      = saTheReadToTBMarket(readAnchor);
-  const readMatchesMkt = readTBMkt === market;
-
-  const o25 = +(m.over25 ?? 0), btts = +(m.bttsYes ?? m.btts ?? 0), draw = +(m.draw ?? 0);
-  const tags = f.strategyTags || [];
-
-  return {
-    probBand: saProbBand(prob),
-    leagueTier: saLeagueTier(lRank),
-    isEliteLeague: String(lRank!=null && lRank<999 && lRank<=10),
-    isTopLeague:   String(lRank!=null && lRank<999 && lRank<=20),
-    isVolatile: String(isVol),
-    country: f.country || "unknown",
-    calBand: saCalBand(calW),
-    isHighCalib: String(calW!=null && calW>=70),
-    gamesUsedBand: saGamesUsedBand(gUsed),
-    isLowConf: String(isLowConf),
-    backtestWtBand: saBacktestWtBand(btW),
-    seasonBand: saSeasonBand(sGames),
-    isLateSeason: String(sGames!=null && sGames>30),
-    isEarlySeason: String(sGames!=null && sGames<8),
-    xgRatioBand: saXgRatioBand(hXG, aXG),
-    totalXGBand: saTotalXGBand(tot),
-    xgBalanced: String(gap < 0.5),
-    xgDomHome: String(hXG>0 && aXG>0 && hXG>=aXG*2 && gap>=1),
-    xgDomAway: String(hXG>0 && aXG>0 && aXG>=hXG*2 && gap>=1),
-    highTotalXG: String(tot >= 3),
-    lowTotalXG: String(tot > 0 && tot < 1.5),
-    xgSourceType: f.xgSource || "unknown",
-    homeAttackStrong: String(hAtk >= 1.3),
-    awayAttackStrong: String(aAtk >= 1.3),
-    homeDefenceWeak: String(hDef >= 1.2),
-    awayDefenceWeak: String(aDef >= 1.2),
-    homeTablePos: saTablePosBand(hPos),
-    awayTablePos: saTablePosBand(aPos),
-    tablePosDiff: saPosDiffBand(posDiff),
-    homeCsHigh: String((hSt.csRate ?? -1) >= 40),
-    awayCsHigh: String((aSt.csRate ?? -1) >= 40),
-    homeScoreLow: String((hSt.scoredRate ?? 101) <= 40),
-    awayScoreLow: String((aSt.scoredRate ?? 101) <= 40),
-    homeFtsHigh: String((hSt.ftsRate ?? -1) >= 40),
-    awayFtsHigh: String((aSt.ftsRate ?? -1) >= 40),
-    goalRange: f.goalRange || "unknown",
-    highO25: String(o25 > 40),
-    lowBtts: String(btts > 0 && btts < 35),
-    highBtts: String(btts > 55),
-    highDraw: String(draw > 30),
-    hasBkOdds: String(!!(bkOdds && bkOdds>1)),
-    oddsDiscrep: saOddsDiscrepBand(prob, bkOdds),
-    readStrong: String(readStrong),
-    readMatchesMkt: String(readMatchesMkt),
-    hasLowScoring: String(tags.includes("low_scoring")),
-    hasOver25Quality: String(tags.includes("over25_quality")),
-    hasHomeWin: String(tags.includes("home_win")),
-    hasAwayWin: String(tags.includes("away_win")),
-    hasBttsValue: String(tags.includes("btts_value")),
-    hasDrawTag: String(tags.includes("draw")),
-    hasHomeGoalfest: String(tags.includes("home_goalfest")),
-    hasAwayGoalfest: String(tags.includes("away_goalfest")),
-  };
-}
-
-// Matches a fixture's computed features against every pattern for `market`.
-// Returns { positive: [...matched, lift desc], avoid: [...matched, worst-first] }.
-// Both single-condition and pair-condition patterns are handled the same way
-// — every key in `p.conditions` must match the fixture's computed feature.
-function matchSAPatterns(f, market, patterns) {
-  const feats = computeSAFeatures(f, market);
-  if (!feats || !patterns?.length) return { positive: [], avoid: [] };
-  const positive = [], avoid = [];
-  for (const p of patterns) {
-    if (p.market !== market) continue;
-    const matches = Object.entries(p.conditions).every(([k, v]) => feats[k] === v);
-    if (!matches) continue;
-    (p.direction === "positive" ? positive : avoid).push(p);
-  }
-  positive.sort((a,b) => b.lift - a.lift);
-  avoid.sort((a,b) => a.lift - b.lift); // most negative lift first — worst offenders surfaced first within the flagged group
-  return { positive, avoid };
-}
+// saTheReadToTBMarket/saProbBand.../computeSAFeatures/matchSAPatterns now
+// imported from ./tgp-v1-live.mjs (2026-08-25 extraction) — see the import
+// block near the top of this file.
 
 // ── CA CONDITION MATCHER ──────────────────────────────────────────────────
-// CA (conditions-analyst.mjs) conditions are continuous thresholds
-// ({field, op, value}), not SA's tertile-bucket equality above — this is a
-// direct port of conditions-analyst.mjs's extractDims() + conditionMatches(),
-// run client-side against one fixture's live markets object. NOT a reuse of
-// matchSAPatterns: the two systems check fundamentally different shapes of
-// condition, so porting the real dims-extraction logic (not guessing at
-// field names) matters — mismatched field names here would silently match
-// nothing and look like "this fixture just has no CA matches" instead of
-// erroring, which is worse than a crash.
-// Field source is byte-for-byte the same as conditions-analyst.mjs's
-// extractDims(): homeCS/awayCS/homeWin/awayWin/draw straight off f.markets,
-// btts aliases m.bttsYes (falls back to m.btts), oddsFloor comes off
-// f.theRead/f.theEdge (not m at all — it's a fixture-level field, not a
-// markets one), totalXG is derived (homeXG + awayXG), not a stored field.
-function caExtractDims(f) {
-  const m = f.markets || {};
-  const hXG = +(m.homeXG ?? 0), aXG = +(m.awayXG ?? 0);
-  const oddsFloorRaw = f.theRead?.anchor?.odds ?? f.theEdge?.odds ?? null;
-  return {
-    totalXG: hXG + aXG, homeXG: hXG, awayXG: aXG,
-    homeCS: +(m.homeCS ?? NaN), awayCS: +(m.awayCS ?? NaN),
-    btts: +(m.bttsYes ?? m.btts ?? NaN),
-    homeWin: +(m.homeWin ?? NaN), awayWin: +(m.awayWin ?? NaN), draw: +(m.draw ?? NaN),
-    oddsFloor: oddsFloorRaw != null ? +oddsFloorRaw : NaN,
-  };
-}
-function caConditionMatches(dims, cond) {
-  const v = dims[cond.field];
-  if (v == null || Number.isNaN(v)) return false;
-  return cond.op === ">=" ? v >= cond.value : v < cond.value;
-}
-// caPatterns: the { byMarket, byMarketAvoid } payload from GET /api/ca-patterns.
-// Returns { positive: [...matched combos, best holdout HR first], avoid: [...] },
-// flattened across all 14 markets — FullModelPage groups by combo.market itself.
-export function matchCAConditions(f, caPatterns) {
-  if (!caPatterns) return { positive: [], avoid: [], emergingPositive: [], emergingAvoid: [], traps: [], contradictoryMarkets: [] };
-  const dims = caExtractDims(f);
-  const matchGroup = (byMarketObj) => {
-    const out = [];
-    for (const combos of Object.values(byMarketObj || {})) {
-      for (const c of combos) if (c.conditions.every(cond => caConditionMatches(dims, cond))) out.push(c);
-    }
-    return out;
-  };
-  const positive = matchGroup(caPatterns.byMarket);
-  const avoid = matchGroup(caPatterns.byMarketAvoid);
-  // Emerging = low-test-n matches — kept fully separate from positive/avoid,
-  // never merged in, so a small-sample fluke can't be mistaken for a
-  // validated one just because it happened to also match.
-  const emergingPositive = matchGroup(caPatterns.byMarketEmerging);
-  const emergingAvoid = matchGroup(caPatterns.byMarketAvoidEmerging);
-  // Same-market contradiction (dev journal, 2026-07-13): a market can carry
-  // one combo that's a VALID positive and a DIFFERENT combo that's a VALID
-  // avoid, both matching this fixture at once — never the same rule (traps
-  // come from OVERFIT/DEGRADED status; these are two separately-mined VALID
-  // combos that just happen to both fire here). Journal verdict: don't try
-  // to explain both sides on screen — flag the market as a conflicting signal and
-  // let display code suppress the individual cards for it.
-  const positiveMarkets = new Set(positive.map(c => c.market));
-  const avoidMarkets = new Set(avoid.map(c => c.market));
-  const contradictoryMarkets = [...positiveMarkets].filter(m => avoidMarkets.has(m));
-  // Traps (item #5) — combos that looked convincing on train but didn't hold
-  // up on holdout (or the mirror: looked bad on train, held up fine).
-  // ROOT CAUSE FIX (dev journal): only surfaced when the market has NO
-  // validated positive or avoid match at all (this also naturally excludes
-  // contradictory markets, since those are in both sets) — a market that
-  // already has a clean lean, or is already flagged conflicting-signal, doesn't
-  // need a trap caution stacked on top; the trap note only adds value when
-  // it's the only thing this market has.
-  const traps = matchGroup(caPatterns.byMarketTraps)
-    .filter(c => !positiveMarkets.has(c.market) && !avoidMarkets.has(c.market));
-  positive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
-  avoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
-  emergingPositive.sort((a, b) => (b.holdoutHitRate ?? -1) - (a.holdoutHitRate ?? -1));
-  emergingAvoid.sort((a, b) => (a.holdoutHitRate ?? 101) - (b.holdoutHitRate ?? 101));
-  traps.sort((a, b) => Math.abs(b.gap ?? 0) - Math.abs(a.gap ?? 0));
-  return { positive, avoid, emergingPositive, emergingAvoid, traps, contradictoryMarkets };
-}
+// caExtractDims/caConditionMatches/matchCAConditions now imported from
+// ./tgp-v1-live.mjs (2026-08-25 extraction) — see the import block near the
+// top of this file. matchCAConditions re-exported below for other files
+// that import it from here.
 
 // ── CROSS-MARKET REASONING ENGINE (Phase 1, 2026-07-13) ─────────────────────
 // Item #2 from the original CA session. Two rule shapes, both gated to VALID
@@ -1297,7 +1086,7 @@ function caFamilyCorroborationCount(market, isAvoid, cleanPositive, cleanAvoid) 
 export const CA_MODEL_AGREEMENT_BONUS = 0.20;
 export function caModelProbFor(f, market) {
   const def = SA_MARKETS[market];
-  if (!def || def._isPEMix) return null;
+  if (!def) return null;
   const m = f.markets || {};
   const p = def.computeProb ? def.computeProb(m) : +(m[def.probKey] ?? 0);
   return Number.isFinite(p) && p > 0 ? p : null;
@@ -1398,12 +1187,8 @@ function caSafestScore(c, isAvoid, cleanPositive, cleanAvoid, f) {
 // Odds for a CA market — reuses SA_MARKETS' oddsKey (same lookup
 // computeSAFeatures already does for SA) rather than a second way of reading
 // fixture odds.
-function caOddsFor(f, market) {
-  const def = SA_MARKETS[market];
-  if (!def || def._isPEMix || !def.oddsKey) return null;
-  const o = f.odds?.[def.oddsKey];
-  return o > 1 ? o : null;
-}
+// caOddsFor now imported from ./tgp-v1-live.mjs (2026-08-25 extraction) —
+// see the import block near the top of this file.
 
 // "Best value" score (2026-07-13 plan) — ONLY for positive-direction combos
 // with real odds available. Reuses config.js's own POOL_SCORE_P_EXP formula
@@ -1651,10 +1436,8 @@ export const SC_MARKET_TO_FAMILY_ID = {
 // subset as the server-side version — markets without a confirmed odds key
 // just don't produce a priceable leg from SC, same graceful-skip as
 // everywhere else this gap shows up.
-export const SC_MARKET_ODDS_FIELD = {
-  homeWin: "o1", awayWin: "o2", under35: "under35odds", under45: "under45odds",
-  bttsYes: "bttsYesOdds", homeOver05: "over05odds", awayOver05: "over05odds",
-};
+// SC_MARKET_ODDS_FIELD now imported from ./tgp-v1-live.mjs (2026-08-25
+// extraction) — see the import block near the top of this file.
 
 // ── Cross-engine market-id translation (2026-08-06 fix) ────────────────────
 // SA and CA share one flat market-id namespace ("TB:Over 2.5" etc — see
@@ -1679,7 +1462,7 @@ const FAMILY_TO_SC_MARKET = Object.fromEntries(
 function familyOfMarket(engine, marketId) {
   if (marketId == null) return null;
   if (engine === "sc") return SC_MARKET_TO_FAMILY_ID[marketId] ?? null;
-  // sa and ca share one namespace; CA:Mix/CA:Verdict/PE:Mix have no
+  // sa and ca share one namespace; CA:Mix/CA:Verdict have no
   // single-family equivalent (they resolve per-fixture), so no translation —
   // familyOfMarket correctly returns null for those, same as an unknown id.
   return SA_TO_FAMILY_ID[marketId] ?? null;
@@ -2957,32 +2740,11 @@ function getEmpiricalRate(market, conf, historicalRates) {
 function isLeagueVolatile(league) { return league in CALIBRATION.volatileLeagues; }
 function getVolatileBoost(league) { return CALIBRATION.volatileLeagues[league]?.boostRequired ?? 0; }
 
-// Fixture lifecycle states shared by every pool/leg builder in the app
-// (evaluatePick, buildSignalPool, PatternEngineControls). Single source of
-// truth so the three don't drift out of sync with three separately-typed
-// copies of the same two sets.
-// ALWAYS_BLOCKED: live in-play and cancelled states — never valid for any
-// pool regardless of date, since there's no bookable outcome once a game has
-// kicked off or been called off.
-// FINISHED_STATES: allowed on past dates (needed for backtesting / pool
-// display) but blocked on today — you can't book a game that already ended.
-const FIXTURE_ALWAYS_BLOCKED_STATES = new Set([
-  "1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout","inprogress","live",
-  "postponed","ppd","suspended","interrupted","abandoned","cancelled","canceled","deleted",
-]);
-const FIXTURE_FINISHED_STATES = new Set([
-  "finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties",
-]);
-const normalizeFixtureState = f => (f.state || "").toLowerCase().replace(/[\s_\-]/g, "");
-// isBookableFixtureState: can a leg be built on this fixture right now?
-// isPastDate lets finished games through (backtesting); live/cancelled states
-// are excluded no matter what date is being viewed.
-function isBookableFixtureState(f, isPastDate = false) {
-  const state = normalizeFixtureState(f);
-  if (FIXTURE_ALWAYS_BLOCKED_STATES.has(state)) return false;
-  if (!isPastDate && FIXTURE_FINISHED_STATES.has(state)) return false;
-  return true;
-}
+// FIXTURE_ALWAYS_BLOCKED_STATES/FIXTURE_FINISHED_STATES/normalizeFixtureState/
+// isBookableFixtureState now imported from ./tgp-v1-live.mjs (2026-08-25
+// extraction) — see the import block near the top of this file. Still the
+// single source of truth for evaluatePick/buildSignalPool/
+// PatternEngineControls, just relocated so server.js can share it too.
 
 // isPastDate: when true (viewing a historical date), finished games are allowed
 // into the engine pool so backtesting works. Live/in-play and cancelled states
@@ -6121,9 +5883,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // probabilities; SA Pattern instead filters fixtures by whether they match
   // a validated (out-of-sample tested) historical pattern for a given market.
   // SA4-FIX: moved from admin-only to a collapsible panel visible to all users.
-  // PE:Mix de-gated 2026-07-04 (Sterling's call) — no longer admin-only.
   const [saExpanded,  setSaExpanded]  = useState(false); // panel collapsed by default
-  const [saMarket,    setSaMarket]    = useState(null); // e.g. "TB:Over 1.5", "PE:Mix", or null = off
+  const [saMarket,    setSaMarket]    = useState(null); // e.g. "TB:Over 1.5", or null = off
   // COMBINE-MODE (2026-07-19, Davies request #4): SA and CA validate the SAME
   // 13 TB: market strings (see CA_MARKET_LABELS above — derived straight off
   // SA_TO_FAMILY_ID's keys), so "select both rows" means ONE market, checked
@@ -6189,11 +5950,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       setSaError(null);
     }
   }, [adminMode]);
-  // PE Mix home-market assignments — fetched from /api/sa-mix when saMarket === "PE:Mix"
-  const [saMixLegs,     setSaMixLegs]     = useState(null); // array of home-assigned legs or null
-  const [saMixLoading,  setSaMixLoading]  = useState(false);
-  const [saMixError,    setSaMixError]    = useState(null);
-
   useEffect(() => {
     if (!saExpanded) return;
     if (saLoading) return;
@@ -6232,33 +5988,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saExpanded, adminMode, adminToken]);
 
-  // Fetch PE Mix assignments whenever PE:Mix mode is activated or date changes
-  useEffect(() => {
-    // De-gated 2026-07-04 (Sterling's call): PE:Mix used to be admin-only
-    // because it reads internal PE engine data — the whole SA scope (including
-    // /api/sa-patterns and this endpoint's backend route) is now public.
-    if (saMarket !== "PE:Mix") return;
-    if (saMixLoading) return;
-    setSaMixLoading(true);
-    setSaMixLegs(null);
-    setSaMixError(null);
-    const dateParam = date ? `?date=${date}` : ``;
-    fetch(`${SERVER}/api/sa-mix${dateParam}`)
-      .then(r => r.json())
-      .then(d => {
-        if (d?.homeLegs) setSaMixLegs(d.homeLegs);
-        else setSaMixError(d?.error || "No mix data");
-      })
-      .catch(e => setSaMixError(e.message))
-      .finally(() => setSaMixLoading(false));
-  }, [saMarket, date]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── CA ROW — mirrors SA's state shape above, deliberately simpler in one
-  // way: CA has no separate Mix-fetch effect. SA's PE:Mix needs its own
-  // server call because SA's tertile buckets are relative to that day's
-  // fixture pool. CA's conditions are absolute thresholds (fixed at mining
-  // time), so "best market across all 14 for this fixture" is just a client-
-  // side max over data we already have — no extra endpoint needed.
+  // ── CA ROW — mirrors SA's state shape above.
   const [caExpanded,     setCaExpanded]     = useState(false);
   const [caMarket,       setCaMarket]       = useState(null); // e.g. "TB:Over 1.5", "CA:Mix", or null = off
   const [caPatternsRow,  setCaPatternsRow]  = useState(null); // raw /api/ca-patterns payload
@@ -6861,90 +6591,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
     const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
 
-    // ── PE:Mix mode — home-market assignments from PE engine ─────────────────
-    // Each fixture is shown with whichever gated market PE assigned as its
-    // strongest signal. Sorted by combinedZ desc (same order PE uses for tickets).
-    if (def?._isPEMix) {
-      if (!saMixLegs?.length) return [];
-      const byGameId = new Map(saMixLegs.map(l => [l.gameId, l]));
-      const out = [];
-      for (const f of fixtures) {
-        const leg = byGameId.get(f.id);
-        if (!leg) continue;
-        if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
-        if (!bothOrNeither) {
-          const st = (f.state||"").toLowerCase();
-          if (hasLiveFilter && !liveStates.has(st)) continue;
-          if (hasScheduledFilter && !isScheduledState(st)) continue;
-        }
-        // ALL-FILTERS-FIX: apply statFilters (non-status) and excludedMarkets to PE:Mix rows
-        if (statFilters.some(id => {
-          if (["live","scheduled"].includes(id)) return false; // handled above
-          const sf = STAT_FILTERS.find(x => x.id === id);
-          return sf ? !sf.fn(f) : false;
-        })) continue;
-        const mktLabel = (leg.market || "").replace(/^TB:/, "");
-        const _mixPickId = getExcludeSelectionId({ label: mktLabel, market: mktLabel }, f); // TB: prefix stripped so id matches EXCLUDE_SELECTION_GROUPS
-        if (excludedMarkets.size > 0 && excludedMarkets.has(_mixPickId)) continue;
-        out.push({
-          f,
-          pick: {
-            label: mktLabel,
-            prob:  leg.prob  ?? 0,
-            odds:  leg.odds  ?? null,
-            color: C.accent,
-            market: leg.market,
-          },
-          _saTier:     leg.sa?.tier ?? null,
-          _saZ:        leg.sa?.combinedZ ?? null,
-          _saAdjLift:  leg.sa?.adjLift ?? null,
-          _saFlagged:  false, // all PE home legs passed the gate — no flagged rows
-          _saPositive: [],
-          _saAvoid:    [],
-        });
-      }
-      out.sort((a, b) => {
-        if (bothOrNeither) {
-          const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
-          const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
-          if (aLive !== bLive) return aLive - bLive;
-        }
-        return (b._saZ ?? 0) - (a._saZ ?? 0); // highest combinedZ first
-      });
-      // MIX-FILTER-FIX: apply Signal quality filters + kickoff to Mix list
-      const mixFiltered = out.filter(row => {
-        if (sortActive.has("strong_only") && !(row.f.theRead?.anchor?.strong === true && !row.f.markets?._lowConfidence)) return false;
-        if (sortActive.has("hq_data")    && !((row.f.markets?._calibrationWeight ?? 0) >= 50))   return false;
-        if (sortActive.has("ltd_data")   && !((row.f.markets?._calibrationWeight ?? 100) < 25))  return false;
-        if (kickoffFilter && row.f.time) {
-          const [hh, mm] = row.f.time.split(":").map(Number);
-          const mins = hh * 60 + (mm || 0);
-          // KICK-DATE-FIX (2026-08-02): a fixture whose true local kickoff date
-          // differs from the snapshot date it's bucketed under (early-morning
-          // spillover into the next calendar day) shouldn't satisfy either side
-          // of a same-day kickoff-time window.
-          const crossesDay = getFixtureLocalDate(row.f) !== row.f.date;
-          if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) return false
-          if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) return false
-        }
-        // PROB-FIX: pick probability threshold, same semantics as Pick-market rows
-        if (probFilter && row.pick?.prob != null) {
-          if (probFilter.mode === "above" && row.pick.prob < probFilter.value) return false;
-          if (probFilter.mode === "below" && row.pick.prob > probFilter.value) return false;
-        }
-        return true;
-      });
-      if (sortActive.has("strong_first")) {
-        mixFiltered.sort((a, b) => {
-          const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
-          const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
-          if (aS !== bS) return aS - bS;
-          return (b._saZ ?? 0) - (a._saZ ?? 0); // preserve combinedZ within same tier
-        });
-      }
-      return mixFiltered;
-    }
-
     // ── Standard single-market SA pattern mode ────────────────────────────────
     // SA-USER-FALLBACK: if patterns didn't load (server gated / 403), still show
     // all fixtures for the selected market sorted by prob — no pattern filtering,
@@ -7077,7 +6723,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return filtered;
-  }, [saMarket, saPatterns, saMixLegs, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, saMode, saDirection, saStrongThresholds, family]);
+  }, [saMarket, saPatterns, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, saMode, saDirection, saStrongThresholds, family]);
 
   // CA row — mirrors saRows' shape/filters above so the existing row JSX
   // renders it unchanged. One real difference from SA beyond the matcher
@@ -7553,7 +7199,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // do, so it's skipped otherwise rather than paying the cost every render.
   const verdictCoverageDiag = useMemo(() => {
     const wantCA = caMarket === "CA:Verdict" && !!caPatternsRow;
-    const wantSC = scMarket === "SC:Verdict";
+    // BUGFIX (2026-08-22): `scResults` starts null and only populates once
+    // the SC fetch resolves (see scRows above, which already guards this
+    // exact case with `!scResults`). This memo didn't have that guard —
+    // selecting SC:Verdict before the fetch finishes (or right after a date
+    // change resets scResults to null while scMarket is still "SC:Verdict"
+    // from before) hit `scResults[f.id]` on a null scResults below and threw,
+    // crashing the whole view. Folding the null-check into wantSC itself
+    // means the diagnostic just quietly waits for data, same as scRows does,
+    // instead of running against data that isn't there yet.
+    const wantSC = scMarket === "SC:Verdict" && !!scResults;
     if (!wantCA && !wantSC) return null;
     let caHasData = 0, scHasData = 0;
     let scCleared = 0;
@@ -7988,7 +7643,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* ── STRATEGY ANALYST — collapsible, visible to all users ── */}
       {/* SA4-FIX: was admin-only ({adminMode && ...}). Now a collapsed panel
-          any user can expand. PE:Mix de-gated 2026-07-04 — no longer admin-only. */}
+          any user can expand. */}
       <div style={{ marginBottom:10 }}>
         {/* Collapse toggle header */}
         <button
@@ -8005,14 +7660,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {saMarket && (
               <span style={{ fontSize:8,background:`${C.accent}20`,color:C.accent,border:`1px solid ${C.accent}40`,
                              borderRadius:4,padding:"1px 6px",fontWeight:800 }}>
-                {saMarket === "PE:Mix" ? "Mix" : saMarket.replace(/^TB:/,"")}
+                {saMarket.replace(/^TB:/,"")}
               </span>
             )}
-            {(saLoading || (saMarket === "PE:Mix" && saMixLoading)) && (
+            {saLoading && (
               <span style={{ fontSize:8,color:C.muted }}>loading…</span>
             )}
             {saError && !saPatterns?.restricted && <span style={{ fontSize:8,color:C.red }}>{saError}</span>}
-            {saMixError && saMarket === "PE:Mix" && <span style={{ fontSize:8,color:C.red }}>{saMixError}</span>}
           </div>
           <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{saExpanded ? "▲" : "▼"}</span>
         </button>
@@ -8043,16 +7697,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 </button>
               )}
               {SA_MARKET_LABELS.map(mk => {
-                const isMix    = mk.id === "PE:Mix";
-                // COMBINE-MODE: Mix picks a different market per fixture, which
-                // doesn't fit "one market, validated by both engines" — hide it
-                // while combined rather than allow a confusing half-state.
-                if (isMix && combineMode) return null;
                 const isOn     = saMarket === mk.id;
-                // De-gated 2026-07-04 (Sterling's call) — PE:Mix used to be
-                // hidden here (`if (isMix && !adminMode) return null;`) since
-                // the backend route was admin-only. Now the whole SA scope is
-                // public, so this button shows to everyone.
                 return (
                   <button key={mk.id} onClick={() => {
                     const turningOn = !isOn;
@@ -8078,22 +7723,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     }
                   }} className="gb"
                     style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
-                             background:isOn ? (isMix ? C.accent : C.red) : "transparent",
-                             color:isOn ? "#fff" : isMix ? C.accent : C.muted,
-                             border:`1px solid ${isOn ? (isMix ? C.accent : C.red) : isMix ? `${C.accent}50` : C.faint}`,
-                             fontWeight: isMix ? 800 : undefined }}>
+                             background:isOn ? C.red : "transparent",
+                             color:isOn ? "#fff" : C.muted,
+                             border:`1px solid ${isOn ? C.red : C.faint}` }}>
                     {mk.label}
                   </button>
                 );
               })}
             </div>
             )}
-            {saMarket === "PE:Mix" && (
-              <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
-                PE Mix view — each fixture shown in whichever market the pick engine assigned as its strongest signal today, sorted by combined z-score.
-              </div>
-            )}
-            {saMarket && saMarket !== "PE:Mix" && saPatterns?.patterns?.length > 0 && (
+            {saMarket && saPatterns?.patterns?.length > 0 && (
               <div style={{ fontSize:8,color:C.text,opacity:.6,marginTop:4 }}>
                 Showing only fixtures matching a validated SA pattern for <strong>{saMarket.replace(/^TB:/,"")}</strong>.
                 Games matching only an "avoid" pattern are flagged ⚑ and sorted to the bottom.
@@ -8103,7 +7742,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             {/* ── SA PATTERN QUALITY (2026-07-19, Davies request #5) — mirrors
                  CA's Pattern Quality block. Standard/Strong only (no Emerging —
                  SA has no server-side low-test-n arrays the way CA does). ── */}
-            {saMarket && saMarket !== "PE:Mix" && (
+            {saMarket && (
               <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.accent}20` }}>
                 <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,opacity:.75 }}>
                   Pattern Quality
@@ -9310,11 +8949,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           <span style={{ fontSize:10,fontWeight:800,color:C.accentText }}>{selectedIds.size} selected</span>
           <button onClick={() => {
             const familyLabel = CUSTOM_FAMILIES.find(cf => cf.id === family)?.label || family;
-            // MIX-FIX: use displayRows (not rows) so that when SA Mix (PE:Mix) is
-            // active, the correct per-fixture market and pick from saMixLegs is used.
-            // Previously this read from `rows` (the normal custom pick market rows),
-            // meaning Mix selections were added with whatever market the normal Custom
-            // section happened to have active — completely wrong market/pick.
             // TT-LABEL-FIX (2026-08-08): strategyLabel used to be familyLabel for
             // every leg in the batch, unconditionally — correct when every selected
             // row shares one family, wrong for Team Total rows, which come from Goal
@@ -9326,7 +8960,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             // variants, so the real side+line has to come from the pick's own label.
             const legs = displayRows.filter(({ f }) => selectedIds.has(f.id)).map(({ f, pick }) => {
               const market = pick.market && pick.market !== "Unknown" ? pick.market : inferMarket(pick.label);
-              let strategyLabel = saMarket === "PE:Mix" ? "SA Mix" : familyLabel;
+              let strategyLabel = familyLabel;
               if (market === "TeamTotal") {
                 const lineMatch = pick.label.match(/O(\d\.\d)/);
                 const isHome = f.teams?.home && pick.label.startsWith(f.teams.home);
@@ -15432,6 +15066,41 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       .finally(() => setScLoading(false));
   }, [needsSC, fixtures, scLoading]);
 
+  // TGP Decompose pool (V1+V2, locked) — item E, 2026-08-24: TGP Decompose
+  // becomes a genuine Pattern Engine source alongside SA/CA/SC/Model,
+  // rather than its own separate tab. Fetched once per date from the
+  // already-locked /api/tgp-decompose-pool record (server.js) — same
+  // fetch-once-per-date pattern TGPControls used for its own shapes fetch.
+  // Both slots merged; each entry tagged with which version produced it.
+  const [tgpPoolData, setTgpPoolData] = useState(null);
+  const [tgpPoolLoading, setTgpPoolLoading] = useState(false);
+  useEffect(() => {
+    if (!date || !sources.has("tgp") || tgpPoolData?.date === date || tgpPoolLoading) return;
+    setTgpPoolLoading(true);
+    fetch(`${SERVER}/api/tgp-decompose-pool?date=${date}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setTgpPoolData(d); })
+      .catch(() => {})
+      .finally(() => setTgpPoolLoading(false));
+  }, [date, sources, tgpPoolData, tgpPoolLoading]);
+
+  // Indexed by fixtureId, not a per-fixture full-array scan inside
+  // qualifyingLegs' loop below — pool entries aren't tiny, and Sterling's
+  // whole reason for this restructuring is the app getting slow.
+  const tgpPoolByFixture = useMemo(() => {
+    const map = new Map();
+    if (!tgpPoolData || tgpPoolData.date !== date) return map;
+    const entries = [
+      ...(tgpPoolData.v1?.pool || []).map(e => ({ ...e, tgpVersion: 'v1' })),
+      ...(tgpPoolData.v2?.pool || []).map(e => ({ ...e, tgpVersion: 'v2' })),
+    ];
+    for (const e of entries) {
+      if (!map.has(e.fixtureId)) map.set(e.fixtureId, []);
+      map.get(e.fixtureId).push(e);
+    }
+    return map;
+  }, [tgpPoolData, date]);
+
   // Model probability — the base model's own predicted probability for a
   // market, independent of any pattern-mining engine. "TB:..." labeled
   // markets (SA/CA) resolve via SA_MARKETS' own probKey/computeProb; SC's
@@ -15552,7 +15221,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       }
       if (sources.has("sa") && appSaPatterns?.length) {
         for (const mkt of Object.keys(SA_MARKETS)) {
-          if (mkt === "PE:Mix") continue;
           const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
           if (!positive.length) continue;
           const def = SA_MARKETS[mkt];
@@ -15612,13 +15280,22 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
             { consensusGrade: win.consensusGrade, supportingEngines: win.supportingEngines });
         }
       }
+      // TGP Decompose (V1+V2, locked pool) — item E: same pushLeg gating
+      // as every other source (global floor, cross-source veto, odds
+      // validity), not a bypass. `lift` isn't separately available on a
+      // pool entry (it's already baked into V1's own `score` figure) —
+      // passing 0 rather than reverse-deriving an approximate number.
+      if (sources.has("tgp")) {
+        for (const e of tgpPoolByFixture.get(f.id) || []) {
+          pushLeg(f, e.market, e.pick, e.odds, e.conf, 0, `TGP ${e.tgpVersion.toUpperCase()}`);
+        }
+      }
       // Model — the raw base model's own probability, no pattern-mining
       // engine required. Only markets clearing modelMinProb qualify; a leg
       // from this source has hitRate:null (no engine backs it), so it ranks
       // purely on modelProb once blended into legScore below.
       if (sources.has("model")) {
         for (const mkt of Object.keys(SA_MARKETS)) {
-          if (mkt === "PE:Mix") continue;
           const mp = modelProbFor(f, mkt);
           if (mp == null || mp < modelMinProb) continue;
           const def = SA_MARKETS[mkt];
@@ -15642,7 +15319,8 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       (source === "SC" || source === "SC verdict") ? "sc" :
       (source === "CA" || source === "CA verdict") ? "ca" :
       source === "Model" ? "model" :
-      source === "Consensus" ? "consensus" : "sa";
+      source === "Consensus" ? "consensus" :
+      (source === "TGP V1" || source === "TGP V2") ? "tgp" : "sa";
     const corroborationByKey = new Map();
     for (const leg of legs) {
       const key = `${leg.fixtureId}|${leg.market}`;
@@ -15655,7 +15333,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       leg.corroboratingEngines = [...engines];
     }
     return legs;
-  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate]);
+  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, tgpPoolByFixture, modelMinProb, applyGlobalFloor, isPastDate]);
 
   const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
   // Ranking blends model probability in alongside whatever pattern-mining
@@ -15718,7 +15396,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // same ~0-1 range Manual's evaluatePick scores land in (legScore here
   // is roughly 0-100 + lift points), just for the tier-shuffle stratification
   // inside buildManualParlaysFromPool — not a precision-critical conversion.
-  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus" };
+  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus", tgp: "TGP" };
   useEffect(() => {
     const pool = stackedLegs.map(l => {
       const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
@@ -15752,6 +15430,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     { id: "consensus", label: "Consensus" },
     { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
     { id: "sc", label: "SC" }, { id: "sc-verdict", label: "SC Verdict" }, { id: "model", label: "Model" },
+    { id: "tgp", label: "TGP" },
   ];
   const STRATEGY_OPTS = [
     { id: "mixed-ladder", label: "Mixed Ladder", desc: "Best leg per game" },
@@ -15762,7 +15441,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into four market families — Result, Dominance, Goals, Radar — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Every other source still works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
+        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model/TGP into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into four market families — Result, Dominance, Goals, Radar — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. TGP (2026-08-24) pulls from the day's already-locked Decompose pool (V1+V2 combined) rather than matching live itself. Every other source still works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
         {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && (
           <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
         )}
@@ -15877,12 +15556,8 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
 // today" instead of erroring. Server's /api/tgp-shapes already parsed each
 // shape's leg labels into {market, source, patternKey} — matching a live
 // hit is just "does its computed key equal patternKey."
-function tgpComboKey(combo) {
-  return combo.conditions.map(c => `${c.field}${c.op}${c.value}`).sort().join('&');
-}
-function tgpSaKey(pattern) {
-  return Object.entries(pattern.conditions).map(([k, v]) => `${k}=${v}`).sort().join('&');
-}
+// tgpComboKey/tgpSaKey now imported from ./tgp-v1-live.mjs (2026-08-25
+// extraction) — see the import block near the top of this file.
 
 // 2026-08-16 fix (Sterling report — "Feature cap reached" blocking a game
 // that should still qualify), reworked twice more the same day (Bohemian
@@ -15907,97 +15582,13 @@ function tgpSaKey(pattern) {
 //     counts them).
 // "Add to draft" is never blocked. Adding the same shape, or the same
 // literal pick, twice is allowed — that's Sterling's call, not this app's.
-function tgpShapeSignature(shape) {
-  return shape.legs.map(l => `${l.market}/${l.source}:${l.patternKey}`).sort().join('||');
-}
-function tgpApplyFixtureDiversity(rankedCandidates, maxPerFixture = 3) {
-  const marketsUsedByFixture = new Map(); // fixtureId -> Set(market) already surfaced
-  const result = [];
-  for (const cand of rankedCandidates) {
-    const touches = cand.assignment.map((a, i) => ({ fixtureId: a.fixtureId, market: cand.shape.legs[i].market }));
-    const fits = touches.every(({ fixtureId, market }) => {
-      const used = marketsUsedByFixture.get(fixtureId);
-      if (!used) return true; // fixture has open capacity
-      if (used.has(market)) return false; // this exact market already surfaced for this fixture by a stronger shape
-      return used.size < maxPerFixture;
-    });
-    if (!fits) continue;
-    for (const { fixtureId, market } of touches) {
-      if (!marketsUsedByFixture.has(fixtureId)) marketsUsedByFixture.set(fixtureId, new Set());
-      marketsUsedByFixture.get(fixtureId).add(market);
-    }
-    result.push(cand);
-  }
-  return result;
-}
+// tgpShapeSignature/tgpApplyFixtureDiversity now imported from
+// ./tgp-v1-live.mjs (2026-08-25 extraction).
 
 
 
-// Builds a global index: leg key ("market/source:patternKey") -> every
-// fixture live-matching it right now, with that fixture's odds for the
-// market. One pass over fixtures (not one pass per shape) — same
-// performance discipline PERF (2026-08-08) applied to saPatternsByMarket
-// above, since shapes can number in the thousands but fixtures are a
-// handful of hundred at most.
-function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }) {
-  const index = new Map(); // key -> [{fixtureId, home, away, league, odds, modelProb}]
-  const add = (key, f, odds, modelProb) => {
-    if (!(odds > 1)) return; // unpriced legs can't be staked or combined into odds
-    if (!index.has(key)) index.set(key, []);
-    index.get(key).push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league, odds, modelProb: Number.isFinite(Number(modelProb)) ? Number(modelProb) : null });
-  };
-  for (const f of fixtures || []) {
-    if (!isBookableFixtureState(f, isPastDate)) continue; // same live/cancelled gate Pattern Engine uses
-    // 2026-08-16 (Sterling report — mined shapes not cross-competition-aware):
-    // tgp-ticket-miner.mjs mined its shapes from settlement-pool-v2.jsonl
-    // without excluding cup/friendly/international fixtures, so a shape's
-    // holdout stats may be contaminated by that noisier population. Rather
-    // than re-mine right now, this is the client-side stopgap: never let a
-    // TODAY fixture server.js has itself flagged as cup/friendly/
-    // international (f.competitionRisk — same field App.jsx's dominanceGate
-    // already trusts, see ~line 1592) become a live candidate for a mined
-    // leg. This narrows what TGP can match against; it does not retroactively
-    // clean the mined shapes' own stats. TODO: once tgp-ticket-miner.mjs is
-    // updated to exclude these fixtures at mining time (the real fix),
-    // this client-side gate becomes redundant belt-and-suspenders and can
-    // be removed.
-    if (f.competitionRisk) continue;
-    if (appCaPatterns) {
-      const { positive } = matchCAConditions(f, appCaPatterns);
-      for (const c of positive) {
-        const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
-        const def = SA_MARKETS[c.market];
-        const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
-        add(`${c.market}/ca:${tgpComboKey(c)}`, f, odds, modelProb);
-      }
-    }
-    if (appSaPatterns?.length) {
-      for (const mkt of Object.keys(SA_MARKETS)) {
-        if (mkt === "PE:Mix") continue;
-        const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
-        const def = SA_MARKETS[mkt];
-        const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
-        const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
-        for (const p of positive) add(`${mkt}/sa:${tgpSaKey(p)}`, f, odds, modelProb);
-      }
-    }
-    // SC's matched combos come back from POST /api/sc-match's own
-    // matchResult.positive — real {conditions} objects, same shape CA's
-    // are (tgp-pattern-matcher.mjs confirms CA/SC condition objects are
-    // byte-identical), so tgpComboKey applies unchanged. c.market here is
-    // SC's raw pool-key field (over25, homeWin, ...) — no TB: prefix,
-    // matching exactly what the miner's library.sc grouping key was.
-    const scPositive = scResults?.[f.id]?.positive;
-    if (scPositive?.length) {
-      for (const c of scPositive) {
-        const odds = SC_MARKET_ODDS_FIELD[c.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[c.market]] : null;
-        const modelProb = f.markets?.[c.market] ?? null;
-        add(`${c.market}/sc:${tgpComboKey(c)}`, f, odds, modelProb);
-      }
-    }
-  }
-  return index;
-}
+// computeTgpLiveIndex now imported from ./tgp-v1-live.mjs (2026-08-25
+// extraction) — see the import block near the top of this file.
 
 // Whole-shape mode only: finds ONE assignment of a distinct fixture to
 // each of a shape's legs (cut is 2 or 3 in the current miner — see that
@@ -16006,27 +15597,8 @@ function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPattern
 // pre-sorted by odds descending so, among multiple valid assignments,
 // the search naturally favors the higher-value one without needing a
 // separate optimization pass.
-function tgpAssignDistinctFixtures(legLabels, liveIndex) {
-  const candidatesPerLeg = legLabels.map(l => {
-    const key = `${l.market}/${l.source}:${l.patternKey}`;
-    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
-  });
-  if (candidatesPerLeg.some(c => c.length === 0)) return null; // at least one leg isn't live anywhere today
-  const used = new Set();
-  const assignment = new Array(legLabels.length);
-  function backtrack(i) {
-    if (i === legLabels.length) return true;
-    for (const cand of candidatesPerLeg[i]) {
-      if (used.has(cand.fixtureId)) continue;
-      used.add(cand.fixtureId);
-      assignment[i] = cand;
-      if (backtrack(i + 1)) return true;
-      used.delete(cand.fixtureId);
-    }
-    return false;
-  }
-  return backtrack(0) ? assignment : null;
-}
+// tgpAssignDistinctFixtures now imported from ./tgp-v1-live.mjs (2026-08-25
+// extraction) — see the import block near the top of this file.
 
 // Whole-shape stacking is different from normal shape assignment.
 // A stacked set can contain multiple legs that resolve to the SAME live
@@ -16035,165 +15607,19 @@ function tgpAssignDistinctFixtures(legLabels, liveIndex) {
 // the strongest occurrence and drop weaker duplicate occurrences, while
 // still using alternate live fixtures when they exist.
 // Priority: shape holdout hit rate -> shape lift -> holdout sample size -> odds.
-function tgpAssignStackFixtures(legLabels, liveIndex) {
-  const candidatesPerLeg = legLabels.map(l => {
-    const key = `${l.market}/${l.source}:${l.patternKey}`;
-    return (liveIndex.get(key) || []).slice().sort((a, b) => b.odds - a.odds);
-  });
-  if (candidatesPerLeg.some(c => c.length === 0)) return null;
-
-  const priority = (leg, bestOdds = 0) => [
-    Number(leg?._shape?.holdoutHR) || 0,
-    Number(leg?._shape?.lift) || 0,
-    Number(leg?._shape?.holdoutN) || 0,
-    Number(bestOdds) || 0,
-  ];
-
-  // Process strongest occurrences first. A weaker leg can still move to an
-  // alternate fixture through the augmenting search instead of blocking the
-  // stronger occurrence.
-  const order = legLabels.map((leg, legIndex) => ({ leg, legIndex }))
-    .sort((a, b) => {
-      const pa = priority(a.leg, candidatesPerLeg[a.legIndex][0]?.odds);
-      const pb = priority(b.leg, candidatesPerLeg[b.legIndex][0]?.odds);
-      for (let i = 0; i < pa.length; i++) {
-        if (pb[i] !== pa[i]) return pb[i] - pa[i];
-      }
-      return a.legIndex - b.legIndex;
-    });
-
-  const fixtureOwner = new Map(); // fixtureId -> legIndex
-  const assigned = new Array(legLabels.length).fill(null);
-
-  const canTakeFixture = (legIndex, seenFixtures, seenLegs) => {
-    if (seenLegs.has(legIndex)) return false;
-    seenLegs.add(legIndex);
-
-    const leg = legLabels[legIndex];
-    for (const cand of candidatesPerLeg[legIndex]) {
-      const fixtureId = cand.fixtureId;
-      if (seenFixtures.has(fixtureId)) continue;
-      seenFixtures.add(fixtureId);
-
-      const ownerIndex = fixtureOwner.get(fixtureId);
-      if (ownerIndex == null) {
-        fixtureOwner.set(fixtureId, legIndex);
-        assigned[legIndex] = cand;
-        return true;
-      }
-
-      const ownerPriority = priority(legLabels[ownerIndex], assigned[ownerIndex]?.odds);
-      const contenderPriority = priority(leg, cand.odds);
-      let contenderStronger = false;
-
-      for (let i = 0; i < contenderPriority.length; i++) {
-        if (contenderPriority[i] !== ownerPriority[i]) {
-          contenderStronger = contenderPriority[i] > ownerPriority[i];
-          break;
-        }
-      }
-
-      // The existing occurrence wins ties so renders remain deterministic.
-      if (!contenderStronger) continue;
-
-      // Stronger occurrence takes the fixture; try to relocate the weaker one.
-      fixtureOwner.delete(fixtureId);
-      const previous = assigned[ownerIndex];
-      assigned[ownerIndex] = null;
-
-      if (canTakeFixture(ownerIndex, seenFixtures, seenLegs)) {
-        fixtureOwner.set(fixtureId, legIndex);
-        assigned[legIndex] = cand;
-        return true;
-      }
-
-      // No alternate fixture for the weaker occurrence — restore it.
-      fixtureOwner.set(fixtureId, ownerIndex);
-      assigned[ownerIndex] = previous;
-    }
-    return false;
-  };
-
-  for (const { legIndex } of order) {
-    if (!assigned[legIndex]) canTakeFixture(legIndex, new Set(), new Set());
-  }
-
-  return assigned
-    .map((candidate, legIndex) => candidate ? { legIndex, candidate } : null)
-    .filter(Boolean);
-}
-
+// tgpAssignStackFixtures now imported from ./tgp-v1-live.mjs (2026-08-26
+// extraction, alongside tgpAssignDistinctFixtures) — see the import block
+// near the top of this file.
 // Normal Whole Shape cards still use strict distinct-fixture assignment.
-// Stacking uses the duplicate-aware matcher above because multiple
-// validated shapes can legitimately point at the same fixture; without
-// bet-builder pricing, the strongest occurrence must win rather than
-// blocking the entire stack.
+// Stacking uses the duplicate-aware matcher because multiple validated
+// shapes can legitimately point at the same fixture; without bet-builder
+// pricing, the strongest occurrence must win rather than blocking the
+// entire stack.
 
-function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date, setTickets, onModeChange }) {
-  const isPastDate = !!(date && date !== todayStr());
-  const [tgpData, setTgpData] = useState(null); // { shapes, killerLeaderboard, generatedAt, ... }
-  const [tgpError, setTgpError] = useState(null);
-  const [tgpLoading, setTgpLoading] = useState(false);
-  useEffect(() => {
-    if (tgpData || tgpLoading) return;
-    setTgpLoading(true);
-    fetch(`${SERVER}/api/tgp-shapes`)
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
-      .then(setTgpData)
-      .catch(e => setTgpError(e.message))
-      .finally(() => setTgpLoading(false));
-  }, [tgpData, tgpLoading]);
-
-  // 2026-08-18 fix (Alden report — TGP goes to "no live legs" mid-session
-  // even on fresh fixtures): this used to fetch SC matches ONCE and freeze
-  // via `if (scResults) return`. Fixtures keeps rotating all day (games
-  // kick off and leave the bookable pool, new games/leagues get added by
-  // the poll/auto-refresh cycles), but that guard meant any fixture that
-  // showed up AFTER the first fetch could never get an SC match — starving
-  // decomposedPool/liveIndex of SC-sourced legs even though CA/SA matching
-  // (computed fresh per render, not fetched) kept working fine. That's why
-  // it looked like "day progressed" when only minutes had passed: it
-  // wasn't fewer live games, it was newly-rotated-in games with no SC
-  // coverage at all. Fix: track which fixture IDs have been SC-matched
-  // (scFetchedIdsRef) and only fetch the ones still missing, merging their
-  // results into scResults rather than replacing it wholesale. Fixtures
-  // that already have a result are never re-fetched (avoids re-hitting the
-  // endpoint on every 30s/90s poll tick for the same games) — the
-  // trade-off is that if a fixture's own markets/odds move after its first
-  // SC fetch, that update won't be reflected until this component remounts
-  // (e.g. switching tabs away and back). Failed fetches still mark their
-  // IDs as attempted, matching the old catch's give-up-after-one-try
-  // behavior, so a persistent server error can't cause a refetch loop on
-  // every fixtures change.
-  const [scResults, setScResults] = useState({});
-  const [scLoading, setScLoading] = useState(false);
-  const scFetchedIdsRef = useRef(new Set());
-  useEffect(() => {
-    if (!fixtures?.length || scLoading) return;
-    const missing = fixtures.filter(f => f?.id != null && !scFetchedIdsRef.current.has(f.id));
-    if (!missing.length) return;
-    setScLoading(true);
-    fetch(`${SERVER}/api/sc-match`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: missing.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
-    })
-      .then(r => r.ok ? r.json() : {})
-      .then(d => {
-        for (const f of missing) scFetchedIdsRef.current.add(f.id);
-        setScResults(prev => ({ ...prev, ...(d?.results || {}) }));
-      })
-      .catch(() => { for (const f of missing) scFetchedIdsRef.current.add(f.id); })
-      .finally(() => setScLoading(false));
-  }, [fixtures, scLoading]);
-
-  const saPatternsByMarket = useMemo(() => {
-    const map = new Map();
-    for (const p of appSaPatterns || []) {
-      if (!map.has(p.market)) map.set(p.market, []);
-      map.get(p.market).push(p);
-    }
-    return map;
-  }, [appSaPatterns]);
+function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
+  // fixtures/appSaPatterns/appCaPatterns props removed (2026-08-26) — no
+  // longer needed here. All matching now runs server-side; the server
+  // derives its own fixtures from the day's snapshot from `date` alone.
 
   // ── Mode + filter/query layer (handoff #2 — a general layer, not a
   // single-purpose pure-ladder feature): cut, per-leg source composition,
@@ -16216,103 +15642,47 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   const [shapeQuery, setShapeQuery] = useState("");
   const [wholeVisibleCount, setWholeVisibleCount] = useState(20);
 
-  const availableMarkets = useMemo(() => {
-    const set = new Set();
-    for (const s of tgpData?.shapes || []) for (const l of s.legs) set.add(l.market);
-    return [...set].sort();
-  }, [tgpData]);
+  // ── Server-computed live data (2026-08-26) ────────────────────────────
+  // Replaces this component's former client-side tgp-shapes/sc-match
+  // fetches plus its own computeTgpLiveIndex/tgpAssignDistinctFixtures/
+  // tgpApplyFixtureDiversity calls entirely. That whole matching pass now
+  // runs once server-side per date (cached, criteria-independent — see
+  // buildTgpV1LiveContext in server.js) and this component just asks for
+  // its own filter criteria applied on top, via GET /api/tgp-v1-live.
+  // Debounced so typing in a number input doesn't fire a request per
+  // keystroke — filter changes are the only thing that triggers a
+  // re-fetch; the server already handles fixture-list freshness
+  // internally against its own snapshot, so this component no longer
+  // polls on `fixtures` changing at all.
+  const [tgpLive, setTgpLive] = useState(null); // { wholeShapeCandidates, decomposedPool, availableMarkets, criteria }
+  const [tgpLiveLoading, setTgpLiveLoading] = useState(false);
+  const [tgpLiveError, setTgpLiveError] = useState(null);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setTgpLiveLoading(true);
+      setTgpLiveError(null);
+      const params = new URLSearchParams({
+        date: date || todayStr(),
+        minLift: String(minLift), minHoldoutN: String(minHoldoutN),
+        sources: [...sourceFilter].join(","),
+        modelMinProb: String(modelMinProb), applyModelFloor: String(applyModelFloor),
+        cutFilter: String(cutFilter), marketFilter: marketFilter || "",
+      });
+      fetch(`${SERVER}/api/tgp-v1-live?${params}`)
+        .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
+        .then(setTgpLive)
+        .catch(e => setTgpLiveError(e.message))
+        .finally(() => setTgpLiveLoading(false));
+    }, 350); // debounce — number inputs fire onChange per keystroke
+    return () => clearTimeout(t);
+  }, [date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter]);
 
-  // Known frequent lone-killers (handoff's killerLeaderboard) — surfaced as
-  // a caution tag on any shape containing one, not a hard exclusion; a
-  // shape already cleared holdout validation as a WHOLE combo, a
-  // high-soleKillRate leg inside it is a caution about robustness, not
-  // proof the shape itself is bad.
-  const riskyLegKeys = useMemo(() => {
-    const set = new Set();
-    for (const k of tgpData?.killerLeaderboard || []) {
-      if ((k.soleKillRate ?? 0) >= 40) set.add(k.leg);
-    }
-    return set;
-  }, [tgpData]);
-  const legKeyOf = l => `${l.market}/${l.source}:${l.patternKey}`;
-
-  // 2026-08-16 fix: Leg count and Market are Decompose-only params (Whole
-  // Shape builds each shape as one atomic pre-formed ticket — there's no
-  // single "leg" or "market" to narrow the shape down to the way Decompose's
-  // flattened pool has). Min lift / min holdout n / source composition stay
-  // shared — both modes still benefit from filtering candidate SHAPE quality.
-  const filteredShapes = useMemo(() => {
-    return (tgpData?.shapes || []).filter(s => {
-      if (mode === "decompose") {
-        if (cutFilter !== "all" && s.cut !== cutFilter) return false;
-        if (marketFilter && !s.legs.some(l => l.market === marketFilter)) return false;
-      }
-      if ((s.lift ?? -999) < minLift) return false;
-      if ((s.holdoutN ?? 0) < minHoldoutN) return false;
-      if (!s.legs.some(l => sourceFilter.has(l.source))) return false;
-      return true;
-    });
-  }, [tgpData, mode, cutFilter, minLift, minHoldoutN, marketFilter, sourceFilter]);
-
-  const liveIndex = useMemo(
-    () => computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate }),
-    [fixtures, appCaPatterns, appSaPatterns, saPatternsByMarket, scResults, isPastDate]
-  );
-
-  // ── DECOMPOSE mode (handoff #1a — recommended, reuses the shared
-  // target-odds builder, see file header): flattens every leg referenced
-  // by a filtered VALID shape into a candidate pool of live (fixture,
-  // market) matches, tagged with the strongest containing shape's
-  // lift/holdoutHR for ranking — same pool shape Pattern Engine already
-  // reports via onPoolChange, so handleBuildParlay's existing
-  // buildManualParlaysFromPool call needs no changes at all.
-  const decomposedPool = useMemo(() => {
-    if (mode !== "decompose") return [];
-    const bestStatsByKey = new Map(); // key -> {lift, holdoutHR}
-    for (const s of filteredShapes) {
-      for (const l of s.legs) {
-        // 2026-08-16 fix: filteredShapes only guarantees the SHAPE contains
-        // at least one leg matching market/source (needed so a cut-3 shape
-        // with one Over 2.5 leg and two companion legs still counts as
-        // "relevant"). It does NOT mean every leg of that shape matches —
-        // this loop was previously pushing ALL of a qualifying shape's legs
-        // into the pool, including non-matching companions, which is
-        // exactly the bug reported: Market=Over 2.5 still surfacing Under
-        // 3.5 legs, and deselecting a source not removing its legs (they
-        // were riding along on a shape that also had a selected-source
-        // leg). Each leg now has to individually pass both filters.
-        if (marketFilter && l.market !== marketFilter) continue;
-        if (!sourceFilter.has(l.source)) continue;
-        const key = legKeyOf(l);
-        const cur = bestStatsByKey.get(key);
-        if (!cur || (s.lift ?? -999) > cur.lift) bestStatsByKey.set(key, { lift: s.lift ?? 0, holdoutHR: s.holdoutHR ?? 0 });
-      }
-    }
-    const seen = new Set(); // dedupe by fixtureId|market — same leg can appear via multiple shapes
-    const pool = [];
-    for (const [key, stats] of bestStatsByKey) {
-      const [marketPart, rest] = [key.slice(0, key.lastIndexOf("/")), key.slice(key.lastIndexOf("/") + 1)];
-      const source = rest.slice(0, rest.indexOf(":"));
-      for (const cand of liveIndex.get(key) || []) {
-        const dedupeKey = `${cand.fixtureId}|${marketPart}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-        if (applyModelFloor && (cand.modelProb == null || cand.modelProb < modelMinProb)) continue;
-        pool.push({
-          fixtureId: cand.fixtureId, game: `${cand.home || "?"} vs ${cand.away || "?"}`,
-          pick: marketPart.replace(/^TB:/, ""), market: marketPart, league: cand.league,
-          odds: cand.odds, conf: Math.round(stats.holdoutHR), empiricalRate: Math.round(stats.holdoutHR),
-          modelProb: cand.modelProb,
-          score: Math.max(0, Math.min(1, (stats.holdoutHR + stats.lift) / 100)),
-          strategyLabel: `TGP ${source.toUpperCase()}`, strategyTags: [], isVolatile: isLeagueVolatile(cand.league || ""),
-          isRisky: riskyLegKeys.has(key),
-        });
-      }
-    }
-    return pool;
-  }, [mode, filteredShapes, liveIndex, riskyLegKeys, modelMinProb, applyModelFloor]);
+  const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
+  const decomposedPool = tgpLive?.decomposedPool || [];
+  const availableMarkets = tgpLive?.availableMarkets || [];
 
   useEffect(() => { if (mode === "decompose") onPoolChange(decomposedPool); }, [mode, decomposedPool, onPoolChange]);
+
   // Whole-shape mode builds complete tickets directly, not a pool for the
   // shared builder to pack — nothing for handleBuildParlay to do here, so
   // the pool it's fed is empty (keeps the shared Build button honest about
@@ -16322,24 +15692,9 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
   // ── WHOLE-SHAPE mode (handoff #1b — explicitly flagged as untested: a
   // shape's OWN combo was holdout-validated, but combining it with
   // whatever else lands in a build was never tested). One shape = one
-  // atomic ticket, each leg pinned to whichever live fixture
-  // tgpAssignDistinctFixtures found.
+  // atomic ticket, each leg already pinned to a live fixture by the
+  // server's tgpAssignDistinctFixtures call.
   const [addedShapeTickets, setAddedShapeTickets] = useState([]); // shapes already added to the draft this session
-
-  const wholeShapeCandidates = useMemo(() => {
-    if (mode !== "whole") return [];
-    const ranked = filteredShapes.map(s => {
-      const assignment = tgpAssignDistinctFixtures(s.legs, liveIndex);
-      if (!assignment) return null;
-      const combinedOdds = assignment.reduce((p, a) => p * a.odds, 1);
-      const flaggedLegs = s.legs.filter(l => riskyLegKeys.has(legKeyOf(l)));
-      return { shape: s, assignment, combinedOdds, flaggedLegs };
-    }).filter(Boolean).sort((a, b) => (b.shape.holdoutHR ?? -1) - (a.shape.holdoutHR ?? -1) || (b.shape.lift ?? -999) - (a.shape.lift ?? -999));
-    // Fixture-diversity rule lives here now — a pure pass over the already-
-    // ranked list, nothing tracked across renders or clicks. See
-    // tgpApplyFixtureDiversity's own comment for the full rationale.
-    return tgpApplyFixtureDiversity(ranked);
-  }, [mode, filteredShapes, liveIndex, riskyLegKeys]);
 
   // 2026-08-16 (Sterling request — ranked/searchable Whole Shape display):
   // wholeShapeCandidates above is already ranked strongest-first by holdout
@@ -16353,6 +15708,18 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       cand.shape.legs.some(l => l.market.toLowerCase().includes(q))
     );
   }, [wholeShapeCandidates, shapeQuery]);
+
+  // 2026-08-25: the V1 whole-ticket and decompose-pool auto-locks that used
+  // to live here (item C/D) moved to GRMProInner, above this component's
+  // definition — they need to run regardless of whether this tab (or even
+  // the parley builder overlay) is open, which this component's mount
+  // lifecycle can't guarantee. This component's own decomposedPool/
+  // wholeShapeCandidates below are unaffected and still drive the
+  // interactive manual-browse UI via onPoolChange, with their own
+  // user-adjustable filters — that's a separate, foreground computation
+  // from the background lock now living in GRMProInner. See the
+  // TGP_AUTOLOCK_* constants and the block comment above them for why the
+  // two are intentionally not shared.
   // Reset pagination back to the top page whenever the underlying ranked
   // list could have changed shape (new filters, new search, mode switch) —
   // otherwise "showing 60 of 40" type states are reachable after narrowing.
@@ -16414,13 +15781,36 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
     onPointerCancel: () => clearTimeout(longPressTimer.current),
   });
 
-  const handleStackSelected = () => {
-    if (selectedCandidates.length < 2) return; // button is disabled below this, but guard directly too
+  // 2026-08-26: no longer computes the stack assignment itself — POSTs the
+  // flattened legs (just the matching keys the server needs) to
+  // /api/tgp-v1-stack, which reuses this date's already-cached liveIndex
+  // server-side. flatLegs (with ._shape still attached) stays local so the
+  // ticket-building below can use each shape's own stats without the
+  // server needing to echo them back.
+  const [stacking, setStacking] = useState(false);
+  const handleStackSelected = async () => {
+    if (selectedCandidates.length < 2 || stacking) return; // button is disabled below this, but guard directly too
 
     const flatLegs = selectedCandidates.flatMap(c =>
       c.shape.legs.map(l => ({ ...l, _shape: c.shape }))
     );
-    const assignment = tgpAssignStackFixtures(flatLegs, liveIndex);
+    setStacking(true);
+    let assignment;
+    try {
+      const r = await fetch(`${SERVER}/api/tgp-v1-stack`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: date || todayStr(),
+          legs: flatLegs.map(l => ({ market: l.market, source: l.source, patternKey: l.patternKey })),
+        }),
+      });
+      const d = r.ok ? await r.json() : null;
+      assignment = d?.assignment;
+    } catch {
+      assignment = null;
+    } finally {
+      setStacking(false);
+    }
 
     if (!assignment?.length) {
       setStackFailMsg("Couldn't stack — none of the selected shape legs has a live fixture.");
@@ -16481,11 +15871,11 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
     return true;
   };
 
-  if (tgpLoading && !tgpData) {
+  if (tgpLiveLoading && !tgpLive) {
     return <div style={{ padding: 16, fontSize: 9, color: C.muted, textAlign: "center" }}>Loading mined ticket shapes…</div>;
   }
-  if (tgpError) {
-    return <div style={{ padding: 16, fontSize: 9, color: C.red, textAlign: "center" }}>Couldn't load TGP shapes: {tgpError}</div>;
+  if (tgpLiveError) {
+    return <div style={{ padding: 16, fontSize: 9, color: C.red, textAlign: "center" }}>Couldn't load TGP shapes: {tgpLiveError}</div>;
   }
 
   return (
@@ -16567,7 +15957,7 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
       </div>
 
       <div style={{ fontSize: 8, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
-        {tgpData ? `${filteredShapes.length} of ${tgpData.shapes.length} VALID shapes match your filters · mined ${new Date(tgpData.generatedAt).toLocaleDateString()}` : ""}
+        {tgpLive ? `${mode === "decompose" ? tgpLive.decomposeFilteredShapesCount : tgpLive.filteredShapesCount} of ${tgpLive.totalShapes} VALID shapes match your filters · mined ${new Date(tgpLive.minedGeneratedAt).toLocaleDateString()}` : ""}
         {mode === "whole" && " · Each shape's own combo was holdout-validated; combining it with today's other tickets was not."}
         {" · Cup/friendly/international fixtures are excluded from live matching (mined shapes weren't validated on that population)."}
       </div>
@@ -16699,13 +16089,13 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
                          cursor: "pointer", fontFamily: C.font }}>
                 Cancel
               </button>
-              <button onClick={handleStackSelected} disabled={selectedCandidates.length < 2}
+              <button onClick={handleStackSelected} disabled={selectedCandidates.length < 2 || stacking}
                 style={{ padding: "6px 12px", borderRadius: 6, border: "none",
-                         background: selectedCandidates.length < 2 ? C.border : C.accent,
-                         color: selectedCandidates.length < 2 ? C.muted : C.accentText,
+                         background: (selectedCandidates.length < 2 || stacking) ? C.border : C.accent,
+                         color: (selectedCandidates.length < 2 || stacking) ? C.muted : C.accentText,
                          fontSize: 8, fontWeight: 800,
-                         cursor: selectedCandidates.length < 2 ? "not-allowed" : "pointer", fontFamily: C.font }}>
-                Stack into 1 ticket
+                         cursor: (selectedCandidates.length < 2 || stacking) ? "not-allowed" : "pointer", fontFamily: C.font }}>
+                {stacking ? "Stacking…" : "Stack into 1 ticket"}
               </button>
             </div>
           )}
@@ -16725,7 +16115,7 @@ function TGPControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, 
           )}
         </div>
       )}
-      {scLoading && <div style={{ fontSize: 8, color: C.muted, marginTop: 6 }}>Loading settlement conditions…</div>}
+      {tgpLiveLoading && tgpLive && <div style={{ fontSize: 8, color: C.muted, marginTop: 6 }}>Refreshing…</div>}
     </div>
   );
 }
@@ -18174,10 +17564,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
 
                   {customEngine === "tgp" && (
                     <TGPControls
-                      fixtures={fixtures}
                       C={C}
-                      appSaPatterns={appSaPatterns}
-                      appCaPatterns={appCaPatterns}
                       onPoolChange={setTgpPool}
                       date={date}
                       setTickets={setTickets}
@@ -18280,7 +17667,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   {/* Leg order toggle — shared across Manual/Pattern Engine/
                       TGP Decompose, all three build through the same pool
                       builder. Off = varied builds (default). On = ticket
-                      always fills from strongest score down, deterministic. */}
+                      always fills from strongest score down, deterministic.
+                      2026-08-22 fix: got left outside the !tgpWholeModeActive
+                      fragment when the block above it was wrapped in <>...</>
+                      — was rendering (harmlessly, but misleadingly) even in
+                      Whole Shape mode, which has no pool for it to affect. */}
+                  {!tgpWholeModeActive && (
                   <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",
                                 background:C.faint,border:`1px solid ${C.border}`,borderRadius:8,
                                 padding:"9px 12px",marginBottom:12 }}>
@@ -18300,6 +17692,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                      borderRadius:8,background:"#fff",transition:"left .15s" }} />
                     </button>
                   </div>
+                  )}
 
                   {customEngine === "manual" && (<>
                   {/* League filter — Custom tab only */}
@@ -20037,6 +19430,13 @@ function GrmScrollFab({ scrollEl, getScrollY, setScrollY, disabled = false, rese
   );
 }
 
+// TGP_AUTOLOCK_* constants and the background auto-lock effects that used
+// them here were removed 2026-08-25 — that whole computation now runs
+// server-side (server.js's generateTgpV1Live, using the same tgp-v1-live.mjs
+// this file also imports from), so the client no longer needs to compute or
+// POST it. See server.js's ensureTgpWholeTicketsRecord/tgp-decompose-pool
+// GET route for where this logic lives now.
+
 function GRMProInner() {
 
   // ── THEME ─────────────────────────────────────────────────────────────────
@@ -20248,6 +19648,10 @@ function GRMProInner() {
       .finally(() => { appCaPatternsLoadingRef.current = false; });
     attempt();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // TGP V1 background auto-lock removed 2026-08-25 — moved server-side
+  // (server.js's generateTgpV1Live). See the module-level comment above
+  // GRMProInner for where it lives now.
 
   const [tab, setTab]             = useState("all");
   const [search, setSearch]       = useState("");
