@@ -1489,13 +1489,23 @@ function marketForEngine(engine, familyId) {
 // keeps TT:Over 0.5 ("Radar" — the weakest, most-obvious signal) separate on
 // purpose, so it can never quietly win a family just for having a naturally
 // high baseline.
+// 2026-08-26 (Alden + audit review): RADAR was its own family, which meant a
+// weak Home/Away Over 0.5 signal only ever had to beat its ONE sibling to
+// become "the Radar verdict" — it never had to compete against a genuinely
+// stronger Goals pick (O2.5, BTTS, Under 3.5) the way it should. That's the
+// direct root cause of TT Over 0.5 dominating Consensus/CA Verdict output.
+// Folding Radar's two markets into GOALS makes them compete head-to-head
+// against every other goals market for the single family slot, which is what
+// was actually intended (see the "weakest, most-obvious signal" comment this
+// replaces). thesisMapFor's identity-mapping fallback already treats every
+// non-RESULT family as one-market-one-thesis, so this is a pure membership
+// change — no other function needed to change for this fix.
 const SIGNAL_FAMILIES = {
   RESULT:    ["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"],
   DOMINANCE: ["TB:Home Over 1.5", "TB:Away Over 1.5"],
-  GOALS:     ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS"],
-  RADAR:     ["TB:Home Over 0.5", "TB:Away Over 0.5"],
+  GOALS:     ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS", "TB:Home Over 0.5", "TB:Away Over 0.5"],
 };
-export const SIGNAL_FAMILY_LABELS = { RESULT: "Result", DOMINANCE: "Dominance", GOALS: "Goals", RADAR: "Radar" };
+export const SIGNAL_FAMILY_LABELS = { RESULT: "Result", DOMINANCE: "Dominance", GOALS: "Goals" };
 
 // What IS reused from CA's own ranking: effectiveN/wilsonLowerBound above —
 // gap-adjusted-sample-size + Wilson lower bound is genuinely the right
@@ -1835,14 +1845,25 @@ const CONSENSUS_CONTEST_CLOSENESS = 0.85; // same convention as SC_SECOND_LEAN_C
 // lookup convention every other market uses, which is why they've never
 // produced a priceable leg from ANY source (SA/CA's existing oddsKey lookup
 // and caOddsFor both require def.oddsKey, so both silently return null for
-// these 4 markets today). Home/Away Over 0.5 share one real bookmaker field
-// (over05odds) with implied-from-probability fallback — same pattern
-// buildSignalPool already applies for these exact markets. Over 1.5 has no
-// confirmed real-odds field anywhere in the codebase, so it's implied-only.
+// these 4 markets today).
+// 2026-08-27 (Alden — confirmed against server.js): Home/Away Over 0.5 used
+// to fall back to the shared f.odds.over05odds field before implied. Verified
+// against server.js's own odds ingestion (getGoalOdds pulls from the
+// bookmaker's "Match goals" market) that over05odds is the WHOLE-MATCH total
+// goals price (near-certain, ~1.02-1.05) — not a team-specific "this team
+// scores" price. The data provider (marketsArr) has no team-total-goals
+// market at all: only Full time, BTTS, Match goals, Double chance. server.js
+// itself already knows this — its own TeamTotal "to Score" pick builders
+// (~line 3030 and ~3224) deliberately use odds:null or implied-from-prob,
+// never over05odds, for this exact reason. Reusing it here was applying a
+// near-certain whole-match price to a genuinely uncertain team-specific bet
+// — the client-visible symptom was Home/Away Over 0.5 legs showing
+// suspiciously short "real" odds. Now implied-only, same as Over 1.5 below
+// (which never had a real field to begin with).
 function teamTotalOddsFor(f, market) {
   const m = f.markets || {};
-  if (market === "TB:Home Over 0.5") return oddsOrImplied(f.odds?.over05odds, m.homeOver05);
-  if (market === "TB:Away Over 0.5") return oddsOrImplied(f.odds?.over05odds, m.awayOver05);
+  if (market === "TB:Home Over 0.5") return safeImpliedOdds(m.homeOver05);
+  if (market === "TB:Away Over 0.5") return safeImpliedOdds(m.awayOver05);
   if (market === "TB:Home Over 1.5") return safeImpliedOdds(m.homeOver15);
   if (market === "TB:Away Over 1.5") return safeImpliedOdds(m.awayOver15);
   return null;
@@ -1962,7 +1983,12 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
   const debug = !!opts.debug;
   const rejected = debug ? [] : null;
   const families = {};
-  for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
+
+  // Extracted so RESULT can call this twice (direct-only, then with DC
+  // folded back in) without duplicating the thesis-fusion/admission logic
+  // itself. Everything else (GOALS/DOMINANCE) still calls this exactly once,
+  // same as before the extraction — behavior for them is unchanged.
+  function resolveFamilyTheses(familyId, markets) {
     const thesisMap = thesisMapFor(familyId, markets);
     const thesesPos = new Map();   // thesis -> Map(engine -> [{raw, market, specificity}])
     const thesesAvoid = new Map();
@@ -2091,6 +2117,64 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
     }
 
     resolvedTheses.sort((a, b) => b.netScore - a.netScore);
+    return resolvedTheses;
+  }
+
+  for (const [familyId, markets] of Object.entries(SIGNAL_FAMILIES)) {
+    let resolvedTheses;
+    if (familyId === "RESULT") {
+      // 2026-08-27 (Alden — "just try to suppress it more" on DC, config.js
+      // observed): The Read already hardcodes exactly this policy —
+      // READ_DC_COMPETES_WITH_1X2 = false, "DC only enters the pool when no
+      // 1X2 clears READ_1X2_MIN." Consensus/Verdict only had the softer
+      // specificity(0.5)*tier(0.85) ranking discount (CA_SCAN_TIER_B, ~2.35x
+      // handicap), which lets DC still win when its own raw evidence is
+      // simply stronger than a present-but-unremarkable Home/Draw/Away
+      // signal. This mirrors The Read's already-accepted hard-fallback rule
+      // instead: resolve HOME/DRAW/AWAY from the three direct outcome
+      // markets ONLY first; DC1X/DCX2 only get folded back in for a second
+      // pass if that direct-only pass admits nothing at all. Note: if the
+      // fallback pass DOES run, HOME/DRAW/AWAY get re-evaluated inside it too
+      // (thesisMap always includes DC's HOME/DRAW contributions once DC is
+      // in the market list) — harmless since the first pass already proved
+      // they don't admit alone, just duplicates a couple of debug-only
+      // rejected entries when opts.debug is on.
+      const directMarkets = markets.filter(m => m !== "TB:DC1X" && m !== "TB:DCX2");
+      resolvedTheses = resolveFamilyTheses(familyId, directMarkets);
+      if (!resolvedTheses.length) resolvedTheses = resolveFamilyTheses(familyId, markets);
+    } else if (familyId === "GOALS") {
+      // 2026-08-27 (Alden): same fallback principle as RESULT/DC, applied to
+      // the two nested ladders inside GOALS. Over 2.5 implies Over 1.5 (3+
+      // goals is always also 2+), and Under 3.5 implies Under 4.5 — same
+      // "more specific market should win outright, less specific one is a
+      // fallback" relationship DC1X has with Home/Draw, and it lines up with
+      // CA_SCAN_TIER (Over 2.5/Under 3.5 = Tier A, Over 1.5 = Tier B, Under
+      // 4.5/Home+Away Over 0.5 = Tier C). BTTS isn't nested with either
+      // ladder (a strong BTTS signal isn't "less specific total goals") so it
+      // stays a flat, always-eligible competitor throughout, same as Over
+      // 2.5/Under 3.5. Unlike RESULT's single family-wide gate, each ladder
+      // escalates independently — Under 3.5 admitting doesn't stop the Over
+      // ladder from escalating to Over 1.5, and vice versa. Three rounds:
+      // Tier A only -> add Tier B members whose Tier-A sibling didn't admit
+      // -> add Home/Away Over 0.5 only if NEITHER Over market admitted yet.
+      const tierA = ["TB:Over 2.5", "TB:Under 3.5", "TB:BTTS"];
+      resolvedTheses = resolveFamilyTheses(familyId, tierA);
+      let admitted = new Set(resolvedTheses.map(t => t.market));
+
+      const tierBAdd = [];
+      if (!admitted.has("TB:Over 2.5")) tierBAdd.push("TB:Over 1.5");
+      if (!admitted.has("TB:Under 3.5")) tierBAdd.push("TB:Under 4.5");
+      if (tierBAdd.length) {
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd]);
+        admitted = new Set(resolvedTheses.map(t => t.market));
+      }
+
+      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5")) {
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Home Over 0.5", "TB:Away Over 0.5"]);
+      }
+    } else {
+      resolvedTheses = resolveFamilyTheses(familyId, markets);
+    }
 
     // Contested — RESULT only (see EXCLUSIVE_THESIS_FAMILIES). Two
     // independently-qualifying, mutually exclusive theses within striking
@@ -3157,8 +3241,13 @@ function buildPool(fixtures, mfInput) {
       } else if (mf === "bttsyes"){ const o = oi(f.odds?.bttsYesOdds, m.bttsYes); if(o) pick = { fixtureId:f.id, game, pick:"BTTS Yes", odds:o, conf:m.bttsYes, market:"BTTS" };
       } else if (mf === "homewin"){ const o = oi(f.odds?.o1, m.homeWin); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.home} Win`, odds:o, conf:m.homeWin, market:"1X2" };
       } else if (mf === "awaywin"){ const o = oi(f.odds?.o2, m.awayWin); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.away} Win`, odds:o, conf:m.awayWin, market:"1X2" };
-      } else if (mf === "homeo05"){ const o = oi(f.odds?.over05odds, m.homeOver05); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.home} to Score`, odds:o, conf:m.homeOver05, market:"TeamTotal" };
-      } else if (mf === "awayo05"){ const o = oi(f.odds?.over05odds, m.awayOver05); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.away} to Score`, odds:o, conf:m.awayOver05, market:"TeamTotal" };
+      // 2026-08-27: over05odds is the whole-match Match Goals price (near-
+      // certain, ~1.02-1.05), not a per-team "to Score" price — confirmed
+      // against server.js's odds ingestion. No real per-team field exists
+      // from this provider, so implied-from-probability only (oi with a
+      // null first arg falls straight to safeImpliedOdds).
+      } else if (mf === "homeo05"){ const o = oi(null, m.homeOver05); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.home} to Score`, odds:o, conf:m.homeOver05, market:"TeamTotal" };
+      } else if (mf === "awayo05"){ const o = oi(null, m.awayOver05); if(o) pick = { fixtureId:f.id, game, pick:`${f.teams.away} to Score`, odds:o, conf:m.awayOver05, market:"TeamTotal" };
       }
       if (pick) break;
     }
@@ -14758,29 +14847,26 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   // (DA/"Deep Analyst" removed 2026-08-03 — learnedHR has been hardcoded
   //  null server-side since PE was retired in favor of BE; the hasDA
   //  branches below were unreachable, not just unused.)
+  // (hasSA branches removed 2026-08-27 — server.js hardcodes saPositive: 0
+  //  on every TGP leg ("no SA-attribution equivalent for TGP legs"), and
+  //  TGP V1+V2 is the sole source behind /api/engine-parlays/today since BE/
+  //  PE retired, so hasSA could never be true here. "Safety Net" (DC-led
+  //  ticket) is now the only special-cased name.)
   const getStrategyLabel = (strat, idx) => {
     const legs    = strat.legs || [];
     const mkts    = [...new Set(legs.map(l => l.market).filter(Boolean))];
     const dom     = (mkts[0] || "").toLowerCase();
-    const hasSA   = (strat.saPositive || 0) > 0;
-    const isGoals = dom.includes("over") || dom.includes("under");
     const isDC    = dom.includes("dc");
 
     // Name — short, user-facing (no internal engine codes)
     let name;
-    if (hasSA && isDC)               name = "Draw Cover";
-    else if (hasSA)                  name = "Strategy Pick";
-    else if (isDC)                   name = "Safety Net";
+    if (isDC)                        name = "Safety Net";
     else if (dom.includes("under"))  name = "Under Pick";
     else if (dom.includes("over"))   name = "Goals Over";
     else                             name = `Ticket ${idx + 1}`;
 
     // One-line rationale — explain what the signals mean in plain English
-    let rationale;
-    if (hasSA)
-      rationale = `${strat.saPositive} situational pattern${strat.saPositive!==1?"s":""} aligned`;
-    else
-      rationale = mkts.slice(0, 2).join(" · ") || "Mixed markets";
+    const rationale = mkts.slice(0, 2).join(" · ") || "Mixed markets";
 
     return { name, rationale };
   };
@@ -14818,7 +14904,9 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
         // N41-FIX: richer signal badges
         // (hasDA/hrGrade removed 2026-08-03 — same dead learnedHR field as
         // getStrategyLabel above; hrGrade was always null, badge never rendered)
-        const hasSA   = (strat.saPositive || 0) > 0;
+        // (hasSA removed 2026-08-27 — same reason as getStrategyLabel above;
+        // strat.saPositive is hardcoded 0 for every TGP-sourced ticket, so
+        // this was always false and the two badges below never rendered)
 
         // N36-FIX: verdict derived from server-enriched parlayResult
         const parlayResult = strat.parlayResult || null;
@@ -14902,13 +14990,6 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
               <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
                 <span style={{ fontSize:8, fontWeight:800, letterSpacing:".05em",
                                color:C.accent, textTransform:"uppercase" }}>{name}</span>
-                {hasSA && (
-                  <span style={{ fontSize:7, color:C.edge,
-                                 background:`${C.edge}10`, border:`1px solid ${C.edge}25`,
-                                 borderRadius:4, padding:"1px 5px" }}>
-                    {strat.saPositive} signal{strat.saPositive!==1?"s":""}
-                  </span>
-                )}
                 <span style={{ fontSize:7, color:C.muted, marginLeft:"auto" }}>
                   {legCount} leg{legCount!==1?"s":""} · {mktStr}
                 </span>
@@ -14918,14 +14999,6 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
             {/* ── Expanded legs + CTA ── */}
             {isOpen && (
               <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 14px 14px" }}>
-
-                {/* Signal explainer blurb */}
-                {hasSA && (
-                  <div style={{ borderLeft:`2px solid ${C.accent}40`, paddingLeft:8,
-                                marginBottom:10, fontSize:8, color:C.muted, lineHeight:1.6 }}>
-                    {`${strat.saPositive} situational signal${strat.saPositive!==1?"s":""} aligned across form, context, and market behaviour`}
-                  </div>
-                )}
 
                 {/* Legs */}
                 <div style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:12 }}>
@@ -15065,41 +15138,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       .catch(() => { for (const f of missing) scFetchedIdsRef.current.add(f.id); })
       .finally(() => setScLoading(false));
   }, [needsSC, fixtures, scLoading]);
-
-  // TGP Decompose pool (V1+V2, locked) — item E, 2026-08-24: TGP Decompose
-  // becomes a genuine Pattern Engine source alongside SA/CA/SC/Model,
-  // rather than its own separate tab. Fetched once per date from the
-  // already-locked /api/tgp-decompose-pool record (server.js) — same
-  // fetch-once-per-date pattern TGPControls used for its own shapes fetch.
-  // Both slots merged; each entry tagged with which version produced it.
-  const [tgpPoolData, setTgpPoolData] = useState(null);
-  const [tgpPoolLoading, setTgpPoolLoading] = useState(false);
-  useEffect(() => {
-    if (!date || !sources.has("tgp") || tgpPoolData?.date === date || tgpPoolLoading) return;
-    setTgpPoolLoading(true);
-    fetch(`${SERVER}/api/tgp-decompose-pool?date=${date}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setTgpPoolData(d); })
-      .catch(() => {})
-      .finally(() => setTgpPoolLoading(false));
-  }, [date, sources, tgpPoolData, tgpPoolLoading]);
-
-  // Indexed by fixtureId, not a per-fixture full-array scan inside
-  // qualifyingLegs' loop below — pool entries aren't tiny, and Sterling's
-  // whole reason for this restructuring is the app getting slow.
-  const tgpPoolByFixture = useMemo(() => {
-    const map = new Map();
-    if (!tgpPoolData || tgpPoolData.date !== date) return map;
-    const entries = [
-      ...(tgpPoolData.v1?.pool || []).map(e => ({ ...e, tgpVersion: 'v1' })),
-      ...(tgpPoolData.v2?.pool || []).map(e => ({ ...e, tgpVersion: 'v2' })),
-    ];
-    for (const e of entries) {
-      if (!map.has(e.fixtureId)) map.set(e.fixtureId, []);
-      map.get(e.fixtureId).push(e);
-    }
-    return map;
-  }, [tgpPoolData, date]);
 
   // Model probability — the base model's own predicted probability for a
   // market, independent of any pattern-mining engine. "TB:..." labeled
@@ -15260,9 +15298,10 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         }
       }
       // Consensus (2026-08-08) — per fixture, per family (Result/Dominance/
-      // Goals/Radar), the single strongest cross-engine lean, or nothing if
-      // no market in that family clears the reliability/edge bar. At most 4
-      // legs per fixture (one per family) — deliberately only the strongest
+      // Goals — Radar folded into Goals 2026-08-26, see SIGNAL_FAMILIES), the
+      // single strongest cross-engine lean, or nothing if no market in that
+      // family clears the reliability/edge bar. At most 3 legs per fixture
+      // (one per family) — deliberately only the strongest
       // per family, never also the secondary, since the whole point of
       // grouping by family is to avoid two correlated picks (e.g. Over 2.5 +
       // BTTS) landing in the same pool from one fixture.
@@ -15278,16 +15317,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
           const label = `${SIGNAL_FAMILY_LABELS[familyId]}: ${win.market.replace(/^TB:/, "")} · Consensus ${win.consensusGrade} (${engineTag})`;
           pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, "Consensus",
             { consensusGrade: win.consensusGrade, supportingEngines: win.supportingEngines });
-        }
-      }
-      // TGP Decompose (V1+V2, locked pool) — item E: same pushLeg gating
-      // as every other source (global floor, cross-source veto, odds
-      // validity), not a bypass. `lift` isn't separately available on a
-      // pool entry (it's already baked into V1's own `score` figure) —
-      // passing 0 rather than reverse-deriving an approximate number.
-      if (sources.has("tgp")) {
-        for (const e of tgpPoolByFixture.get(f.id) || []) {
-          pushLeg(f, e.market, e.pick, e.odds, e.conf, 0, `TGP ${e.tgpVersion.toUpperCase()}`);
         }
       }
       // Model — the raw base model's own probability, no pattern-mining
@@ -15319,8 +15348,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       (source === "SC" || source === "SC verdict") ? "sc" :
       (source === "CA" || source === "CA verdict") ? "ca" :
       source === "Model" ? "model" :
-      source === "Consensus" ? "consensus" :
-      (source === "TGP V1" || source === "TGP V2") ? "tgp" : "sa";
+      source === "Consensus" ? "consensus" : "sa";
     const corroborationByKey = new Map();
     for (const leg of legs) {
       const key = `${leg.fixtureId}|${leg.market}`;
@@ -15333,7 +15361,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       leg.corroboratingEngines = [...engines];
     }
     return legs;
-  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, tgpPoolByFixture, modelMinProb, applyGlobalFloor, isPastDate]);
+  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate]);
 
   const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
   // Ranking blends model probability in alongside whatever pattern-mining
@@ -15430,7 +15458,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     { id: "consensus", label: "Consensus" },
     { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
     { id: "sc", label: "SC" }, { id: "sc-verdict", label: "SC Verdict" }, { id: "model", label: "Model" },
-    { id: "tgp", label: "TGP" },
   ];
   const STRATEGY_OPTS = [
     { id: "mixed-ladder", label: "Mixed Ladder", desc: "Best leg per game" },
@@ -15441,7 +15468,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model/TGP into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into four market families — Result, Dominance, Goals, Radar — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. TGP (2026-08-24) pulls from the day's already-locked Decompose pool (V1+V2 combined) rather than matching live itself. Every other source still works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
+        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into three market families — Result, Dominance, Goals (Radar folded into Goals) — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Every other source works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
         {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && (
           <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
         )}

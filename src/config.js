@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://45c2f9edef6813.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://4amzuy-ip-105-118-7-198.tunnelmole.net"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
@@ -390,6 +390,22 @@ export const CROSS_MISMATCH_RANK_GAP_MIN = 40;   // min |rank gap| to trigger an
 export const CROSS_MISMATCH_RANK_GAP_MAX = 400;  // rank gap at which the shift caps out (e.g. a top-division team vs an amateur/regional side)
 export const CROSS_MISMATCH_SHIFT_MIN    = 0.05; // shift fraction at the minimum triggering gap
 export const CROSS_MISMATCH_SHIFT_MAX    = 0.20; // shift fraction at/beyond the max gap — NOTE: well under the BM guard's ceiling, on purpose (see above)
+
+// 2026-08-27: a team's inferred domestic league not being in LEAGUE_RANK is
+// NOT the same as "no signal" — every top-to-mid tier league we actually
+// track is already in that map, so an unlisted league is itself evidence of
+// a lower/regional/amateur tier. Previously an unresolved rank (999) caused
+// the guard to bail entirely, which meant it silently never fired for
+// almost every real mismatch (a listed team vs. an opponent from an obscure
+// regional league is exactly the case it exists for — confirmed empirically:
+// 0 of 39 cross-competition-flagged fixtures triggered the guard on
+// 2026-08-26). CROSS_MISMATCH_UNKNOWN_LEAGUE_RANK is the fallback rank used
+// for an unlisted-but-named league instead of bailing; the resulting shift
+// is scaled down by CROSS_MISMATCH_UNKNOWN_CONF_SCALE since this is an
+// inference over an inference (guessing "unlisted = weak", not confirming
+// it against a real rank number).
+export const CROSS_MISMATCH_UNKNOWN_LEAGUE_RANK = 500;
+export const CROSS_MISMATCH_UNKNOWN_CONF_SCALE  = 0.7;
 
 // ── BM Quality-Gap Multiplier (odds path, 2026-08-19) ──────────────────────
 // Companion to CROSS_MISMATCH_* above, but for the ODDS-present branch of a
