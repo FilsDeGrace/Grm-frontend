@@ -6176,7 +6176,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     }
   };
   useEffect(() => {
-    if (!caExpanded) return;
+    // Root-cause fix (2026-08-29): this used to gate purely on caExpanded,
+    // but Combine mode's engine-checkbox handler (~line 7713) calls
+    // setCaMarket(...) directly to lock CA onto a shared family the moment
+    // you check the CA box — it never touches caExpanded. That left a real
+    // window where caMarket was set (e.g. mid-Combine-mode selection) while
+    // caExpanded was still false, so this effect returned immediately and
+    // caPatternsRow never populated for that path. Firing on caMarket too
+    // (not just caExpanded) closes that gap without changing the "expand
+    // the row manually" behavior at all — same effect, wider trigger.
+    if (!caExpanded && !caMarket) return;
     if (caLoadingRow) return;
     if (caPatternsRow) return; // already have it — payload can be several MB, fetch once
     setCaLoadingRow(true);
@@ -6186,7 +6195,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .then(d => { if (d?.byMarket) setCaPatternsRow(d); else setCaErrorRow(d?.error || "No condition data"); })
       .catch(e => setCaErrorRow(e.message))
       .finally(() => setCaLoadingRow(false));
-  }, [caExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [caExpanded, caMarket]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SC ROW — mirrors CA's state shape structurally, but fetches nothing
   // upfront. CA fetches its whole mined-pattern payload once (can be several
@@ -6233,7 +6242,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     };
   }, [scStrongInputs]);
   useEffect(() => {
-    if (!scExpanded) return;
+    // Root-cause fix (2026-08-29): identical gap to the CA effect above, but
+    // with no caching layer to mask it (CA's "already have it" check meant
+    // an earlier manual expand left caPatternsRow populated for later
+    // Combine-mode use; SC has no equivalent, so this was a hard zero any
+    // time scMarket got set without scExpanded ever being true). Combine
+    // mode's SC checkbox (~line 7714) calls setScMarket(...) directly,
+    // bypassing this row's own expand toggle entirely — confirmed as the
+    // live trigger behind "SC shows no verdicts despite matching many
+    // patterns." Firing on scMarket too closes the gap.
+    if (!scExpanded && !scMarket) return;
     if (!fixtures?.length) return;
     if (scLoading) return;
     setScLoading(true);
@@ -6246,7 +6264,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .then(d => { if (d?.results) setScResults(d.results); else setScError(d?.error || "No settlement-condition data"); })
       .catch(e => setScError(e.message))
       .finally(() => setScLoading(false));
-  }, [scExpanded, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scExpanded, scMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };

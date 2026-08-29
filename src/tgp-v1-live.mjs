@@ -62,9 +62,18 @@ export const SA_MARKETS = {
   "TB:Away Over 1.5": { probKey:"awayOver15", oddsKey:null },
 };
 
+// 2026-08-27 (Alden — confirmed against server.js's odds ingestion):
+// homeOver05/awayOver05 used to map to "over05odds" here, same as App.jsx's
+// old teamTotalOddsFor. That field comes from the bookmaker's whole-match
+// "Match goals" market (server.js getGoalOdds), not a per-team scoring
+// price — this data provider has no team-total-goals market at all. Dropped
+// both keys entirely so lookups fall through to null (no fake "real" price),
+// same as caOddsFor already correctly does for these two markets via
+// SA_MARKETS' oddsKey:null. SC legs on these markets are implied-odds-only
+// downstream, same as every other engine now.
 export const SC_MARKET_ODDS_FIELD = {
   homeWin: "o1", awayWin: "o2", under35: "under35odds", under45: "under45odds",
-  bttsYes: "bttsYesOdds", homeOver05: "over05odds", awayOver05: "over05odds",
+  bttsYes: "bttsYesOdds",
 };
 
 // ── CA CONDITION MATCHER ──────────────────────────────────────────────────
