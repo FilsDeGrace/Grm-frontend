@@ -145,6 +145,14 @@ function sanitizeBookmakerError(raw, bookmakerLabel = "Bookmaker") {
 // ── ENGINE (inlined) ─────────────────────────────────────────────────────────
 
 // ── UTILITY FUNCTIONS ─────────────────────────────────────────────────────
+// Display-only — every raw odds/multiplier rendered as "×N" goes through
+// this so a floating-point artifact from chained multiplication (e.g.
+// 1.5092999999999999) never reaches the screen. Never used for the
+// underlying calculation value, only what's shown.
+function fmtOdds(v) {
+  const n = parseFloat(v);
+  return isFinite(n) ? n.toFixed(2) : null;
+}
 function safeImpliedOdds(prob) {
   if (!prob || prob <= 0 || prob > 100) return null;
   const raw = 1 / ((prob / 100) * 0.95);
@@ -565,7 +573,7 @@ const SA_MARKET_LABELS = [...Object.keys(SA_MARKETS)].map(id => ({
 // defaulting it to some weight, same as validateGene's own rejection rule.
 const CA_SCAN_TIER_A = { "TB:1X2-Home": 1.00, "TB:1X2-Away": 1.00, "TB:Over 2.5": 1.00, "TB:BTTS": 1.00, "TB:Under 3.5": 1.00 };
 const CA_SCAN_TIER_B = { "TB:DC1X": 0.85, "TB:DCX2": 0.85, "TB:Over 1.5": 0.85, "TB:Home Over 1.5": 0.70, "TB:Away Over 1.5": 0.70 };
-const CA_SCAN_TIER_C = { "TB:Home Over 0.5": 0.60, "TB:Away Over 0.5": 0.60, "TB:Under 4.5": 0.60 };
+const CA_SCAN_TIER_C = { "TB:Home Over 0.5": 0.40, "TB:Away Over 0.5": 0.40, "TB:Under 4.5": 0.40 };
 const CA_SCAN_TIER_LIST = [CA_SCAN_TIER_A, CA_SCAN_TIER_B, CA_SCAN_TIER_C];
 function caScanTierWeightOf(tbMarket) {
   for (const tier of CA_SCAN_TIER_LIST) if (tbMarket in tier) return tier[tbMarket];
@@ -599,7 +607,18 @@ function scScanTierWeightOf(poolMarket) {
 // engine-dispatch Scan already needs (SC carries pool-market ids, CA/SA
 // carry TB: keys).
 function tierWeightOf(engine, market) {
-  return engine === "sc" ? scScanTierWeightOf(market) : caScanTierWeightOf(market);
+  // Consensus (bestEngineCandidateForThesis) is the only real caller now —
+  // confirmed no other call site exists — and it always hands both engines
+  // the same canonical "TB:" market id by this point: resolveFamilyTheses's
+  // pushInto tags SC candidates with the outer-loop `market` variable, not
+  // SC's native bare-pool-id shape ("over25"). The old engine==="sc" branch
+  // assumed that native shape, which no longer reaches here — every SC
+  // candidate was hitting scScanTierWeightOf with an already-"TB:"-shaped
+  // id, missing in SC_SCAN_POOL_TO_TB, and coming back null — a hard
+  // "no-tier" rejection for every single SC candidate, unconditionally.
+  // That was the actual cause of SC Verdict being 0/134 despite matching
+  // every fixture, not a reliability/edge threshold problem.
+  return caScanTierWeightOf(market);
 }
 const SA_TO_FAMILY_ID = {
   "TB:Over 1.5": "over15", "TB:Over 2.5": "over25",
@@ -1823,6 +1842,24 @@ const FAMILY_THESIS_MAP = {
     "TB:DC1X":     [{ thesis: "HOME", specificity: 0.5 }, { thesis: "DRAW", specificity: 0.5 }],
     "TB:DCX2":     [{ thesis: "AWAY", specificity: 0.5 }, { thesis: "DRAW", specificity: 0.5 }],
   },
+  // 2026-08-29: GOALS previously fell through to thesisMapFor's identity
+  // fallback (every market at specificity 1.0) — the only thing discounting
+  // Under 4.5 / Home+Away Over 0.5 was the 0.60 CA_SCAN_TIER_C weight, which
+  // wasn't steep enough on its own. This is one-market-one-thesis still (no
+  // fusion across markets, same as before — Over 2.5 and Under 3.5 aren't
+  // merged into a shared thesis, matching the no-fabricated-correlation
+  // reasoning above), just with non-uniform specificity reflecting the same
+  // "more specific market should outrank a broader fallback" idea RESULT's
+  // DC1X/DCX2 already encode.
+  GOALS: {
+    "TB:Over 2.5":      [{ thesis: "TB:Over 2.5", specificity: 1.0 }],
+    "TB:Under 3.5":     [{ thesis: "TB:Under 3.5", specificity: 1.0 }],
+    "TB:BTTS":          [{ thesis: "TB:BTTS", specificity: 1.0 }],
+    "TB:Over 1.5":      [{ thesis: "TB:Over 1.5", specificity: 0.75 }],
+    "TB:Under 4.5":     [{ thesis: "TB:Under 4.5", specificity: 0.5 }],
+    "TB:Home Over 0.5": [{ thesis: "TB:Home Over 0.5", specificity: 0.5 }],
+    "TB:Away Over 0.5": [{ thesis: "TB:Away Over 0.5", specificity: 0.5 }],
+  },
 };
 function thesisMapFor(familyId, markets) {
   if (FAMILY_THESIS_MAP[familyId]) return FAMILY_THESIS_MAP[familyId];
@@ -2161,16 +2198,24 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       resolvedTheses = resolveFamilyTheses(familyId, tierA);
       let admitted = new Set(resolvedTheses.map(t => t.market));
 
+      // Round 2 (Tier B): only Over 1.5 belongs here (CA_SCAN_TIER_B).
+      // Under 4.5 is CA_SCAN_TIER_C, not Tier B — it used to get added here
+      // too, whenever Under 3.5 alone failed, letting it win netScore
+      // comparisons against BTTS/Over 2.5 far too easily regardless of
+      // whether the rest of the family had admitted anything. Moved to the
+      // true last-resort round below to match its actual tier.
       const tierBAdd = [];
       if (!admitted.has("TB:Over 2.5")) tierBAdd.push("TB:Over 1.5");
-      if (!admitted.has("TB:Under 3.5")) tierBAdd.push("TB:Under 4.5");
       if (tierBAdd.length) {
         resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd]);
         admitted = new Set(resolvedTheses.map(t => t.market));
       }
 
-      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5")) {
-        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Home Over 0.5", "TB:Away Over 0.5"]);
+      // Round 3 (Tier C, true last resort): Under 4.5 now waits here with
+      // Home/Away Over 0.5, and only enters if NEITHER the Over ladder (2.5
+      // or 1.5) NOR Under 3.5 admitted anything.
+      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5") && !admitted.has("TB:Under 3.5")) {
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Under 4.5", "TB:Home Over 0.5", "TB:Away Over 0.5"]);
       }
     } else {
       resolvedTheses = resolveFamilyTheses(familyId, markets);
@@ -9338,7 +9383,7 @@ function UploadBacktester() {
                     {result.summary.legWinRate != null && <span style={{ color:C.radar,marginLeft:8 }}>{result.summary.legWinRate}% leg hit rate</span>}
                   </div>
                 </div>
-                {result.totalOdds && <div style={{ fontSize:18,fontWeight:800,color:C.gold }}>×{result.totalOdds}</div>}
+                {result.totalOdds && <div style={{ fontSize:18,fontWeight:800,color:C.gold }}>×{fmtOdds(result.totalOdds)}</div>}
               </div>
               <div className="gc" style={{ overflow:"hidden" }}>
                 <div style={{ padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700 }}>Leg Results</div>
@@ -9349,11 +9394,11 @@ function UploadBacktester() {
                       <div>
                         <div style={{ fontWeight:600,color:C.text }}>{leg.game}</div>
                         {leg.league&&<div style={{ fontSize:7,color:C.text }}>{leg.league}</div>}
-                        {isMobile && <div style={{ fontSize:8,color:C.text,marginTop:1 }}>{leg.score||""}{leg.odds ? ` · ×${leg.odds}` : ""}</div>}
+                        {isMobile && <div style={{ fontSize:8,color:C.text,marginTop:1 }}>{leg.score||""}{leg.odds ? ` · ×${fmtOdds(leg.odds)}` : ""}</div>}
                       </div>
                       <div style={{ color:mktStyle(leg.market).color||C.muted,fontSize:9,fontWeight:700 }}>{leg.pick}</div>
                       {!isMobile && <div style={{ color:C.text,fontSize:9 }}>{leg.score||"—"}</div>}
-                      {!isMobile && <div style={{ fontSize:9,color:C.text }}>{leg.odds?`×${leg.odds}`:"—"}</div>}
+                      {!isMobile && <div style={{ fontSize:9,color:C.text }}>{leg.odds?`×${fmtOdds(leg.odds)}`:"—"}</div>}
                       <div style={{ fontWeight:800,color:resColor(leg.result),textAlign:isMobile?"right":"left" }}>{leg.result}</div>
                     </div>
                   );
@@ -10359,7 +10404,7 @@ function TicketBookNowButton({ legs }) {
                   </div>
                   <div style={{ fontSize:26, fontWeight:900, color:C.gold,
                                 letterSpacing:"-.01em", lineHeight:1 }}>
-                    ×{result.combinedOdds}
+                    ×{fmtOdds(result.combinedOdds)}
                   </div>
                 </div>
               )}
@@ -11776,7 +11821,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
           )}
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
-          <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{ticket.totalOdds}</span>
+          <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{fmtOdds(ticket.totalOdds)}</span>
           {ticket.combinedEmpiricalRate != null && (
             <span style={{ fontSize:9,color:C.radar,fontWeight:700 }} title="Combined probability — each leg's own historical hit-rate multiplied together across the whole ticket">
               {ticket.combinedEmpiricalRate}% combined
@@ -12222,7 +12267,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
             </div>
             <div style={{ textAlign:"right" }}>
               <div style={{ fontSize:9,color:C.green,textTransform:"uppercase",letterSpacing:".08em",marginBottom:3 }}>
-                {stake > 0 ? "Potential Return" : `×${ticket.totalOdds} odds`}
+                {stake > 0 ? "Potential Return" : `×${fmtOdds(ticket.totalOdds)} odds`}
               </div>
               <div style={{ fontSize:18,fontWeight:800,color:stake > 0 ? C.green : C.muted }}>
                 {stake > 0 ? `$${potential}` : "Enter stake"}
@@ -14105,7 +14150,7 @@ function ParlayHistoryAccordion({ byDate }) {
                           <div>
                             <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{s.label || `Ticket ${si+1}`}</span>
                             <span style={{ fontSize:7, color:C.muted, marginLeft:6 }}>
-                              {legCount} leg{legCount!==1?"s":""} · {s.combinedOdds ? `${s.combinedOdds}×` : "—"}
+                              {legCount} leg{legCount!==1?"s":""} · {s.combinedOdds ? `${fmtOdds(s.combinedOdds)}×` : "—"}
                             </span>
                           </div>
                           <span style={{ fontSize:8, fontWeight:800, color:vc, background:`${vc}15`, border:`1px solid ${vc}35`, borderRadius:4, padding:"1px 7px" }}>
@@ -14343,7 +14388,7 @@ function FixtureDrillSection({ title, subtitle, accentColor, aggregates, dailyTr
                               </div>
                             </div>
                             <span style={{ fontSize:8, color:C.gold, fontWeight:700, textAlign:"right" }}>
-                              {pick.odds ? `${pick.odds}×` : "—"}
+                              {pick.odds ? `${fmtOdds(pick.odds)}×` : "—"}
                             </span>
                             <div style={{ textAlign:"right", minWidth:28 }}>
                               <span style={{ fontSize:8, fontWeight:800, color:rc }}>
@@ -14554,7 +14599,7 @@ function DataAnalystPanel({ data, loading, days }) {
           {[
             ["Picks",    filtered.length,                     C.text],
             ["Hit Rate", hitRate != null ? `${hitRate}%`:"—", hrCol],
-            ["Avg Odds", avgOdds ? `${avgOdds}×`:"—",         C.gold],
+            ["Avg Odds", avgOdds ? `${fmtOdds(avgOdds)}×`:"—",         C.gold],
             ["Avg Conf", avgConf ? `${avgConf}%`:"—",         C.accent],
           ].map(([l,v,col]) => (
             <div key={l} style={{ textAlign:"center" }}>
@@ -14600,7 +14645,7 @@ function DataAnalystPanel({ data, loading, days }) {
                     {p.conf ? `${p.conf}%` : "—"}
                   </span>
                   <span style={{ fontSize:8, fontWeight:700, color:C.gold, textAlign:"right" }}>
-                    {p.odds ? `${p.odds}×` : "—"}
+                    {p.odds ? `${fmtOdds(p.odds)}×` : "—"}
                   </span>
                   <span style={{ fontSize:8, fontWeight:800, color:rc, minWidth:32, textAlign:"right" }}>
                     {p.result === "WIN" ? "W" : p.result === "LOSS" ? "L" : p.score || "–"}
@@ -14765,17 +14810,24 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   const [expanded, setExpanded]     = useState(null);
   const [usedIds, setUsedIds]       = useState(new Set());
   const [fetchedDate, setFetchedDate] = useState(cached?.fetchedDate || null);
+  // 2026-08-28: TGP V1/V2 toggle. Defaults to 'v1' — matches this tab's
+  // existing look/feed ("same tab as v1 whole, with a toggle to switch").
+  // NOTE this changes default behavior from the endpoint's old always-
+  // blended top-5 (V1+V2 interleaved) to V1-only until the user switches —
+  // flagging plainly since that's a real change, not just additive.
+  const [tgpVersion, setTgpVersion] = useState(cached?.tgpVersion || "v1");
+  const [fetchedVersion, setFetchedVersion] = useState(cached?.fetchedVersion || null);
 
-  // Fetch on mount and whenever date changes
+  // Fetch on mount and whenever date or the V1/V2 toggle changes
   useEffect(() => {
     if (!date) return;
-    // Don't re-fetch if we already have data for this date
-    if (fetchedDate === date && strategies.length) return;
+    // Don't re-fetch if we already have data for this exact date+version
+    if (fetchedDate === date && fetchedVersion === tgpVersion && strategies.length) return;
 
     let cancelled = false;
     setStatus("loading");
 
-    fetch(`${SERVER}/api/engine-parlays/today${date ? `?date=${date}` : ``}`)
+    fetch(`${SERVER}/api/engine-parlays/today?tgpVersion=${tgpVersion}${date ? `&date=${date}` : ``}`)
       .then(r => {
         if (!r.ok) throw new Error(`Server ${r.status}`);
         return r.json();
@@ -14787,7 +14839,8 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
         const newStatus = strats.length ? "ready" : "empty";
         setStatus(newStatus);
         setFetchedDate(date);
-        saveSS({ strategies: strats, status: newStatus, fetchedDate: date }); // N29-FIX
+        setFetchedVersion(tgpVersion);
+        saveSS({ strategies: strats, status: newStatus, fetchedDate: date, tgpVersion, fetchedVersion: tgpVersion }); // N29-FIX
       })
       .catch(err => {
         if (cancelled) return;
@@ -14796,15 +14849,35 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
       });
 
     return () => { cancelled = true; };
-  }, [date, SERVER]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [date, SERVER, tgpVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Retry on demand
   const handleRetry = () => {
     try { sessionStorage.removeItem(SS); } catch {}
     setFetchedDate(null);
+    setFetchedVersion(null);
     setStrategies([]);
     setStatus("idle");
   };
+
+  // V1/V2 toggle — switching invalidates the cached fetch for this date
+  // (fetchedVersion check above), same effect as a date change.
+  const TgpVersionToggle = () => (
+    <div style={{ display:"flex", gap:2, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:2 }}>
+      {["v1", "v2"].map(v => (
+        <button key={v} onClick={() => setTgpVersion(v)}
+          style={{
+            fontSize:9, fontWeight:800, padding:"4px 12px", borderRadius:6, border:"none",
+            background: tgpVersion === v ? C.edge : "transparent",
+            color: tgpVersion === v ? "#fff" : C.muted,
+            letterSpacing:".04em", textTransform:"uppercase",
+          }}>
+          {v.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+
 
   // ── Loading ──────────────────────────────────────────────────────────────────
   if (status === "loading" || status === "idle") {
@@ -14897,14 +14970,17 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
         <span style={{ fontSize:8, color:C.muted, letterSpacing:".06em" }}>
           {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap any to see legs
         </span>
-        {/* N30-FIX: show past date badge when not viewing today */}
-        {date && date !== new Date().toISOString().split("T")[0] && (
-          <span style={{ fontSize:7, fontWeight:800, color:C.amber, background:`${C.amber}15`,
-                         border:`1px solid ${C.amber}35`, borderRadius:5, padding:"2px 7px",
-                         letterSpacing:".06em", textTransform:"uppercase" }}>
-            {date}
-          </span>
-        )}
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <TgpVersionToggle />
+          {/* N30-FIX: show past date badge when not viewing today */}
+          {date && date !== new Date().toISOString().split("T")[0] && (
+            <span style={{ fontSize:7, fontWeight:800, color:C.amber, background:`${C.amber}15`,
+                           border:`1px solid ${C.amber}35`, borderRadius:5, padding:"2px 7px",
+                           letterSpacing:".06em", textTransform:"uppercase" }}>
+              {date}
+            </span>
+          )}
+        </div>
       </div>
 
       {strategies.map((strat, idx) => {
@@ -14966,7 +15042,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                                  color: verdictLabel === "WIN" ? C.green
                                       : verdictLabel === "LOSS" ? C.red
                                       : isUsed ? C.green : C.text }}>
-                    {odds ? `${odds}×` : "—"}
+                    {odds ? `${fmtOdds(odds)}×` : "—"}
                   </span>
                   {pct != null && (
                     <span style={{ fontSize:9, color: pct>=60?C.green:pct>=40?C.gold:C.muted, fontWeight:700 }}>
@@ -15063,7 +15139,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
                           </span>
                         )}
                         {leg.odds
-                          ? <span style={{ fontSize:11, fontWeight:800, color: legRes === "LOSS" ? C.red : legRes === "WIN" ? C.green : C.gold }}>{leg.odds}×</span>
+                          ? <span style={{ fontSize:11, fontWeight:800, color: legRes === "LOSS" ? C.red : legRes === "WIN" ? C.green : C.gold }}>{fmtOdds(leg.odds)}×</span>
                           : <span style={{ fontSize:9, color:C.muted }}>{leg.conf ? `${leg.conf}%` : "—"}</span>
                         }
                       </div>
@@ -15125,6 +15201,26 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // edges that intentionally diverge from the model. The UI can still turn
   // the floor off explicitly when that behavior is desired.
   const [applyGlobalFloor, setApplyGlobalFloor] = useState(true);
+  // Exclude Markets (2026-08-29) — this panel had no exclude mechanism at
+  // all before; CustomListView's excludedMarkets is a different component,
+  // out of scope here (see conversation: Davies chose a local, self-
+  // contained control per panel over lifting shared state). Same
+  // loadSS/saveSS persistence pattern CustomListView already uses, kept
+  // under its own session key so the two panels' exclusions don't collide
+  // or get confused for one another.
+  const [peExcludedMarkets, setPeExcludedMarketsState] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem("peExcludedMarkets");
+      const a = raw ? JSON.parse(raw) : null;
+      return Array.isArray(a) ? new Set(a) : new Set();
+    } catch { return new Set(); }
+  });
+  const togglePeExcludedMarket = (m) => setPeExcludedMarketsState(prev => {
+    const next = new Set(prev);
+    if (next.has(m)) next.delete(m); else next.add(m);
+    try { sessionStorage.setItem("peExcludedMarkets", JSON.stringify([...next])); } catch {}
+    return next;
+  });
   // 2026-08-18 fix — same bug as TGPControls' identical block: fetching
   // scResults ONCE and freezing on `if (scResults) return` meant any
   // fixture that rotated into the list after the first fetch (new
@@ -15189,6 +15285,21 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     return map;
   }, [appSaPatterns]);
 
+  // Market list for the Exclude Markets checklist below — drawn from the
+  // same SA/CA/SC data qualifyingLegs itself pulls from, so it never shows
+  // an option that couldn't produce a leg anyway.
+  const peAvailableMarkets = useMemo(() => {
+    const s = new Set();
+    for (const p of appSaPatterns || []) if (p.market) s.add(p.market);
+    for (const k of Object.keys(appCaPatterns?.byMarket || {})) s.add(k);
+    for (const k of Object.keys(appCaPatterns?.byMarketAvoid || {})) s.add(k);
+    for (const fid of Object.keys(scResults || {})) {
+      for (const c of scResults[fid]?.positive || []) if (c.market) s.add(c.market);
+      for (const c of scResults[fid]?.avoid || []) if (c.market) s.add(c.market);
+    }
+    return [...s].sort();
+  }, [appSaPatterns, appCaPatterns, scResults]);
+
   // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
   // LEAST ONE selected source (OR across sources, not AND — requiring every
   // engine to agree at once would leave most days with an almost-empty
@@ -15221,6 +15332,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
     const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source, extra) => {
       const oddsNum = parseFloat(odds);
       if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
+      if (peExcludedMarkets.has(market)) return;
       const fam = familyOfMarket(engineOfSource(source), market);
       if (fam != null && currentVetoFamilies.has(fam)) return;
       const mp = modelProbFor(f, market);
@@ -15379,7 +15491,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       leg.corroboratingEngines = [...engines];
     }
     return legs;
-  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate]);
+  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate, peExcludedMarkets]);
 
   const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
   // Ranking blends model probability in alongside whatever pattern-mining
@@ -15527,6 +15639,31 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
           Apply this floor to <strong style={{ color: C.text }}>every</strong> source, not just Model
         </span>
       </label>
+      {peAvailableMarkets.length > 0 && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+            <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, opacity: .75 }}>Exclude Markets</div>
+            {peExcludedMarkets.size > 0 && (
+              <span style={{ fontSize: 8, color: C.muted }}>({peExcludedMarkets.size} excluded)</span>
+            )}
+          </div>
+          <div className="cscroll" style={{ marginBottom: 12 }}>
+            {peAvailableMarkets.map(m => {
+              const isOff = peExcludedMarkets.has(m);
+              return (
+                <button key={m} onClick={() => togglePeExcludedMarket(m)} className="gb"
+                  style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
+                    background: isOff ? `${C.red}18` : "transparent",
+                    color: isOff ? (C.red) : C.muted,
+                    border: `1px solid ${isOff ? (C.red) : C.faint}`,
+                    textDecoration: isOff ? "line-through" : "none" }}>
+                  {m.replace(/^TB:/, "")}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
       <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Strategy</div>
       <div className="cscroll" style={{ marginBottom: strategy === "pure-ladder" ? 8 : 12 }}>
         {STRATEGY_OPTS.map(s => {
@@ -15661,6 +15798,34 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
 // pricing, the strongest occurrence must win rather than blocking the
 // entire stack.
 
+// Client-side mirror of server.js's tgpDecomposeLegToPoolEntry — same
+// pool-entry shape (fixtureId, game, pick, market, direction, odds, conf,
+// empiricalRate, modelProb, score, strategyLabel, strategyTags, isVolatile,
+// isRisky, ruleFireCount, league, resolvedMarket, oddsSource) that
+// buildManualParlaysFromPool already expects from V1's decomposedPool
+// entries, built here from /api/tgp-decompose-legs' raw `legs` array
+// instead of the locked-pool endpoint's pre-normalized response. Kept
+// field-for-field identical to the server version rather than reinvented,
+// per the same reasoning as tgp-whole-shape-live.mjs's header (two
+// implementations of a live/locked-pool distinction, not two designs) —
+// if one changes, mirror the other.
+function tgpDecomposeLegToPoolEntryClient(leg) {
+  return {
+    fixtureId: leg.fixtureId, game: `${leg.home || "?"} vs ${leg.away || "?"}`,
+    home: leg.home ?? null, away: leg.away ?? null,
+    pick: leg.market.replace(/^TB:/, ""), market: leg.market, direction: leg.direction,
+    odds: leg.odds, conf: Number.isFinite(leg.hitRate) ? Math.round(leg.hitRate) : null,
+    empiricalRate: Number.isFinite(leg.hitRate) ? Math.round(leg.hitRate) : null,
+    modelProb: leg.modelProb,
+    score: Number.isFinite(leg.hitRate) ? Math.max(0, Math.min(1, leg.hitRate / 100)) : null,
+    strategyLabel: "TGP V2", strategyTags: [],
+    isVolatile: false, isRisky: false, // same honest gap server.js's version carries
+    ruleFireCount: leg.ruleFireCount, league: leg.league,
+    resolvedMarket: leg.resolvedMarket ?? leg.market,
+    oddsSource: leg.oddsSource ?? "same-market",
+  };
+}
+
 function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   // fixtures/appSaPatterns/appCaPatterns props removed (2026-08-26) — no
   // longer needed here. All matching now runs server-side; the server
@@ -15680,6 +15845,23 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   const [minLift, setMinLift] = useState(5);
   const [minHoldoutN, setMinHoldoutN] = useState(15);
   const [marketFilter, setMarketFilter] = useState(null); // null = all markets
+  // Exclude Markets (2026-08-29) — same self-contained pattern as
+  // PatternEngineControls' peExcludedMarkets, kept as its own local state/
+  // session key rather than shared, per Davies's call to scope this per-
+  // panel instead of lifting excludedMarkets out of CustomListView.
+  const [tgpExcludedMarkets, setTgpExcludedMarketsState] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem("tgpExcludedMarkets");
+      const a = raw ? JSON.parse(raw) : null;
+      return Array.isArray(a) ? new Set(a) : new Set();
+    } catch { return new Set(); }
+  });
+  const toggleTgpExcludedMarket = (m) => setTgpExcludedMarketsState(prev => {
+    const next = new Set(prev);
+    if (next.has(m)) next.delete(m); else next.add(m);
+    try { sessionStorage.setItem("tgpExcludedMarkets", JSON.stringify([...next])); } catch {}
+    return next;
+  });
   // Whole Shape mode's own ranked-ticket-display state (2026-08-16 —
   // Sterling request). Search is a plain team/market substring match over
   // ALREADY-computed wholeShapeCandidates; visibleCount paginates that same
@@ -15702,7 +15884,19 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   const [tgpLive, setTgpLive] = useState(null); // { wholeShapeCandidates, decomposedPool, availableMarkets, criteria }
   const [tgpLiveLoading, setTgpLiveLoading] = useState(false);
   const [tgpLiveError, setTgpLiveError] = useState(null);
+  // 2026-08-28: V1/V2 toggle.
+  // 2026-08-30: previously forced "whole" mode whenever tgpVersion==="v2",
+  // because V2 had no decompose backend yet (only /api/tgp-v2-live-tickets
+  // existed). /api/tgp-decompose-legs now exists (tgp-decompose-live.mjs) —
+  // that restriction was wrong to keep and is removed below. Filter params
+  // (minLift, minHoldoutN, sourceFilter, modelMinProb, cutFilter,
+  // marketFilter, excludedMarkets) still aren't supported server-side for
+  // either V2 mode — see the "V2 shows its full live ticket list
+  // unfiltered" note in the render below, still accurate.
+  const [tgpVersion, setTgpVersion] = useState("v1");
+
   useEffect(() => {
+    if (tgpVersion !== "v1") return; // v2 has its own effect below
     const t = setTimeout(() => {
       setTgpLiveLoading(true);
       setTgpLiveError(null);
@@ -15712,6 +15906,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         sources: [...sourceFilter].join(","),
         modelMinProb: String(modelMinProb), applyModelFloor: String(applyModelFloor),
         cutFilter: String(cutFilter), marketFilter: marketFilter || "",
+        excludedMarkets: [...tgpExcludedMarkets].join(","),
       });
       fetch(`${SERVER}/api/tgp-v1-live?${params}`)
         .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
@@ -15720,7 +15915,88 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         .finally(() => setTgpLiveLoading(false));
     }, 350); // debounce — number inputs fire onChange per keystroke
     return () => clearTimeout(t);
-  }, [date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter]);
+  }, [tgpVersion, date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter, tgpExcludedMarkets]);
+
+  // 2026-08-28: V2 whole-shape fetch — normalizes /api/tgp-v2-live-tickets'
+  // flat `tickets` array into the EXACT same shape v1's response already
+  // has (wholeShapeCandidates/decomposedPool/availableMarkets/totalShapes/
+  // filteredShapesCount/minedGeneratedAt), written into the same
+  // tgpLive/tgpLiveLoading/tgpLiveError state v1 uses. Every render below
+  // this point (search, pagination, stacking, signature dedup) is
+  // completely unaware which version it's looking at — same reasoning as
+  // server.js's tgpTicketToStrategy comment: no downstream code should
+  // need to change just because the feed did.
+  // 2026-08-30: gated on mode==="whole" (was tgpVersion-only, back when V2
+  // had exactly one mode) and merges into tgpLive via functional setState
+  // instead of replacing it wholesale — V2 now has two independent live
+  // sources (this one, and the decompose fetch below), so overwriting the
+  // whole object would wipe out whichever mode ISN'T currently fetching.
+  useEffect(() => {
+    if (tgpVersion !== "v2" || mode !== "whole") return;
+    let cancelled = false;
+    setTgpLiveLoading(true);
+    setTgpLiveError(null);
+    fetch(`${SERVER}/api/tgp-v2-live-tickets?date=${date || todayStr()}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
+      .then(data => {
+        if (cancelled) return;
+        const wholeShapeCandidates = (data.tickets || []).map(t => ({
+          shape: {
+            legs: t.legs.map(l => ({ market: l.market, source: "tgp-v2", patternKey: l.legType })),
+            holdoutHR: t.holdoutAllHitRate, cut: t.size, holdoutN: t.holdoutDays, lift: t.lift,
+          },
+          assignment: t.legs.map(l => ({ fixtureId: l.fixtureId, home: l.home, away: l.away, odds: l.odds })),
+          combinedOdds: t.combinedOdds,
+          // V2's contradiction handling is exclude-at-candidacy (in
+          // computeLiveDecomposeLegs), not flag-and-still-show like V1's
+          // matchCAConditions — so this is genuinely empty, not unchecked.
+          flaggedLegs: [],
+        }));
+        setTgpLive(prev => ({
+          ...(prev || {}),
+          wholeShapeCandidates,
+          totalShapes: data.populationSize ?? 0, filteredShapesCount: data.liveTicketCount ?? wholeShapeCandidates.length,
+          minedGeneratedAt: data.generatedAt, criteria: null,
+        }));
+      })
+      .catch(e => { if (!cancelled) setTgpLiveError(e.message); })
+      .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
+    return () => { cancelled = true; };
+  }, [tgpVersion, mode, date]);
+
+  // 2026-08-30: V2 decompose fetch — the counterpart to the whole-shape
+  // fetch above, now that /api/tgp-decompose-legs exists
+  // (tgp-decompose-live.mjs's computeLiveDecomposeLegs). Normalizes its raw
+  // `legs` array into pool entries via tgpDecomposeLegToPoolEntryClient,
+  // which mirrors server.js's tgpDecomposeLegToPoolEntry (the same
+  // normalizer the locked /api/tgp-decompose-pool endpoint uses) field-for-
+  // field, so the live and locked V2 pool shapes never diverge. Only
+  // `date` is sent — none of this component's filter params have
+  // server-side support for V2 yet (see the render note below), so this
+  // shows the full unfiltered live leg pool, same honesty V2 whole-shape
+  // mode already carries.
+  useEffect(() => {
+    if (tgpVersion !== "v2" || mode !== "decompose") return;
+    let cancelled = false;
+    setTgpLiveLoading(true);
+    setTgpLiveError(null);
+    fetch(`${SERVER}/api/tgp-decompose-legs?date=${date || todayStr()}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
+      .then(data => {
+        if (cancelled) return;
+        const decomposedPool = (data.legs || []).map(tgpDecomposeLegToPoolEntryClient);
+        const availableMarkets = [...new Set(decomposedPool.map(e => e.market))];
+        setTgpLive(prev => ({
+          ...(prev || {}),
+          decomposedPool, availableMarkets,
+          totalShapes: data.legs?.length ?? 0, decomposeFilteredShapesCount: decomposedPool.length,
+          minedGeneratedAt: data.generatedAt, criteria: null,
+        }));
+      })
+      .catch(e => { if (!cancelled) setTgpLiveError(e.message); })
+      .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
+    return () => { cancelled = true; };
+  }, [tgpVersion, mode, date]);
 
   const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
   const decomposedPool = tgpLive?.decomposedPool || [];
@@ -15925,20 +16201,44 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
 
   return (
     <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontSize: 8, color: C.muted, letterSpacing: ".06em", textTransform: "uppercase" }}>Source</span>
+        <div style={{ display:"flex", gap:2, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:2 }}>
+          {["v1", "v2"].map(v => (
+            <button key={v} onClick={() => setTgpVersion(v)}
+              style={{
+                fontSize:9, fontWeight:800, padding:"4px 12px", borderRadius:6, border:"none",
+                background: tgpVersion === v ? C.edge : "transparent",
+                color: tgpVersion === v ? "#fff" : C.muted,
+                letterSpacing:".04em", textTransform:"uppercase",
+              }}>
+              {v.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         {[{ id: "decompose", label: "Decompose", desc: "Feed target-odds stack" },
-          { id: "whole", label: "Whole Shapes", desc: "Untested combo — see note" }].map(m => (
-          <button key={m.id} onClick={() => setMode(m.id)}
-            style={{ flex: 1, padding: "7px 4px", borderRadius: 8, border: "none",
-                     background: mode === m.id ? C.accent : "transparent",
-                     color: mode === m.id ? C.accentText : C.muted,
-                     fontSize: 9, fontWeight: 800, cursor: "pointer", fontFamily: C.font,
-                     display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-            <span>{m.label}</span>
-            <span style={{ fontSize: 7, opacity: .7, fontWeight: 500 }}>{m.desc}</span>
-          </button>
-        ))}
+          { id: "whole", label: "Whole Shapes", desc: "Untested combo — see note" }].map(m => {
+          return (
+            <button key={m.id} onClick={() => setMode(m.id)}
+              style={{ flex: 1, padding: "7px 4px", borderRadius: 8, border: "none",
+                       background: mode === m.id ? C.accent : "transparent",
+                       color: mode === m.id ? C.accentText : C.muted,
+                       fontSize: 9, fontWeight: 800, cursor: "pointer", fontFamily: C.font,
+                       display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <span>{m.label}</span>
+              <span style={{ fontSize: 7, opacity: .7, fontWeight: 500 }}>{m.desc}</span>
+            </button>
+          );
+        })}
       </div>
+      {tgpVersion === "v2" && (
+        <div style={{ fontSize: 7, color: C.muted, marginBottom: 8, fontStyle: "italic" }}>
+          Cut, source, lift, and holdout filters below apply to V1 only — V2 shows its full live ticket list unfiltered for now.
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
         {/* 2026-08-16 fix: Leg count and Market only apply to Decompose's
@@ -15960,6 +16260,31 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
             </select>
           </div>
         </>)}
+        {availableMarkets.length > 0 && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em" }}>Exclude Markets</div>
+              {tgpExcludedMarkets.size > 0 && (
+                <span style={{ fontSize: 8, color: C.muted }}>({tgpExcludedMarkets.size} excluded)</span>
+              )}
+            </div>
+            <div className="cscroll">
+              {availableMarkets.map(m => {
+                const isOff = tgpExcludedMarkets.has(m);
+                return (
+                  <button key={m} onClick={() => toggleTgpExcludedMarket(m)} className="gb"
+                    style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
+                      background: isOff ? `${C.red}18` : "transparent",
+                      color: isOff ? C.red : C.muted,
+                      border: `1px solid ${isOff ? C.red : C.faint}`,
+                      textDecoration: isOff ? "line-through" : "none" }}>
+                    {m.replace(/^TB:/, "")}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div>
           <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Min lift (pp)</div>
           <input type="number" value={minLift} onChange={e => setMinLift(+e.target.value)} onFocus={e => e.target.select()} className="gi" />
@@ -16477,7 +16802,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const s = [...ranked];
       while (s.length > 1 && trimOddsOf(s) > target) s.pop(); // drop lowest-score leg first
       if (trimOddsOf(s) > target) {
-        setTrimError(`Even your single best leg (×${s[0].odds}) is over ×${target} — can't reach that target without dropping below 1 leg.`);
+        setTrimError(`Even your single best leg (×${fmtOdds(s[0].odds)}) is over ×${target} — can't reach that target without dropping below 1 leg.`);
         return;
       }
       commit([asResult(s, `Trimmed to ×${target} max`)]);
@@ -16618,10 +16943,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     const out = [];
     if (draftLegs.length >= 3) out.push({ key: "draft", label: `Draft (${draftLegs.length} legs)`, legs: draftLegs });
     tickets.forEach(t => {
-      if ((t.legs||[]).length >= 3) out.push({ key: `ticket:${t.id}`, label: `${t.slotLabel || `Ticket #${t.id}`} (${t.legs.length} legs · ×${t.totalOdds})`, legs: t.legs });
+      if ((t.legs||[]).length >= 3) out.push({ key: `ticket:${t.id}`, label: `${t.slotLabel || `Ticket #${t.id}`} (${t.legs.length} legs · ×${fmtOdds(t.totalOdds)})`, legs: t.legs });
     });
     savedTickets.forEach(t => {
-      if ((t.legs||[]).length >= 3) out.push({ key: `saved:${t.code}`, label: `${t.code} (${t.legs.length} legs · ×${t.totalOdds})`, legs: t.legs });
+      if ((t.legs||[]).length >= 3) out.push({ key: `saved:${t.code}`, label: `${t.code} (${t.legs.length} legs · ×${fmtOdds(t.totalOdds)})`, legs: t.legs });
     });
     return out;
   }, [draftLegs, tickets, savedTickets]);
@@ -17993,7 +18318,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   <div style={{ display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:6 }}>
                     <div style={{ minWidth:0 }}>
                       <span style={{ fontSize:11,fontWeight:800,color:C.radar,letterSpacing:".08em" }}>{t.code}</span>
-                      <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>{t.date} · {t.legs?.length||0} legs · ×{t.totalOdds}</div>
+                      <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>{t.date} · {t.legs?.length||0} legs · ×{fmtOdds(t.totalOdds)}</div>
                     </div>
                     <button onClick={() => deleteSavedTicket(t.code)}
                       style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,padding:"0 0 0 8px",lineHeight:1,flexShrink:0 }}>✕</button>
@@ -18255,7 +18580,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                                   )}
                                   <span style={{ fontSize:10,fontWeight:800,color:C.accent,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{r.label} · {r.legs.length} legs</span>
                                 </div>
-                                <span style={{ fontSize:13,fontWeight:800,color:C.text,flexShrink:0 }}>×{r.totalOdds}</span>
+                                <span style={{ fontSize:13,fontWeight:800,color:C.text,flexShrink:0 }}>×{fmtOdds(r.totalOdds)}</span>
                               </div>
                               {/* ENGINE-MODE (2026-07-19): coverage — makes it visible, per card,
                                   whether this ranking actually had pattern data to blend in, and
