@@ -12212,7 +12212,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                   <span style={{ fontSize:11,fontWeight:800,color:accentColor }}>{leg.odds ? `${parseFloat(leg.odds).toFixed(2)}x` : "—"}</span>
                   <span style={{ fontSize:9,color:C.muted,marginLeft:5 }}>({Math.round(leg.conf||0)}%)</span>
                   {leg.empiricalRate != null && (
-                    <div style={{ fontSize:8,color:C.radar,marginTop:1 }}>{leg.empiricalRate}% hist</div>
+                    <div style={{ fontSize:7,color:C.radar,marginTop:1 }}>{leg.empiricalRate}% historical rate</div>
                   )}
                 </div>
               </div>
@@ -15814,7 +15814,7 @@ function tgpDecomposeLegToPoolEntryClient(leg) {
     fixtureId: leg.fixtureId, game: `${leg.home || "?"} vs ${leg.away || "?"}`,
     home: leg.home ?? null, away: leg.away ?? null,
     pick: leg.market.replace(/^TB:/, ""), market: leg.market, direction: leg.direction,
-    odds: leg.odds, conf: Number.isFinite(leg.hitRate) ? Math.round(leg.hitRate) : null,
+    odds: leg.odds, conf: Number.isFinite(leg.modelProb) ? Math.round(leg.modelProb) : null,
     empiricalRate: Number.isFinite(leg.hitRate) ? Math.round(leg.hitRate) : null,
     modelProb: leg.modelProb,
     score: Number.isFinite(leg.hitRate) ? Math.max(0, Math.min(1, leg.hitRate / 100)) : null,
@@ -15936,6 +15936,13 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     let cancelled = false;
     setTgpLiveLoading(true);
     setTgpLiveError(null);
+    // 2026-08-30: clear this slice immediately on entry, and again on
+    // failure below — the bug that made V1 and V2 look "identical" once
+    // population.json emptied out: this effect only ever wrote wholeShape-
+    // Candidates inside the success branch, so a failed or empty response
+    // silently left whichever version was on screen last (V1, since it
+    // fetches on mount) untouched instead of showing V2's true state.
+    setTgpLive(prev => ({ ...(prev || {}), wholeShapeCandidates: [] }));
     fetch(`${SERVER}/api/tgp-v2-live-tickets?date=${date || todayStr()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
       .then(data => {
@@ -15945,7 +15952,14 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
             legs: t.legs.map(l => ({ market: l.market, source: "tgp-v2", patternKey: l.legType })),
             holdoutHR: t.holdoutAllHitRate, cut: t.size, holdoutN: t.holdoutDays, lift: t.lift,
           },
-          assignment: t.legs.map(l => ({ fixtureId: l.fixtureId, home: l.home, away: l.away, odds: l.odds })),
+          assignment: t.legs.map(l => ({ fixtureId: l.fixtureId, home: l.home, away: l.away, odds: l.odds,
+            // 2026-08-30: was missing here (present in the decompose fetch
+            // below) — the odds themselves are already correctly ladder-
+            // resolved server-side either way, but without this the UI has
+            // no way to show WHICH market a negative leg actually priced
+            // against (e.g. label reads "Under 3.5" while it's really
+            // priced as "Over 2.5").
+            resolvedMarket: l.resolvedMarket ?? l.market, oddsSource: l.oddsSource ?? "same-market" })),
           combinedOdds: t.combinedOdds,
           // V2's contradiction handling is exclude-at-candidacy (in
           // computeLiveDecomposeLegs), not flag-and-still-show like V1's
@@ -15959,7 +15973,11 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
           minedGeneratedAt: data.generatedAt, criteria: null,
         }));
       })
-      .catch(e => { if (!cancelled) setTgpLiveError(e.message); })
+      .catch(e => {
+        if (cancelled) return;
+        setTgpLiveError(e.message);
+        setTgpLive(prev => ({ ...(prev || {}), wholeShapeCandidates: [] }));
+      })
       .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
     return () => { cancelled = true; };
   }, [tgpVersion, mode, date]);
@@ -15980,6 +15998,8 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     let cancelled = false;
     setTgpLiveLoading(true);
     setTgpLiveError(null);
+    // Same stale-data guard as the whole-shape effect above.
+    setTgpLive(prev => ({ ...(prev || {}), decomposedPool: [], availableMarkets: [] }));
     fetch(`${SERVER}/api/tgp-decompose-legs?date=${date || todayStr()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
       .then(data => {
@@ -15993,7 +16013,11 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
           minedGeneratedAt: data.generatedAt, criteria: null,
         }));
       })
-      .catch(e => { if (!cancelled) setTgpLiveError(e.message); })
+      .catch(e => {
+        if (cancelled) return;
+        setTgpLiveError(e.message);
+        setTgpLive(prev => ({ ...(prev || {}), decomposedPool: [], availableMarkets: [] }));
+      })
       .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
     return () => { cancelled = true; };
   }, [tgpVersion, mode, date]);
@@ -16151,7 +16175,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         return {
           fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
           pick: leg.market.replace(/^TB:/, ""), market: leg.market, league: a.league, odds: a.odds,
-          conf: Math.round(leg._shape.holdoutHR), empiricalRate: Math.round(leg._shape.holdoutHR),
+          conf: a.modelProb != null ? Math.round(a.modelProb) : null, empiricalRate: Math.round(leg._shape.holdoutHR),
           score: Math.max(0, Math.min(1, (leg._shape.holdoutHR + leg._shape.lift) / 100)),
           strategyLabel: "TGP whole-shape (stacked)", strategyTags: [],
         };
@@ -16175,7 +16199,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
       legs: assignment.map((a, i) => ({
         fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
         pick: legMarkets[i].replace(/^TB:/, ""), market: legMarkets[i], league: a.league, odds: a.odds,
-        conf: Math.round(shape.holdoutHR), empiricalRate: Math.round(shape.holdoutHR),
+        conf: a.modelProb != null ? Math.round(a.modelProb) : null, empiricalRate: Math.round(shape.holdoutHR),
         score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
         strategyLabel: "TGP whole-shape", strategyTags: [],
       })),
