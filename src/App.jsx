@@ -1519,10 +1519,25 @@ function marketForEngine(engine, familyId) {
 // replaces). thesisMapFor's identity-mapping fallback already treats every
 // non-RESULT family as one-market-one-thesis, so this is a pure membership
 // change — no other function needed to change for this fix.
+// 2026-08-30 (Davies's brainstorm session — TT ladder spam): Home/Away Over
+// 0.5 moved OUT of GOALS and INTO DOMINANCE. The 2026-08-26 fix above put
+// them in GOALS to stop them winning a trivial family too easily — right
+// call, but it meant TT 1.5's actual nested sibling (TT 0.5, same side, same
+// underlying quantity) sat in an unrelated family competing against
+// match-total markets (Over 2.5/BTTS) instead. TT 1.5 only ever had to beat
+// the OPPOSITE side's 1.5, never its own side's 0.5 — so a marginal-edge 1.5
+// won Dominance uncontested even when 0.5 was the better-supported pick for
+// that side.
+// NOTE: edge/reliability gating alone (SIGNAL_MIN_EDGE) is NOT being trusted
+// on its own here to stop 0.5 dominating its new family — the 2026-08-29
+// GOALS fix (see FAMILY_THESIS_MAP) proved that gate isn't steep enough by
+// itself. This move carries that same 0.5-specificity discount over into a
+// new DOMINANCE entry in FAMILY_THESIS_MAP below, just applied against the
+// correct sibling this time.
 const SIGNAL_FAMILIES = {
   RESULT:    ["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"],
-  DOMINANCE: ["TB:Home Over 1.5", "TB:Away Over 1.5"],
-  GOALS:     ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS", "TB:Home Over 0.5", "TB:Away Over 0.5"],
+  DOMINANCE: ["TB:Home Over 1.5", "TB:Away Over 1.5", "TB:Home Over 0.5", "TB:Away Over 0.5"],
+  GOALS:     ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS"],
 };
 export const SIGNAL_FAMILY_LABELS = { RESULT: "Result", DOMINANCE: "Dominance", GOALS: "Goals" };
 
@@ -1563,6 +1578,34 @@ const SIGNAL_CORROBORATION_BONUS = 8;
 // contradictions; this just keeps a weakly-contradicted market from winning
 // its family purely for being the least-contested one.
 const SIGNAL_CONTRADICTION_PENALTY = 0.5;
+
+// ── Directional synthesis gates + targets (2026-08-31) ──────────────────────
+// Deliberately stricter than SIGNAL_MIN_RELIABILITY/EDGE — a synthesized
+// thesis is a brand-new formula (treating an avoid-fused candidate as a
+// standalone positive for its complement) with zero backtested track record
+// yet, unlike mined theses which already went through CA's 486-fixture
+// recalibration replay. Same math (scoreSignal's isAvoid branch already
+// computes the correct complement probability), just a higher bar to be
+// admitted at all until real logged outcomes justify loosening it — same
+// "start conservative, log outcomes, recalibrate later" pattern
+// caRecalibratedHR/scRecalibratedHR already use elsewhere in this app.
+const SYNTH_MIN_RELIABILITY = SIGNAL_MIN_RELIABILITY + 12;
+const SYNTH_MIN_EDGE = SIGNAL_MIN_EDGE + 4;
+// originalMarket -> { market: synthesized complement's display/thesis id,
+// oddsFor: real priceable field for it }. Field sources confirmed against
+// getCustomPick's own map (~line 509-519) — over35/over45/under25/bttsNo all
+// real f.markets/f.odds fields already used elsewhere for the SAME numbers,
+// under15 has no dedicated field so it's implied from over15 the identical
+// way getCustomPick already derives it. Only markets with NO independent
+// mined complement belong here — see the resolveFamilyTheses synthesis-pass
+// comment for why RESULT and team-total markets are excluded.
+const SYNTH_TARGETS = {
+  "TB:Over 1.5":  { market: "SYNTH:Under 1.5", oddsFor: (f) => safeImpliedOdds(100 - (f.markets?.over15 ?? 0)) },
+  "TB:Over 2.5":  { market: "SYNTH:Under 2.5", oddsFor: (f) => f.odds?.under25odds || safeImpliedOdds(f.markets?.under25) },
+  "TB:Under 3.5": { market: "SYNTH:Over 3.5",  oddsFor: (f) => f.odds?.over35odds  || safeImpliedOdds(f.markets?.over35) },
+  "TB:Under 4.5": { market: "SYNTH:Over 4.5",  oddsFor: (f) => f.odds?.over45odds  || safeImpliedOdds(f.markets?.over45) },
+  "TB:BTTS":      { market: "SYNTH:BTTS No",   oddsFor: (f) => f.odds?.bttsNoOdds  || safeImpliedOdds(f.markets?.bttsNo) },
+};
 
 // Model agreement, generalized off caModelAgreementFactor's idea above
 // (reward modelProb sitting above/below the market's OWN baseline in the
@@ -1857,6 +1900,21 @@ const FAMILY_THESIS_MAP = {
     "TB:BTTS":          [{ thesis: "TB:BTTS", specificity: 1.0 }],
     "TB:Over 1.5":      [{ thesis: "TB:Over 1.5", specificity: 0.75 }],
     "TB:Under 4.5":     [{ thesis: "TB:Under 4.5", specificity: 0.5 }],
+  },
+  // 2026-08-30: Home/Away Over 0.5 relocated here from GOALS (see
+  // SIGNAL_FAMILIES comment) — carrying the SAME 0.5 specificity discount
+  // GOALS gave them one day earlier, just now applied against their actual
+  // sibling (their own side's Over 1.5) instead of unrelated match-total
+  // markets. That 0.5 discount was added because edge/reliability gating
+  // alone wasn't steep enough to stop 0.5 winning too easily — dropping it
+  // by falling through to thesisMapFor's identity default (specificity 1.0)
+  // the moment these markets moved families would have silently undone
+  // yesterday's fix. Home/Away Over 1.5 get 1.0 as DOMINANCE's own
+  // more-specific anchor markets, same "more specific outranks a broader
+  // fallback" idea RESULT's DC1X/DCX2 and GOALS' own ladder already encode.
+  DOMINANCE: {
+    "TB:Home Over 1.5": [{ thesis: "TB:Home Over 1.5", specificity: 1.0 }],
+    "TB:Away Over 1.5": [{ thesis: "TB:Away Over 1.5", specificity: 1.0 }],
     "TB:Home Over 0.5": [{ thesis: "TB:Home Over 0.5", specificity: 0.5 }],
     "TB:Away Over 0.5": [{ thesis: "TB:Away Over 0.5", specificity: 0.5 }],
   },
@@ -1947,6 +2005,30 @@ function consensusOddsFor(f, market) {
 // with) — that's the model being honest about single-engine evidence being
 // weaker, not a separate rule bolted on.
 const ENGINE_VERDICT_CLOSENESS = CONSENSUS_CONTEST_CLOSENESS; // one number, not a second copy of 0.85
+// ── CROSS-FAMILY VALUE RANKING (2026-08-31, Davies's brainstorm session) ───
+// Admission (SIGNAL_MIN_RELIABILITY/EDGE, unchanged) still gates whether a
+// family's candidate qualifies at all. This changes what happens NEXT — how
+// the fixture's headline is picked AMONG the families that qualified.
+// netScore alone structurally favors families that are just easier to find
+// any edge in (Dominance-type team-total markets clear admission more
+// readily than noisier Result-type markets), independent of which pick is
+// actually the better BET — the same shape of bug as TT 1.5 beating its own
+// side's TT 0.5 uncontested, just one level up. Fix: rank by how much the
+// pick disagrees with its own market price, not by raw confidence. A
+// near-certain pick is usually already priced in (short odds -> ~0 value
+// even at 90% reliability); a rarer signal the market underpriced shows real
+// value at a lower raw reliability. "Obvious" loses on its own terms in any
+// family, without a rotation cap or a hand-tuned per-family weight.
+// ENGINE_VERDICT_VALUE_CLOSENESS_PP is an absolute point gap, not a ratio —
+// value can be negative or near zero (a real signal the market has already
+// priced correctly), where a ratio-based closeness check (topValue * 0.85)
+// inverts itself for negative values. Placeholder pending real logging, same
+// "start conservative, log outcomes, refine later" pattern as
+// SYNTH_MIN_RELIABILITY above and caRecalibratedHR elsewhere in this file.
+const ENGINE_VERDICT_VALUE_CLOSENESS_PP = 5;
+function familyPickValue(pick) {
+  return pick.candidate.scored.reliability - (100 / pick.odds);
+}
 export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor, opts = {}) {
   const ctx = engine === "sc"
     ? { saPatternsByMarket: null, caPositive: [], caAvoid: [], scPositive: positiveList || [], scAvoid: avoidList || [], modelProbFor }
@@ -1955,10 +2037,11 @@ export function computeEngineVerdict(engine, f, positiveList, avoidList, modelPr
   const picks = Object.values(families)
     .filter(v => v && v.strongest)
     .map(v => v.strongest)
-    .sort((a, b) => b.netScore - a.netScore);
+    .sort((a, b) => familyPickValue(b) - familyPickValue(a));
   if (!picks.length) return { top: null, second: null, rejected: families.__rejected || null };
   const top = picks[0];
-  const second = picks.find(p => p !== top && p.market !== top.market && p.netScore >= top.netScore * ENGINE_VERDICT_CLOSENESS) ?? null;
+  const topValue = familyPickValue(top);
+  const second = picks.find(p => p !== top && p.market !== top.market && (topValue - familyPickValue(p)) <= ENGINE_VERDICT_VALUE_CLOSENESS_PP) ?? null;
   return { top, second };
 }
 
@@ -2076,6 +2159,33 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
     };
 
     const resolvedTheses = [];
+
+    // Extracted (2026-08-31, directional synthesis) — was inline inside the
+    // thesesPos loop below, only ever computed for a thesis that ALSO had
+    // positive evidence. That silently skipped the exact case synthesis
+    // needs most: a market with real avoid evidence and NO positive combo at
+    // all (nothing to penalize via contradiction, so the old inline version
+    // never ran for it). Same computation, just callable for any thesis
+    // regardless of whether thesesPos has a matching entry.
+    function resolveAvoidFusedForThesis(thesis, modelProb) {
+      const avoidByEngine = thesesAvoid.get(thesis);
+      if (!avoidByEngine) return null;
+      const perEngineAvoid = [];
+      for (const [engine, candidates] of avoidByEngine) {
+        const best = bestEngineCandidateForThesis(
+          engine, candidates, true, modelProb,
+          debug ? (r) => rejected.push({
+            familyId, thesis, market: r.market,
+            reliability: r.reliability, edge: r.edge,
+            supportingEngines: [engine], reason: r.reason,
+            avoid: true,
+          }) : null
+        );
+        if (best) perEngineAvoid.push(best);
+      }
+      return perEngineAvoid.length ? fuseThesisEvidence(perEngineAvoid) : null;
+    }
+
     for (const [thesis, byEngine] of thesesPos) {
       const modelProb = modelProbForThesis(thesis);
       const perEngineBest = [];
@@ -2097,24 +2207,7 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
 
       // Contradiction — avoid-direction evidence for the SAME thesis still
       // penalizes it (soft, not a veto — same spirit as before).
-      let avoidFused = null;
-      const avoidByEngine = thesesAvoid.get(thesis);
-      if (avoidByEngine) {
-        const perEngineAvoid = [];
-        for (const [engine, candidates] of avoidByEngine) {
-          const best = bestEngineCandidateForThesis(
-            engine, candidates, true, modelProb,
-            debug ? (r) => rejected.push({
-              familyId, thesis, market: r.market,
-              reliability: r.reliability, edge: r.edge,
-              supportingEngines: [engine], reason: r.reason,
-              avoid: true,
-            }) : null
-          );
-          if (best) perEngineAvoid.push(best);
-        }
-        if (perEngineAvoid.length) avoidFused = fuseThesisEvidence(perEngineAvoid);
-      }
+      const avoidFused = resolveAvoidFusedForThesis(thesis, modelProb);
 
       // ADMISSION FIX (2026-08-22): tier/specificity are ranking weights, not
       // statistical confidence. The previous version multiplied the raw edge
@@ -2149,8 +2242,67 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       resolvedTheses.push({
         thesis, market: fused.market, odds, netScore: netRankScore, candidate: fused.candidate,
         consensusGrade: fused.consensusGrade, supportingEngines: fused.supportingEngines,
-        hadContradiction: !!avoidFused,
+        hadContradiction: !!avoidFused, origin: "mined",
       });
+    }
+
+    // ── DIRECTIONAL SYNTHESIS (2026-08-31, Davies's brainstorm session) ────
+    // Avoid-direction evidence CA/SA/SC already validated becomes its own
+    // competing thesis for that market's exact logical complement — but ONLY
+    // where the complement has no independent mined data of its own (so this
+    // can never double-count against a real positive source already
+    // competing for the same thesis) and has a real priceable field (so it's
+    // an actual bettable leg, not a synthesized number with nothing to
+    // stake). Scoped to GOALS only: SYNTH_TARGETS below covers exactly the
+    // markets whose complement (Under 1.5/2.5, Over 3.5/4.5, BTTS No) is
+    // NEVER independently mined by SA/CA/SC anywhere in this app — confirmed
+    // against SA_TO_FAMILY_ID's key set. RESULT's DC1X/DCX2 complements
+    // (Away Win/Home Win) are deliberately excluded — those ARE independently
+    // mined and already compete on their own merits in RESULT, so
+    // synthesizing from DC1X/DCX2's avoid data too would double-count the
+    // same evidence twice. Team-total Over 0.5/1.5 excluded too — confirmed
+    // no exact complement exists for them at all (FAMILY_ID_COMPLEMENT's own
+    // comment: "nothing valid to flip to").
+    // Fires ONLY when the ORIGINAL market's own direct positive thesis did
+    // NOT already win its family this round (checked via resolvedTheses,
+    // just built above) — a market with strong enough positive evidence to
+    // admit on its own has nothing to "translate," this is specifically for
+    // the case where the direct read is silent or too weak, but the avoid
+    // read is loud. That's the "not every avoid should mean translation"
+    // gate: SYNTH_MIN_RELIABILITY/EDGE below are deliberately stricter than
+    // the mined floor (zero backtested track record yet for synthesized
+    // theses — see design doc), so only genuinely strong, broad avoid
+    // evidence clears it, not a single weak flag.
+    if (familyId === "GOALS") {
+      const alreadyAdmittedMarkets = new Set(resolvedTheses.map(t => t.market));
+      for (const [originalMarket, target] of Object.entries(SYNTH_TARGETS)) {
+        if (alreadyAdmittedMarkets.has(originalMarket)) continue;
+        const modelProb = modelProbFor(f, originalMarket);
+        const avoidFused = resolveAvoidFusedForThesis(originalMarket, modelProb);
+        if (!avoidFused) continue;
+        const reliability = avoidFused.candidate.scored.reliability;
+        const edge = avoidFused.candidate.scored.edge;
+        if (reliability < SYNTH_MIN_RELIABILITY || edge < SYNTH_MIN_EDGE) {
+          if (debug) {
+            rejected.push({
+              familyId, thesis: target.market, market: target.market,
+              reliability: Math.round(reliability * 10) / 10,
+              edge: Math.round(edge * 10) / 10,
+              supportingEngines: avoidFused.supportingEngines,
+              synthesizedFrom: originalMarket,
+            });
+          }
+          continue;
+        }
+        const odds = target.oddsFor(f);
+        if (!(odds > 1)) continue; // no priceable leg even for the synthesized target
+        resolvedTheses.push({
+          thesis: target.market, market: target.market, odds, netScore: avoidFused.netScore,
+          candidate: avoidFused.candidate, consensusGrade: avoidFused.consensusGrade,
+          supportingEngines: avoidFused.supportingEngines, hadContradiction: false,
+          origin: "synthesized", synthesizedFrom: originalMarket,
+        });
+      }
     }
 
     resolvedTheses.sort((a, b) => b.netScore - a.netScore);
@@ -2186,14 +2338,18 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       // "more specific market should win outright, less specific one is a
       // fallback" relationship DC1X has with Home/Draw, and it lines up with
       // CA_SCAN_TIER (Over 2.5/Under 3.5 = Tier A, Over 1.5 = Tier B, Under
-      // 4.5/Home+Away Over 0.5 = Tier C). BTTS isn't nested with either
+      // 4.5 = Tier C). BTTS isn't nested with either
       // ladder (a strong BTTS signal isn't "less specific total goals") so it
       // stays a flat, always-eligible competitor throughout, same as Over
       // 2.5/Under 3.5. Unlike RESULT's single family-wide gate, each ladder
       // escalates independently — Under 3.5 admitting doesn't stop the Over
       // ladder from escalating to Over 1.5, and vice versa. Three rounds:
       // Tier A only -> add Tier B members whose Tier-A sibling didn't admit
-      // -> add Home/Away Over 0.5 only if NEITHER Over market admitted yet.
+      // -> add Under 4.5 only if NEITHER Over market admitted yet.
+      // (2026-08-30: Home/Away Over 0.5 removed from this ladder entirely —
+      // moved to DOMINANCE, see SIGNAL_FAMILIES comment above. They were
+      // never really part of the match-total ladder; TT 0.5's real sibling
+      // is TT 1.5, same side, same underlying quantity.)
       const tierA = ["TB:Over 2.5", "TB:Under 3.5", "TB:BTTS"];
       resolvedTheses = resolveFamilyTheses(familyId, tierA);
       let admitted = new Set(resolvedTheses.map(t => t.market));
@@ -2211,11 +2367,11 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
         admitted = new Set(resolvedTheses.map(t => t.market));
       }
 
-      // Round 3 (Tier C, true last resort): Under 4.5 now waits here with
-      // Home/Away Over 0.5, and only enters if NEITHER the Over ladder (2.5
-      // or 1.5) NOR Under 3.5 admitted anything.
+      // Round 3 (Tier C, true last resort): Under 4.5 waits here, and only
+      // enters if NEITHER the Over ladder (2.5 or 1.5) NOR Under 3.5 admitted
+      // anything.
       if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5") && !admitted.has("TB:Under 3.5")) {
-        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Under 4.5", "TB:Home Over 0.5", "TB:Away Over 0.5"]);
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Under 4.5"]);
       }
     } else {
       resolvedTheses = resolveFamilyTheses(familyId, markets);
