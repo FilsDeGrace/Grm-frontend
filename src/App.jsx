@@ -3202,6 +3202,11 @@ function buildOneParlayFromPool(pool, usedIds, target, stake) {
   const legs = []; let prod = 1.0, hitTarget = false;
   for (const entry of pool) {
     if (usedIds.has(entry.fixtureId)) continue;
+    // A leg with no resolved price (null/undefined odds — e.g. a TGP
+    // unresolved-negative leg) can't be staked. JS coerces null to 0 in
+    // multiplication, which would silently zero the running product
+    // forever rather than fail loudly — skip it instead of consuming it.
+    if (!Number.isFinite(entry.odds) || entry.odds <= 0) continue;
     const next = parseFloat((prod * entry.odds).toFixed(4));
     legs.push(entry); prod = next; usedIds.add(entry.fixtureId);
     if (prod >= target) { hitTarget = true; break; }
@@ -3292,6 +3297,14 @@ function buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRa
     const legs = []; let prod = 1.0; let hitTarget = false;
     for (const entry of ordered) {
       if (localUsed.has(entry.fixtureId)) continue;
+      // Same guard as buildOneParlayFromPool: a leg with no resolved odds
+      // (TGP V2's unresolved-negative legs carry odds:null on purpose —
+      // see tgp-decompose-live.mjs) must not be staked. Without this,
+      // `prod * null` silently becomes 0 and never recovers, so the build
+      // never reaches target odds and instead drains the entire pool one
+      // fixture at a time — exactly the "203 fixtures, 0.00x, exhausted"
+      // symptom, not a real leg shortage.
+      if (!Number.isFinite(entry.odds) || entry.odds <= 0) continue;
       const mkt = entry.market; const mktCount = marketCount[mkt] || 0;
       if (mktCount >= maxSameMarket) { saturatedMarkets.add(mkt); continue; }
       const next = parseFloat((prod * entry.odds).toFixed(4));
@@ -11969,6 +11982,12 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
               ⚠ Exhausted
             </span>
           )}
+          {ticket.oddsIncomplete && (
+            <span className="grm-chip" style={{ color:C.amber,borderColor:`${C.amber}40`,background:C.amberDim }}
+              title={`${ticket.unpricedLegCount} leg${ticket.unpricedLegCount === 1 ? "" : "s"} had no resolved live odds today — the odds shown cover only the priced legs.`}>
+              ⚠ {ticket.unpricedLegCount} unpriced
+            </span>
+          )}
           {/* B3.2: notice when finished legs were excluded from RE-ADD */}
           {ticket._finishedExcluded > 0 && (
             <span className="grm-chip" style={{ color:C.muted,borderColor:`${C.border}`,background:"transparent",fontSize:8 }}>
@@ -11977,7 +11996,7 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
           )}
         </div>
         <div style={{ display:"flex",gap:8,alignItems:"center" }}>
-          <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{fmtOdds(ticket.totalOdds)}</span>
+          <span style={{ fontSize:13,color:C.text,fontWeight:800 }}>×{fmtOdds(ticket.totalOdds)}{ticket.oddsIncomplete ? " (partial)" : ""}</span>
           {ticket.combinedEmpiricalRate != null && (
             <span style={{ fontSize:9,color:C.radar,fontWeight:700 }} title="Combined probability — each leg's own historical hit-rate multiplied together across the whole ticket">
               {ticket.combinedEmpiricalRate}% combined
@@ -16325,7 +16344,12 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     }
 
     const droppedDuplicateLegs = flatLegs.length - assignment.length;
-    const combinedOdds = assignment.reduce((p, { candidate }) => p * candidate.odds, 1);
+    // Same call as addWholeShapeTicket (2026-09-04): don't refuse the
+    // stack over an unpriced leg — combine the priced legs' odds and flag
+    // the gap instead of faking a full number or blocking the add.
+    const pricedOdds = assignment.map(({ candidate }) => candidate.odds).filter(o => Number.isFinite(o) && o > 0);
+    const unpricedLegCount = assignment.length - pricedOdds.length;
+    const combinedOdds = pricedOdds.reduce((p, o) => p * o, 1);
     const shapesSummary = selectedCandidates
       .map(c => `cut${c.shape.cut} n=${c.shape.holdoutN} +${c.shape.lift}pp`).join("; ");
 
@@ -16342,7 +16366,8 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         };
       }),
       totalOdds: combinedOdds.toFixed(2), exhausted: false,
-      reason: `TGP stacked shapes (${selectedCandidates.length}): ${shapesSummary}. Duplicate fixtures were consolidated to the strongest occurrence${droppedDuplicateLegs ? `; ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} ignored` : ""}.`,
+      oddsIncomplete: unpricedLegCount > 0, unpricedLegCount,
+      reason: `TGP stacked shapes (${selectedCandidates.length}): ${shapesSummary}. Duplicate fixtures were consolidated to the strongest occurrence${droppedDuplicateLegs ? `; ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} ignored` : ""}.${unpricedLegCount ? ` ${unpricedLegCount} leg${unpricedLegCount === 1 ? "" : "s"} had no resolved live odds today — shown odds cover only the priced legs.` : ""}`,
       edgeScore: Math.min(...selectedCandidates.map(c => c.shape.holdoutHR)) / 100,
       jarvisConf: Math.round(selectedCandidates.reduce((s, c) => s + c.shape.holdoutHR, 0) / selectedCandidates.length),
     };
@@ -16353,8 +16378,17 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   };
 
   const addWholeShapeTicket = (candidate) => {
+    // Sterling's call (2026-09-04): don't refuse the add just because one
+    // leg's live odds didn't resolve today — the ticket itself is still
+    // useful (book the priced legs, check the unpriced one manually).
+    // combinedOdds is the product of ONLY the legs that do have a price;
+    // unpricedLegCount + oddsIncomplete tell the ticket card to label that
+    // number as partial instead of presenting it as the real total.
     const { shape, assignment } = candidate;
     const legMarkets = shape.legs.map(l => l.market);
+    const pricedOdds = assignment.map(a => a.odds).filter(o => Number.isFinite(o) && o > 0);
+    const unpricedLegCount = assignment.length - pricedOdds.length;
+    const partialOdds = pricedOdds.reduce((p, o) => p * o, 1);
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
       legs: assignment.map((a, i) => ({
@@ -16364,8 +16398,9 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
         strategyLabel: "TGP whole-shape", strategyTags: [],
       })),
-      totalOdds: candidate.combinedOdds.toFixed(2), exhausted: false,
-      reason: `TGP mined shape — cut${shape.cut}, holdout n=${shape.holdoutN}, lift ${shape.lift}pp. Combination of these specific legs was not itself holdout-tested.`,
+      totalOdds: partialOdds.toFixed(2), exhausted: false,
+      oddsIncomplete: unpricedLegCount > 0, unpricedLegCount,
+      reason: `TGP mined shape — cut${shape.cut}, holdout n=${shape.holdoutN}, lift ${shape.lift}pp. Combination of these specific legs was not itself holdout-tested.${unpricedLegCount ? ` ${unpricedLegCount} leg${unpricedLegCount === 1 ? "" : "s"} had no resolved live odds today — shown odds cover only the priced legs.` : ""}`,
       edgeScore: shape.holdoutHR / 100, jarvisConf: Math.round(shape.holdoutHR),
     };
     // Appends onto whatever's already in the draft (mirrors every other
@@ -16596,7 +16631,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
                   <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
                     <span style={{ fontSize: 7, color: C.muted }}>cut{cand.shape.cut} · n={cand.shape.holdoutN} · +{cand.shape.lift}pp</span>
                     <span style={{ fontSize: 8, fontWeight: 800, color: C.text, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 5, padding: "2px 6px" }}>
-                      {cand.combinedOdds.toFixed(2)}×
+                      {cand.combinedOdds != null ? `${cand.combinedOdds.toFixed(2)}×` : "odds unresolved"}
                     </span>
                   </div>
                 </div>
