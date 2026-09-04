@@ -16099,7 +16099,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     // silently left whichever version was on screen last (V1, since it
     // fetches on mount) untouched instead of showing V2's true state.
     setTgpLive(prev => ({ ...(prev || {}), wholeShapeCandidates: [] }));
-    fetch(`${SERVER}/api/tgp-v2-live-tickets?date=${date || todayStr()}`)
+    fetch(`${SERVER}/api/tgp-v2-live-tickets?date=${date || todayStr()}&modelMinProb=${modelMinProb}&applyModelFloor=${applyModelFloor}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
       .then(data => {
         if (cancelled) return;
@@ -16136,7 +16136,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
       })
       .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
     return () => { cancelled = true; };
-  }, [tgpVersion, mode, date]);
+  }, [tgpVersion, mode, date, modelMinProb, applyModelFloor]);
 
   // 2026-08-30: V2 decompose fetch — the counterpart to the whole-shape
   // fetch above, now that /api/tgp-decompose-legs exists
@@ -16156,7 +16156,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     setTgpLiveError(null);
     // Same stale-data guard as the whole-shape effect above.
     setTgpLive(prev => ({ ...(prev || {}), decomposedPool: [], availableMarkets: [] }));
-    fetch(`${SERVER}/api/tgp-decompose-legs?date=${date || todayStr()}`)
+    fetch(`${SERVER}/api/tgp-decompose-legs?date=${date || todayStr()}&modelMinProb=${modelMinProb}&applyModelFloor=${applyModelFloor}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
       .then(data => {
         if (cancelled) return;
@@ -16176,7 +16176,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
       })
       .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
     return () => { cancelled = true; };
-  }, [tgpVersion, mode, date]);
+  }, [tgpVersion, mode, date, modelMinProb, applyModelFloor]);
 
   const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
   const decomposedPool = tgpLive?.decomposedPool || [];
@@ -16303,6 +16303,11 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         body: JSON.stringify({
           date: date || todayStr(),
           legs: flatLegs.map(l => ({ market: l.market, source: l.source, patternKey: l.patternKey })),
+          // 2026-08-31: same floor already applied to build the
+          // wholeShapeCandidates these legs were picked from — stacking
+          // should combine already-filtered shapes, not re-resolve
+          // against an unfiltered pool.
+          modelMinProb, applyModelFloor,
         }),
       });
       const d = r.ok ? await r.json() : null;
