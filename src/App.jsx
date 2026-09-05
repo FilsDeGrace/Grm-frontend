@@ -5503,7 +5503,11 @@ function BookNowButton({ fixture }) {
           await new Promise(r => setTimeout(r, 1200));
           let job;
           try {
-            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`);
+            // 2026-09-05: same hang-bug fix as TicketBookNowButton's poll —
+            // no timeout meant a server that hangs (not just outright
+            // refuses) left this stuck forever, so the 60s ceiling below
+            // could never even be reached to end it.
+            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`, { signal: AbortSignal.timeout(8000) });
             job = await jr.json();
           } catch { continue; }
           if (job.status === "done") { data = job.result; break; }
@@ -9991,13 +9995,31 @@ function PendingBookingsBanner() {
       let anyFailure = false;
       for (const p of list) {
         try {
-          const r = await fetch(`${SERVER}/api/book-status/${p.jobId}`);
+          // 2026-09-05 fix (Sterling report — terminate/"Stop tracking" button
+          // never showed on a genuinely unreachable server): this fetch had no
+          // timeout, unlike every other polling fetch in the file (e.g. the
+          // auto-refresh check above, which already uses AbortSignal.timeout).
+          // A hard network refusal (connection reset, DNS failure) rejects
+          // fast and was already being caught below — but a server that's
+          // unreachable in the "accepts the connection, then never responds"
+          // way (asleep Termux process behind a still-open tunnel, a dead
+          // proxy, etc.) just hangs on this await forever. That stalls the
+          // whole check() call indefinitely: failCountRef never increments,
+          // connIssue never flips true, and the next setTimeout(check, …)
+          // never gets scheduled — so the banner freezes with no error text
+          // and no Stop-tracking button, while its % keeps climbing anyway
+          // (that's driven by the separate wall-clock tick interval below,
+          // which was never stuck). Exactly what showed in the screenshot.
+          // A timeout here forces the hang to surface as a rejection within
+          // 8s, so it counts toward the same 5-strikes connIssue logic that
+          // already existed for outright failures.
+          const r = await fetch(`${SERVER}/api/book-status/${p.jobId}`, { signal: AbortSignal.timeout(8000) });
           if (!r.ok) { stillPending.push(p); anyFailure = true; continue; } // 404/5xx — don't know, don't drop
           const job = await r.json();
           if (job.status === "pending") stillPending.push(p);
           else removePendingBooking(p.jobId); // CONFIRMED done/error only
         } catch {
-          stillPending.push(p); anyFailure = true; // network failure — don't know, don't drop
+          stillPending.push(p); anyFailure = true; // network failure or timeout — don't know, don't drop
         }
       }
       failCountRef.current = anyFailure ? failCountRef.current + 1 : 0;
@@ -10247,7 +10269,21 @@ function TicketBookNowButton({ legs }) {
           setBookingElapsed(Math.round((Date.now() - pollStart) / 1000));
           let job;
           try {
-            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`);
+            // 2026-09-05 fix (Sterling report — "Stop tracking" in the global
+            // banner doesn't unstick THIS ticket's own booking panel, still
+            // faded showing 'Booking your ticket…'"): same hang bug as
+            // PendingBookingsBanner's poll, fixed the same way — no timeout
+            // meant a server that hangs (rather than outright refusing) left
+            // this await pending forever. That's worse here than in the
+            // banner: isJobStopped(data.jobId) above is only re-checked at
+            // the TOP of each loop iteration, so once this fetch is stuck,
+            // the loop never gets back around to notice the stop flag at
+            // all — clicking Stop tracking updates the flag, but nothing in
+            // this frozen ticket instance is left to read it. A bounded
+            // timeout forces the await to resolve (via the catch below,
+            // which already just retries) so the loop reliably returns to
+            // the isJobStopped check within ~8s instead of never.
+            const jr = await fetch(`${SERVER}/api/book-status/${data.jobId}`, { signal: AbortSignal.timeout(8000) });
             job = await jr.json();
           } catch {
             continue; // transient poll failure — the job is still running server-side, just retry
@@ -20527,11 +20563,21 @@ function GRMProInner() {
       const parsed = JSON.parse(raw);
       const { date:d, data } = parsed;
       // Validate shape — old-schema fixtures missing teams/markets crash FixtureCard.
-      // A fixture without both fields is useless anyway so discard the whole cache.
-      const valid = Array.isArray(data) && data.length > 0 &&
-                    data.every(f => f && f.teams && f.markets);
-      if (d === date && valid) { const fd = stampFixtureDates(applyFinishedStates(data), d); setFixtures(fd); setCached(true); setCachedAt(parsed.cachedAt || null); setFrozenFixtures(fd); }
-      else if (!valid && data?.length) {
+      // 2026-09-05 fix: this used to discard the WHOLE cached day the moment a
+      // SINGLE fixture in it came back without teams/markets — e.g. one fixture
+      // added mid-day via a schedule change, still mid-pipeline on its markets
+      // computation at the moment of a 90s auto-refresh write. One incomplete
+      // fixture among 50+ meant every fixture lost its instant-load cache,
+      // forcing a full refetch (falls back to the server's snapshot fine, but
+      // loses the whole point of caching — instant render with no round trip
+      // at all). Now filters out just the bad ones and keeps the rest; the
+      // cache is only fully discarded when NOTHING in it is usable.
+      const filteredData = Array.isArray(data) ? data.filter(f => f && f.teams && f.markets) : [];
+      if (filteredData.length !== (data?.length || 0)) {
+        console.warn(`[GRM cache] dropped ${(data?.length || 0) - filteredData.length} incomplete fixture(s) from cached ${d} (missing teams/markets) — kept ${filteredData.length}.`);
+      }
+      if (d === date && filteredData.length) { const fd = stampFixtureDates(applyFinishedStates(filteredData), d); setFixtures(fd); setCached(true); setCachedAt(parsed.cachedAt || null); setFrozenFixtures(fd); }
+      else if (!filteredData.length && data?.length) {
         // Silently clear invalid cache so user fetches fresh data
         try { localStorage.removeItem(CACHE_KEY); } catch {}
       }
@@ -20603,7 +20649,15 @@ function GRMProInner() {
     const dateParam = pollDate ? `&date=${pollDate}` : "";
     pollRef.current = setInterval(async () => {
       try {
-        const r = await fetch(`${SERVER}/api/progress?session=${session}${dateParam}`), d = await r.json();
+        // 2026-09-05 fix: no timeout meant a server that hangs (accepts the
+        // connection, never responds — asleep Termux process, dead tunnel)
+        // left this await pending indefinitely instead of rejecting, so it
+        // never hit the catch below. Same bug class just fixed on the
+        // booking banner's poll. isStuck (below, in the render) already
+        // measured elapsed time client-side and could still warn correctly
+        // without this — but there was never a way to actually escape a
+        // hung fetch, only to be told about it.
+        const r = await fetch(`${SERVER}/api/progress?session=${session}${dateParam}`, { signal: AbortSignal.timeout(8000) }), d = await r.json();
         const pct = d.pct || 0;
         // Track last progress change for stuck detection
         if (pct !== lastProgressRef.current.pct) {
@@ -20622,6 +20676,20 @@ function GRMProInner() {
     if (loadingTimeoutRef.current) { clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null; }
   };
   useEffect(() => () => stopPolling(), []);
+  // 2026-09-05: manual escape hatch for a stuck fetch — stopPolling() already
+  // existed but was only ever called internally (unmount, a fresh fetchData
+  // call, or the pipeline itself reaching done/error). There was no way for
+  // the user to bail out of a hung fetch themselves; the "Taking longer than
+  // usual" warning in the loading UI was purely informational. This doesn't
+  // stop anything server-side (same disclosure as booking's "Stop tracking"
+  // — a background pipeline run keeps going and will still save its snapshot
+  // when/if it finishes), it only releases the client from waiting on it so
+  // FETCH can be pressed again.
+  const cancelFetch = () => {
+    stopPolling();
+    setLoading(false);
+    setError("Fetch cancelled — tap FETCH to try again. (If it was still running server-side, its result will be waiting next time you fetch this date.)");
+  };
 
   // Debounce ref — prevents rapid FETCH taps from spawning concurrent polls
   // each with a different session id, which causes the progress bar to sit at
@@ -20667,7 +20735,7 @@ function GRMProInner() {
             // call's session id, so this is a cheap belt-and-suspenders check
             // on top of the ref-based cancellation.
             if (session !== sessionIdRef.current) { clearInterval(loadWhenDoneRef.current); return; }
-            const check = await fetch(`${SERVER}/api/progress?session=${session}&date=${date}`);
+            const check = await fetch(`${SERVER}/api/progress?session=${session}&date=${date}`, { signal: AbortSignal.timeout(8000) });
             const d = await check.json();
             if (d.stage === "done") {
               clearInterval(loadWhenDoneRef.current); loadWhenDoneRef.current = null;
@@ -22207,12 +22275,22 @@ function GRMProInner() {
                   etaStr = "Usually 3–5 min";
                 }
                 return (
-                  <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4 }}>
-                    <span style={{ fontSize:8,color:C.muted }}>{etaStr || ""}</span>
+                  <div style={{ display:"flex",flexDirection:"column",gap:8,marginBottom:4 }}>
+                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+                      <span style={{ fontSize:8,color:C.muted }}>{etaStr || ""}</span>
+                      {isStuck && (
+                        <span style={{ fontSize:8,color:C.amber,fontWeight:700 }}>
+                          ⚠ Taking longer than usual
+                        </span>
+                      )}
+                    </div>
                     {isStuck && (
-                      <span style={{ fontSize:8,color:C.amber,fontWeight:700 }}>
-                        ⚠ Taking longer than usual
-                      </span>
+                      <button onClick={cancelFetch}
+                        style={{ alignSelf:"center", background:"transparent", border:`1px solid ${C.amber}40`,
+                                 borderRadius:8, padding:"6px 14px", fontSize:9, fontWeight:800, letterSpacing:".04em",
+                                 color:C.amber, cursor:"pointer", fontFamily:C.font }}>
+                        Cancel fetch
+                      </button>
                     )}
                   </div>
                 );
