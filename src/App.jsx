@@ -750,7 +750,7 @@ const CA_CONTRADICTION_PAIRS = [
   ["TB:1X2-Home", "TB:DCX2"],
   ["TB:1X2-Away", "TB:DC1X"],
 ];
-const CA_MARKET_SHORT = m => (m || "").replace(/^TB:/, "");
+const CA_MARKET_SHORT = m => (m || "").replace(/^TB:/, "").replace(/^SYNTH:/, "");
 
 // Pattern strength spectrum (dev journal, 2026-07-13: "not every positive or
 // negative pattern should carry the same weight... the system needs a way to
@@ -1534,12 +1534,33 @@ function marketForEngine(engine, familyId) {
 // itself. This move carries that same 0.5-specificity discount over into a
 // new DOMINANCE entry in FAMILY_THESIS_MAP below, just applied against the
 // correct sibling this time.
+// 2026-09-05: Home/Away Over 1.5 REMOVED from DOMINANCE entirely (explicit
+// product decision, not a data/scoring finding) — Davies wants TT 1.5 out of
+// every verdict surface (CA:Verdict, SC:Verdict, Consensus), not just
+// deprioritized against its own side's 0.5. DOMINANCE is now TT 0.5 only.
+// Matches config.js's own READ_RANK_WEIGHT_OVER15 = 0.75 (the LOWEST weight
+// in the whole pool, below TeamTotal's 0.82) — The Read has always treated
+// Over 1.5 as the least trustworthy market in its pool; this brings
+// Verdict/Consensus in line with that same judgment, just via exclusion
+// instead of a weight. If TT 1.5 needs to come back later, this is a one-line
+// revert (re-add both markets to the DOMINANCE array below) — nothing else
+// depends on the array's exact contents.
+// 2026-09-05 (Davies): standalone DOMINANCE family removed. Davies wants the
+// SAME cascade discipline that already governs Over 1.5/Under 4.5 inside
+// GOALS applied to TT 0.5 too — "TT 0.5 only wins when no good 1.5" — which
+// only makes sense as one rung inside GOALS' own ladder, not as a separate
+// family competing for its own headline slot in Consensus (that would let
+// TT 0.5 win a leg alongside Over 2.5/BTTS from the same fixture even when
+// Over 2.5 already told the same "goals" story better). TT 0.5 keeps its
+// own resolveFamilyTheses round below (see the GOALS branch), gated behind
+// the whole Over ladder, exactly like config.js's READ_RANK_WEIGHT_TEAMTOTAL
+// (0.82) sits below the main markets (1.00) and above Over 1.5's fallback
+// role in The Read pool.
 const SIGNAL_FAMILIES = {
-  RESULT:    ["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"],
-  DOMINANCE: ["TB:Home Over 1.5", "TB:Away Over 1.5", "TB:Home Over 0.5", "TB:Away Over 0.5"],
-  GOALS:     ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS"],
+  RESULT: ["TB:1X2-Home", "TB:1X2-Draw", "TB:1X2-Away", "TB:DC1X", "TB:DCX2"],
+  GOALS:  ["TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5", "TB:Under 4.5", "TB:BTTS", "TB:Home Over 0.5", "TB:Away Over 0.5"],
 };
-export const SIGNAL_FAMILY_LABELS = { RESULT: "Result", DOMINANCE: "Dominance", GOALS: "Goals" };
+export const SIGNAL_FAMILY_LABELS = { RESULT: "Result", GOALS: "Goals" };
 
 // What IS reused from CA's own ranking: effectiveN/wilsonLowerBound above —
 // gap-adjusted-sample-size + Wilson lower bound is genuinely the right
@@ -1579,33 +1600,26 @@ const SIGNAL_CORROBORATION_BONUS = 8;
 // its family purely for being the least-contested one.
 const SIGNAL_CONTRADICTION_PENALTY = 0.5;
 
-// ── Directional synthesis gates + targets (2026-08-31) ──────────────────────
-// Deliberately stricter than SIGNAL_MIN_RELIABILITY/EDGE — a synthesized
-// thesis is a brand-new formula (treating an avoid-fused candidate as a
-// standalone positive for its complement) with zero backtested track record
-// yet, unlike mined theses which already went through CA's 486-fixture
-// recalibration replay. Same math (scoreSignal's isAvoid branch already
-// computes the correct complement probability), just a higher bar to be
-// admitted at all until real logged outcomes justify loosening it — same
-// "start conservative, log outcomes, recalibrate later" pattern
-// caRecalibratedHR/scRecalibratedHR already use elsewhere in this app.
-const SYNTH_MIN_RELIABILITY = SIGNAL_MIN_RELIABILITY + 12;
-const SYNTH_MIN_EDGE = SIGNAL_MIN_EDGE + 4;
-// originalMarket -> { market: synthesized complement's display/thesis id,
-// oddsFor: real priceable field for it }. Field sources confirmed against
-// getCustomPick's own map (~line 509-519) — over35/over45/under25/bttsNo all
-// real f.markets/f.odds fields already used elsewhere for the SAME numbers,
-// under15 has no dedicated field so it's implied from over15 the identical
-// way getCustomPick already derives it. Only markets with NO independent
-// mined complement belong here — see the resolveFamilyTheses synthesis-pass
-// comment for why RESULT and team-total markets are excluded.
-const SYNTH_TARGETS = {
-  "TB:Over 1.5":  { market: "SYNTH:Under 1.5", oddsFor: (f) => safeImpliedOdds(100 - (f.markets?.over15 ?? 0)) },
-  "TB:Over 2.5":  { market: "SYNTH:Under 2.5", oddsFor: (f) => f.odds?.under25odds || safeImpliedOdds(f.markets?.under25) },
-  "TB:Under 3.5": { market: "SYNTH:Over 3.5",  oddsFor: (f) => f.odds?.over35odds  || safeImpliedOdds(f.markets?.over35) },
-  "TB:Under 4.5": { market: "SYNTH:Over 4.5",  oddsFor: (f) => f.odds?.over45odds  || safeImpliedOdds(f.markets?.over45) },
-  "TB:BTTS":      { market: "SYNTH:BTTS No",   oddsFor: (f) => f.odds?.bttsNoOdds  || safeImpliedOdds(f.markets?.bttsNo) },
-};
+// ── Directional synthesis — REMOVED (2026-09-05, Davies) ────────────────────
+// The whole premise was flipping strong avoid evidence into a standalone
+// pick for a market's exact logical complement. Checked against Davies's
+// actual TB: market catalog (the canonical list of markets this app treats
+// as real, bettable things — grep "TB:" across the file) and every single
+// complement this ever produced (Under 1.5, Under 2.5, Over 3.5, Over 4.5,
+// BTTS No) is ABSENT from it. Under 2.5 was already cut in the prior pass on
+// the same reasoning; Davies then pointed out directly that none of the
+// remaining three are bookable either — TB: only has Over 1.5/2.5, Under
+// 3.5/4.5, and BTTS, never their opposite-direction complements. A
+// synthesized pick nobody can actually place is worse than no pick — it's a
+// verdict/leg the UI presents as actionable that has no real market behind
+// it. Removed SYNTH_MIN_RELIABILITY/EDGE, SYNTH_TARGETS, and the synthesis
+// pass in resolveFamilyTheses below entirely, rather than leaving them
+// dead/unreachable. Avoid-direction evidence still does real work — it soft-
+// penalizes a contradicted positive thesis via SIGNAL_CONTRADICTION_PENALTY
+// (resolveAvoidFusedForThesis, still used for that) — it just never becomes
+// a standalone pick of its own anymore. If a genuinely bookable complement
+// market ever gets added to TB: in the future, this is the reasoning to
+// revisit, not the mechanism (a fresh SYNTH_TARGETS entry could point at it).
 
 // Model agreement, generalized off caModelAgreementFactor's idea above
 // (reward modelProb sitting above/below the market's OWN baseline in the
@@ -1894,29 +1908,22 @@ const FAMILY_THESIS_MAP = {
   // reasoning above), just with non-uniform specificity reflecting the same
   // "more specific market should outrank a broader fallback" idea RESULT's
   // DC1X/DCX2 already encode.
+  // 2026-09-05 (Davies): Home/Away Over 0.5 (TT 0.5) folded in from the
+  // retired standalone DOMINANCE family (see SIGNAL_FAMILIES comment).
+  // Specificity 0.6 slots it between Over 1.5 (0.75) and Under 4.5 (0.5) —
+  // matching Davies's stated ordering for GOALS' secondary tier (1.5, then
+  // TT 0.5, then Under 4.5). Home vs Away Over 0.5 still compete as
+  // symmetric peers against each other at the same specificity — this
+  // discount is about TT 0.5's rank against the OTHER GOALS markets, not
+  // between the two sides.
   GOALS: {
     "TB:Over 2.5":      [{ thesis: "TB:Over 2.5", specificity: 1.0 }],
     "TB:Under 3.5":     [{ thesis: "TB:Under 3.5", specificity: 1.0 }],
     "TB:BTTS":          [{ thesis: "TB:BTTS", specificity: 1.0 }],
     "TB:Over 1.5":      [{ thesis: "TB:Over 1.5", specificity: 0.75 }],
+    "TB:Home Over 0.5": [{ thesis: "TB:Home Over 0.5", specificity: 0.6 }],
+    "TB:Away Over 0.5": [{ thesis: "TB:Away Over 0.5", specificity: 0.6 }],
     "TB:Under 4.5":     [{ thesis: "TB:Under 4.5", specificity: 0.5 }],
-  },
-  // 2026-08-30: Home/Away Over 0.5 relocated here from GOALS (see
-  // SIGNAL_FAMILIES comment) — carrying the SAME 0.5 specificity discount
-  // GOALS gave them one day earlier, just now applied against their actual
-  // sibling (their own side's Over 1.5) instead of unrelated match-total
-  // markets. That 0.5 discount was added because edge/reliability gating
-  // alone wasn't steep enough to stop 0.5 winning too easily — dropping it
-  // by falling through to thesisMapFor's identity default (specificity 1.0)
-  // the moment these markets moved families would have silently undone
-  // yesterday's fix. Home/Away Over 1.5 get 1.0 as DOMINANCE's own
-  // more-specific anchor markets, same "more specific outranks a broader
-  // fallback" idea RESULT's DC1X/DCX2 and GOALS' own ladder already encode.
-  DOMINANCE: {
-    "TB:Home Over 1.5": [{ thesis: "TB:Home Over 1.5", specificity: 1.0 }],
-    "TB:Away Over 1.5": [{ thesis: "TB:Away Over 1.5", specificity: 1.0 }],
-    "TB:Home Over 0.5": [{ thesis: "TB:Home Over 0.5", specificity: 0.5 }],
-    "TB:Away Over 0.5": [{ thesis: "TB:Away Over 0.5", specificity: 0.5 }],
   },
 };
 function thesisMapFor(familyId, markets) {
@@ -1996,8 +2003,10 @@ function consensusOddsFor(f, market) {
 // all" is satisfied by construction, not by adding a second check).
 //
 // The only thing genuinely different about "Verdict" vs "Consensus" is the
-// OUTPUT SHAPE: Consensus keeps one leg per family (up to 4 legs feeding a
-// ticket); Verdict flattens that down to a single headline pick — whichever
+// OUTPUT SHAPE: Consensus keeps one leg per family (up to 2 legs feeding a
+// ticket — RESULT and GOALS, since 2026-09-05 folded the old standalone
+// DOMINANCE family's TT 0.5 into GOALS as its own cascade round instead of a
+// third family); Verdict flattens that down to a single headline pick — whichever
 // family's strongest candidate has the best netScore overall — plus a
 // second only if another family's pick is within the same closeness margin
 // families already use internally. Corroboration/grade naturally cap lower
@@ -2005,29 +2014,52 @@ function consensusOddsFor(f, market) {
 // with) — that's the model being honest about single-engine evidence being
 // weaker, not a separate rule bolted on.
 const ENGINE_VERDICT_CLOSENESS = CONSENSUS_CONTEST_CLOSENESS; // one number, not a second copy of 0.85
-// ── CROSS-FAMILY VALUE RANKING (2026-08-31, Davies's brainstorm session) ───
-// Admission (SIGNAL_MIN_RELIABILITY/EDGE, unchanged) still gates whether a
-// family's candidate qualifies at all. This changes what happens NEXT — how
-// the fixture's headline is picked AMONG the families that qualified.
-// netScore alone structurally favors families that are just easier to find
-// any edge in (Dominance-type team-total markets clear admission more
-// readily than noisier Result-type markets), independent of which pick is
-// actually the better BET — the same shape of bug as TT 1.5 beating its own
-// side's TT 0.5 uncontested, just one level up. Fix: rank by how much the
-// pick disagrees with its own market price, not by raw confidence. A
-// near-certain pick is usually already priced in (short odds -> ~0 value
-// even at 90% reliability); a rarer signal the market underpriced shows real
-// value at a lower raw reliability. "Obvious" loses on its own terms in any
-// family, without a rotation cap or a hand-tuned per-family weight.
-// ENGINE_VERDICT_VALUE_CLOSENESS_PP is an absolute point gap, not a ratio —
-// value can be negative or near zero (a real signal the market has already
-// priced correctly), where a ratio-based closeness check (topValue * 0.85)
-// inverts itself for negative values. Placeholder pending real logging, same
-// "start conservative, log outcomes, refine later" pattern as
-// SYNTH_MIN_RELIABILITY above and caRecalibratedHR elsewhere in this file.
-const ENGINE_VERDICT_VALUE_CLOSENESS_PP = 5;
-function familyPickValue(pick) {
-  return pick.candidate.scored.reliability - (100 / pick.odds);
+// ── CROSS-FAMILY WEIGHTED-PROBABILITY RANKING (2026-09-05) ──────────────────
+// Replaces the 2026-08-31 odds-value ranking (reliability - impliedProb) —
+// Davies asked directly whether this ranking matched config.js's own
+// approach, and checking it directly: it didn't. config.js's Read pool
+// (READ_RANK_WEIGHT_*) ranks by probability × a fixed, hand-tuned weight per
+// market — no odds subtraction at all. Two different philosophies: odds-value
+// asks "does the market already know this," weighted-probability asks "is
+// this market family structurally trustworthy as a headline, independent of
+// today's price." Davies's own weights are already backtested (Over 1.5 at
+// 0.75 — the LOWEST weight in his whole pool, even below TeamTotal's 0.82,
+// per his comment "ranked at 0.75 so even an 85% O1.5 loses to a 65% 1X2"),
+// so this replaces the odds-value formula with the same mechanism rather
+// than running two different philosophies in parallel. VERDICT_RANK_WEIGHT
+// below reuses his exact numbers where a market overlaps his Read pool
+// (1X2/DC/BTTS/Over 2.5/Under 3.5/TeamTotal/Over 1.5). Any market with no
+// entry below defaults to neutral (1.0) — see verdictRankWeightFor.
+// 2026-09-05 (Davies): Under 4.5 previously inherited Under 3.5's 1.00
+// weight on the reasoning that they're ladder siblings — wrong once Davies
+// spelled out his actual pool ordering directly: 1X2/Over 2.5/BTTS/Under 3.5
+// are his MAIN picks (all 1.00); DC/Over 1.5/TT 0.5/Under 4.5 are secondary,
+// each only winning when the tier above it doesn't qualify. Under 4.5 is the
+// last rung in GOALS' own cascade (see the GOALS branch below — it only
+// ever gets considered after Over 2.5, Over 1.5, AND TT 0.5 have all failed
+// to admit), so it should rank at least as low as the other secondary
+// markets once it does reach a cross-family comparison — set to 0.60, below
+// both Over 1.5 (0.75) and TeamTotal (0.82), matching its position as the
+// last rung on the ladder.
+const VERDICT_RANK_WEIGHT = {
+  "TB:1X2-Home": 1.00, "TB:1X2-Draw": 1.00, "TB:1X2-Away": 1.00,   // READ_RANK_WEIGHT_1X2
+  "TB:DC1X": 1.00, "TB:DCX2": 1.00,                                 // READ_RANK_WEIGHT_DC
+  "TB:BTTS": 1.00,                                                  // READ_RANK_WEIGHT_BTTS
+  "TB:Over 2.5": 1.00,                                              // READ_RANK_WEIGHT_OVER25
+  "TB:Under 3.5": 1.00,                                             // READ_RANK_WEIGHT_UNDER35
+  "TB:Over 1.5": 0.75,                                              // READ_RANK_WEIGHT_OVER15 (exact)
+  "TB:Home Over 0.5": 0.82, "TB:Away Over 0.5": 0.82,               // READ_RANK_WEIGHT_TEAMTOTAL (exact)
+  "TB:Under 4.5": 0.60,                                             // last-resort GOALS rung — see comment above, not config's UNDER35 weight
+};
+function verdictRankWeightFor(market) {
+  return VERDICT_RANK_WEIGHT[market] ?? 1.0; // any market with no explicit entry defaults here
+}
+// Absolute-point closeness margin — no equivalent in config.js (The Read
+// only ever surfaces one pick, it doesn't have a "second lean" concept;
+// that's Verdict's own addition). Placeholder, same as before.
+const ENGINE_VERDICT_RANK_CLOSENESS_PP = 5;
+function familyPickRank(pick) {
+  return pick.candidate.scored.reliability * verdictRankWeightFor(pick.market);
 }
 export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor, opts = {}) {
   const ctx = engine === "sc"
@@ -2037,11 +2069,11 @@ export function computeEngineVerdict(engine, f, positiveList, avoidList, modelPr
   const picks = Object.values(families)
     .filter(v => v && v.strongest)
     .map(v => v.strongest)
-    .sort((a, b) => familyPickValue(b) - familyPickValue(a));
+    .sort((a, b) => familyPickRank(b) - familyPickRank(a));
   if (!picks.length) return { top: null, second: null, rejected: families.__rejected || null };
   const top = picks[0];
-  const topValue = familyPickValue(top);
-  const second = picks.find(p => p !== top && p.market !== top.market && (topValue - familyPickValue(p)) <= ENGINE_VERDICT_VALUE_CLOSENESS_PP) ?? null;
+  const topRank = familyPickRank(top);
+  const second = picks.find(p => p !== top && p.market !== top.market && (topRank - familyPickRank(p)) <= ENGINE_VERDICT_RANK_CLOSENESS_PP) ?? null;
   return { top, second };
 }
 
@@ -2246,64 +2278,12 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       });
     }
 
-    // ── DIRECTIONAL SYNTHESIS (2026-08-31, Davies's brainstorm session) ────
-    // Avoid-direction evidence CA/SA/SC already validated becomes its own
-    // competing thesis for that market's exact logical complement — but ONLY
-    // where the complement has no independent mined data of its own (so this
-    // can never double-count against a real positive source already
-    // competing for the same thesis) and has a real priceable field (so it's
-    // an actual bettable leg, not a synthesized number with nothing to
-    // stake). Scoped to GOALS only: SYNTH_TARGETS below covers exactly the
-    // markets whose complement (Under 1.5/2.5, Over 3.5/4.5, BTTS No) is
-    // NEVER independently mined by SA/CA/SC anywhere in this app — confirmed
-    // against SA_TO_FAMILY_ID's key set. RESULT's DC1X/DCX2 complements
-    // (Away Win/Home Win) are deliberately excluded — those ARE independently
-    // mined and already compete on their own merits in RESULT, so
-    // synthesizing from DC1X/DCX2's avoid data too would double-count the
-    // same evidence twice. Team-total Over 0.5/1.5 excluded too — confirmed
-    // no exact complement exists for them at all (FAMILY_ID_COMPLEMENT's own
-    // comment: "nothing valid to flip to").
-    // Fires ONLY when the ORIGINAL market's own direct positive thesis did
-    // NOT already win its family this round (checked via resolvedTheses,
-    // just built above) — a market with strong enough positive evidence to
-    // admit on its own has nothing to "translate," this is specifically for
-    // the case where the direct read is silent or too weak, but the avoid
-    // read is loud. That's the "not every avoid should mean translation"
-    // gate: SYNTH_MIN_RELIABILITY/EDGE below are deliberately stricter than
-    // the mined floor (zero backtested track record yet for synthesized
-    // theses — see design doc), so only genuinely strong, broad avoid
-    // evidence clears it, not a single weak flag.
-    if (familyId === "GOALS") {
-      const alreadyAdmittedMarkets = new Set(resolvedTheses.map(t => t.market));
-      for (const [originalMarket, target] of Object.entries(SYNTH_TARGETS)) {
-        if (alreadyAdmittedMarkets.has(originalMarket)) continue;
-        const modelProb = modelProbFor(f, originalMarket);
-        const avoidFused = resolveAvoidFusedForThesis(originalMarket, modelProb);
-        if (!avoidFused) continue;
-        const reliability = avoidFused.candidate.scored.reliability;
-        const edge = avoidFused.candidate.scored.edge;
-        if (reliability < SYNTH_MIN_RELIABILITY || edge < SYNTH_MIN_EDGE) {
-          if (debug) {
-            rejected.push({
-              familyId, thesis: target.market, market: target.market,
-              reliability: Math.round(reliability * 10) / 10,
-              edge: Math.round(edge * 10) / 10,
-              supportingEngines: avoidFused.supportingEngines,
-              synthesizedFrom: originalMarket,
-            });
-          }
-          continue;
-        }
-        const odds = target.oddsFor(f);
-        if (!(odds > 1)) continue; // no priceable leg even for the synthesized target
-        resolvedTheses.push({
-          thesis: target.market, market: target.market, odds, netScore: avoidFused.netScore,
-          candidate: avoidFused.candidate, consensusGrade: avoidFused.consensusGrade,
-          supportingEngines: avoidFused.supportingEngines, hadContradiction: false,
-          origin: "synthesized", synthesizedFrom: originalMarket,
-        });
-      }
-    }
+    // Directional synthesis pass removed 2026-09-05 — see the comment where
+    // SYNTH_TARGETS used to be defined above. Avoid-direction evidence still
+    // contributes: resolveAvoidFusedForThesis above is still called from the
+    // thesesPos loop to soft-penalize a contradicted positive thesis. It just
+    // no longer gets a second call here to manufacture a standalone pick for
+    // a complement market nobody can book.
 
     resolvedTheses.sort((a, b) => b.netScore - a.netScore);
     return resolvedTheses;
@@ -2343,13 +2323,12 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       // stays a flat, always-eligible competitor throughout, same as Over
       // 2.5/Under 3.5. Unlike RESULT's single family-wide gate, each ladder
       // escalates independently — Under 3.5 admitting doesn't stop the Over
-      // ladder from escalating to Over 1.5, and vice versa. Three rounds:
-      // Tier A only -> add Tier B members whose Tier-A sibling didn't admit
-      // -> add Under 4.5 only if NEITHER Over market admitted yet.
-      // (2026-08-30: Home/Away Over 0.5 removed from this ladder entirely —
-      // moved to DOMINANCE, see SIGNAL_FAMILIES comment above. They were
-      // never really part of the match-total ladder; TT 0.5's real sibling
-      // is TT 1.5, same side, same underlying quantity.)
+      // ladder from escalating to Over 1.5, and vice versa. Four rounds now
+      // (2026-09-05: added TT 0.5 as its own round, folded back in from the
+      // retired standalone DOMINANCE family — see SIGNAL_FAMILIES comment):
+      // Tier A only -> add Over 1.5 if Over 2.5 didn't admit -> add TT 0.5
+      // (Home/Away Over 0.5) only if NEITHER Over market admitted yet -> add
+      // Under 4.5 only if NEITHER Over market NOR TT 0.5 admitted yet.
       const tierA = ["TB:Over 2.5", "TB:Under 3.5", "TB:BTTS"];
       resolvedTheses = resolveFamilyTheses(familyId, tierA);
       let admitted = new Set(resolvedTheses.map(t => t.market));
@@ -2367,11 +2346,27 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
         admitted = new Set(resolvedTheses.map(t => t.market));
       }
 
-      // Round 3 (Tier C, true last resort): Under 4.5 waits here, and only
-      // enters if NEITHER the Over ladder (2.5 or 1.5) NOR Under 3.5 admitted
-      // anything.
-      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5") && !admitted.has("TB:Under 3.5")) {
-        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, "TB:Under 4.5"]);
+      // Round 3 (Tier B2, 2026-09-05): Home/Away Over 0.5 (TT 0.5), folded in
+      // from the retired standalone DOMINANCE family. Davies's own explicit
+      // ordering — "TT 0.5 only wins when no good 1.5" — so it only enters
+      // once the ENTIRE Over ladder (2.5, then 1.5) has already failed to
+      // admit anything; it never competes against a live Over 2.5/1.5 pick.
+      const tierB2Add = [];
+      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5")) {
+        tierB2Add.push("TB:Home Over 0.5", "TB:Away Over 0.5");
+      }
+      if (tierB2Add.length) {
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, ...tierB2Add]);
+        admitted = new Set(resolvedTheses.map(t => t.market));
+      }
+
+      // Round 4 (Tier C, true last resort): Under 4.5 waits here, and only
+      // enters if NEITHER the Over ladder (2.5 or 1.5) NOR TT 0.5 NOR
+      // Under 3.5 admitted anything.
+      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5") &&
+          !admitted.has("TB:Home Over 0.5") && !admitted.has("TB:Away Over 0.5") &&
+          !admitted.has("TB:Under 3.5")) {
+        resolvedTheses = resolveFamilyTheses(familyId, [...tierA, ...tierBAdd, ...tierB2Add, "TB:Under 4.5"]);
       }
     } else {
       resolvedTheses = resolveFamilyTheses(familyId, markets);
@@ -3298,12 +3293,12 @@ function buildManualParlaysFromPool(pool, { numParlays, targetOdds, historicalRa
     for (const entry of ordered) {
       if (localUsed.has(entry.fixtureId)) continue;
       // Same guard as buildOneParlayFromPool: a leg with no resolved odds
-      // (TGP V2's unresolved-negative legs carry odds:null on purpose —
-      // see tgp-decompose-live.mjs) must not be staked. Without this,
-      // `prod * null` silently becomes 0 and never recovers, so the build
-      // never reaches target odds and instead drains the entire pool one
-      // fixture at a time — exactly the "203 fixtures, 0.00x, exhausted"
-      // symptom, not a real leg shortage.
+      // must not be staked. Without this, `prod * null` (or undefined)
+      // silently becomes 0/NaN and never recovers, so the build never
+      // reaches target odds and instead drains the entire pool one fixture
+      // at a time. Was TGP V2's unresolved-negative legs specifically
+      // (removed 2026-09-04); kept as a general defensive check since any
+      // future pool source could have the same gap.
       if (!Number.isFinite(entry.odds) || entry.odds <= 0) continue;
       const mkt = entry.market; const mktCount = marketCount[mkt] || 0;
       if (mktCount >= maxSameMarket) { saturatedMarkets.add(mkt); continue; }
@@ -7358,7 +7353,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // tail-end filters rather than falling through, same trade-off
       // CA:Verdict makes.
       if (scMarket === "SC:Verdict") {
-        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m;
+        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
         const { top: scTop, second: scSecond } = computeEngineVerdict(
           "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
         );
@@ -14985,24 +14980,17 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   const [expanded, setExpanded]     = useState(null);
   const [usedIds, setUsedIds]       = useState(new Set());
   const [fetchedDate, setFetchedDate] = useState(cached?.fetchedDate || null);
-  // 2026-08-28: TGP V1/V2 toggle. Defaults to 'v1' — matches this tab's
-  // existing look/feed ("same tab as v1 whole, with a toggle to switch").
-  // NOTE this changes default behavior from the endpoint's old always-
-  // blended top-5 (V1+V2 interleaved) to V1-only until the user switches —
-  // flagging plainly since that's a real change, not just additive.
-  const [tgpVersion, setTgpVersion] = useState(cached?.tgpVersion || "v1");
-  const [fetchedVersion, setFetchedVersion] = useState(cached?.fetchedVersion || null);
 
-  // Fetch on mount and whenever date or the V1/V2 toggle changes
+  // Fetch on mount and whenever date changes
   useEffect(() => {
     if (!date) return;
-    // Don't re-fetch if we already have data for this exact date+version
-    if (fetchedDate === date && fetchedVersion === tgpVersion && strategies.length) return;
+    // Don't re-fetch if we already have data for this exact date
+    if (fetchedDate === date && strategies.length) return;
 
     let cancelled = false;
     setStatus("loading");
 
-    fetch(`${SERVER}/api/engine-parlays/today?tgpVersion=${tgpVersion}${date ? `&date=${date}` : ``}`)
+    fetch(`${SERVER}/api/engine-parlays/today${date ? `?date=${date}` : ``}`)
       .then(r => {
         if (!r.ok) throw new Error(`Server ${r.status}`);
         return r.json();
@@ -15014,8 +15002,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
         const newStatus = strats.length ? "ready" : "empty";
         setStatus(newStatus);
         setFetchedDate(date);
-        setFetchedVersion(tgpVersion);
-        saveSS({ strategies: strats, status: newStatus, fetchedDate: date, tgpVersion, fetchedVersion: tgpVersion }); // N29-FIX
+        saveSS({ strategies: strats, status: newStatus, fetchedDate: date }); // N29-FIX
       })
       .catch(err => {
         if (cancelled) return;
@@ -15024,34 +15011,15 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
       });
 
     return () => { cancelled = true; };
-  }, [date, SERVER, tgpVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [date, SERVER]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Retry on demand
   const handleRetry = () => {
     try { sessionStorage.removeItem(SS); } catch {}
     setFetchedDate(null);
-    setFetchedVersion(null);
     setStrategies([]);
     setStatus("idle");
   };
-
-  // V1/V2 toggle — switching invalidates the cached fetch for this date
-  // (fetchedVersion check above), same effect as a date change.
-  const TgpVersionToggle = () => (
-    <div style={{ display:"flex", gap:2, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:2 }}>
-      {["v1", "v2"].map(v => (
-        <button key={v} onClick={() => setTgpVersion(v)}
-          style={{
-            fontSize:9, fontWeight:800, padding:"4px 12px", borderRadius:6, border:"none",
-            background: tgpVersion === v ? C.edge : "transparent",
-            color: tgpVersion === v ? "#fff" : C.muted,
-            letterSpacing:".04em", textTransform:"uppercase",
-          }}>
-          {v.toUpperCase()}
-        </button>
-      ))}
-    </div>
-  );
 
 
   // ── Loading ──────────────────────────────────────────────────────────────────
@@ -15115,7 +15083,7 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
   //  branches below were unreachable, not just unused.)
   // (hasSA branches removed 2026-08-27 — server.js hardcodes saPositive: 0
   //  on every TGP leg ("no SA-attribution equivalent for TGP legs"), and
-  //  TGP V1+V2 is the sole source behind /api/engine-parlays/today since BE/
+  //  TGP V1 is the sole source behind /api/engine-parlays/today since BE/
   //  PE retired, so hasSA could never be true here. "Safety Net" (DC-led
   //  ticket) is now the only special-cased name.)
   const getStrategyLabel = (strat, idx) => {
@@ -15146,7 +15114,6 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
           {strategies.length} pre-built ticket{strategies.length!==1?"s":""} · tap any to see legs
         </span>
         <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-          <TgpVersionToggle />
           {/* N30-FIX: show past date badge when not viewing today */}
           {date && date !== new Date().toISOString().split("T")[0] && (
             <span style={{ fontSize:7, fontWeight:800, color:C.amber, background:`${C.amber}15`,
@@ -15551,7 +15518,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         // still reading that ONE entry type from the server response rather
         // than silently dropping that veto signal — everything else from
         // the server array is ignored now.
-        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m;
+        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
         const { top: scTopV, second: scSecondV } = computeEngineVerdict(
           "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
         );
@@ -15602,11 +15569,12 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
           pushLeg(f, lean.market, label, odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "SC verdict");
         }
       }
-      // Consensus (2026-08-08) — per fixture, per family (Result/Dominance/
-      // Goals — Radar folded into Goals 2026-08-26, see SIGNAL_FAMILIES), the
-      // single strongest cross-engine lean, or nothing if no market in that
-      // family clears the reliability/edge bar. At most 3 legs per fixture
-      // (one per family) — deliberately only the strongest
+      // Consensus (2026-08-08) — per fixture, per family (Result/Goals —
+      // Radar folded into Goals 2026-08-26, TT 0.5 folded from the retired
+      // standalone DOMINANCE family into GOALS 2026-09-05, see
+      // SIGNAL_FAMILIES), the single strongest cross-engine lean, or nothing
+      // if no market in that family clears the reliability/edge bar. At most
+      // 2 legs per fixture (one per family) — deliberately only the strongest
       // per family, never also the secondary, since the whole point of
       // grouping by family is to avoid two correlated picks (e.g. Over 2.5 +
       // BTTS) landing in the same pool from one fixture.
@@ -15973,34 +15941,6 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
 // pricing, the strongest occurrence must win rather than blocking the
 // entire stack.
 
-// Client-side mirror of server.js's tgpDecomposeLegToPoolEntry — same
-// pool-entry shape (fixtureId, game, pick, market, direction, odds, conf,
-// empiricalRate, modelProb, score, strategyLabel, strategyTags, isVolatile,
-// isRisky, ruleFireCount, league, resolvedMarket, oddsSource) that
-// buildManualParlaysFromPool already expects from V1's decomposedPool
-// entries, built here from /api/tgp-decompose-legs' raw `legs` array
-// instead of the locked-pool endpoint's pre-normalized response. Kept
-// field-for-field identical to the server version rather than reinvented,
-// per the same reasoning as tgp-whole-shape-live.mjs's header (two
-// implementations of a live/locked-pool distinction, not two designs) —
-// if one changes, mirror the other.
-function tgpDecomposeLegToPoolEntryClient(leg) {
-  return {
-    fixtureId: leg.fixtureId, game: `${leg.home || "?"} vs ${leg.away || "?"}`,
-    home: leg.home ?? null, away: leg.away ?? null,
-    pick: leg.market.replace(/^TB:/, ""), market: leg.market, direction: leg.direction,
-    odds: leg.odds, conf: Number.isFinite(leg.modelProb) ? Math.round(leg.modelProb) : null,
-    empiricalRate: Number.isFinite(leg.hitRate) ? Math.round(leg.hitRate) : null,
-    modelProb: leg.modelProb,
-    score: Number.isFinite(leg.hitRate) ? Math.max(0, Math.min(1, leg.hitRate / 100)) : null,
-    strategyLabel: "TGP V2", strategyTags: [],
-    isVolatile: false, isRisky: false, // same honest gap server.js's version carries
-    ruleFireCount: leg.ruleFireCount, league: leg.league,
-    resolvedMarket: leg.resolvedMarket ?? leg.market,
-    oddsSource: leg.oddsSource ?? "same-market",
-  };
-}
-
 function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   // fixtures/appSaPatterns/appCaPatterns props removed (2026-08-26) — no
   // longer needed here. All matching now runs server-side; the server
@@ -16059,19 +15999,8 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
   const [tgpLive, setTgpLive] = useState(null); // { wholeShapeCandidates, decomposedPool, availableMarkets, criteria }
   const [tgpLiveLoading, setTgpLiveLoading] = useState(false);
   const [tgpLiveError, setTgpLiveError] = useState(null);
-  // 2026-08-28: V1/V2 toggle.
-  // 2026-08-30: previously forced "whole" mode whenever tgpVersion==="v2",
-  // because V2 had no decompose backend yet (only /api/tgp-v2-live-tickets
-  // existed). /api/tgp-decompose-legs now exists (tgp-decompose-live.mjs) —
-  // that restriction was wrong to keep and is removed below. Filter params
-  // (minLift, minHoldoutN, sourceFilter, modelMinProb, cutFilter,
-  // marketFilter, excludedMarkets) still aren't supported server-side for
-  // either V2 mode — see the "V2 shows its full live ticket list
-  // unfiltered" note in the render below, still accurate.
-  const [tgpVersion, setTgpVersion] = useState("v1");
 
   useEffect(() => {
-    if (tgpVersion !== "v1") return; // v2 has its own effect below
     const t = setTimeout(() => {
       setTgpLiveLoading(true);
       setTgpLiveError(null);
@@ -16090,112 +16019,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
         .finally(() => setTgpLiveLoading(false));
     }, 350); // debounce — number inputs fire onChange per keystroke
     return () => clearTimeout(t);
-  }, [tgpVersion, date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter, tgpExcludedMarkets]);
-
-  // 2026-08-28: V2 whole-shape fetch — normalizes /api/tgp-v2-live-tickets'
-  // flat `tickets` array into the EXACT same shape v1's response already
-  // has (wholeShapeCandidates/decomposedPool/availableMarkets/totalShapes/
-  // filteredShapesCount/minedGeneratedAt), written into the same
-  // tgpLive/tgpLiveLoading/tgpLiveError state v1 uses. Every render below
-  // this point (search, pagination, stacking, signature dedup) is
-  // completely unaware which version it's looking at — same reasoning as
-  // server.js's tgpTicketToStrategy comment: no downstream code should
-  // need to change just because the feed did.
-  // 2026-08-30: gated on mode==="whole" (was tgpVersion-only, back when V2
-  // had exactly one mode) and merges into tgpLive via functional setState
-  // instead of replacing it wholesale — V2 now has two independent live
-  // sources (this one, and the decompose fetch below), so overwriting the
-  // whole object would wipe out whichever mode ISN'T currently fetching.
-  useEffect(() => {
-    if (tgpVersion !== "v2" || mode !== "whole") return;
-    let cancelled = false;
-    setTgpLiveLoading(true);
-    setTgpLiveError(null);
-    // 2026-08-30: clear this slice immediately on entry, and again on
-    // failure below — the bug that made V1 and V2 look "identical" once
-    // population.json emptied out: this effect only ever wrote wholeShape-
-    // Candidates inside the success branch, so a failed or empty response
-    // silently left whichever version was on screen last (V1, since it
-    // fetches on mount) untouched instead of showing V2's true state.
-    setTgpLive(prev => ({ ...(prev || {}), wholeShapeCandidates: [] }));
-    fetch(`${SERVER}/api/tgp-v2-live-tickets?date=${date || todayStr()}&modelMinProb=${modelMinProb}&applyModelFloor=${applyModelFloor}`)
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
-      .then(data => {
-        if (cancelled) return;
-        const wholeShapeCandidates = (data.tickets || []).map(t => ({
-          shape: {
-            legs: t.legs.map(l => ({ market: l.market, source: "tgp-v2", patternKey: l.legType })),
-            holdoutHR: t.holdoutAllHitRate, cut: t.size, holdoutN: t.holdoutDays, lift: t.lift,
-          },
-          assignment: t.legs.map(l => ({ fixtureId: l.fixtureId, home: l.home, away: l.away, odds: l.odds,
-            // 2026-08-30: was missing here (present in the decompose fetch
-            // below) — the odds themselves are already correctly ladder-
-            // resolved server-side either way, but without this the UI has
-            // no way to show WHICH market a negative leg actually priced
-            // against (e.g. label reads "Under 3.5" while it's really
-            // priced as "Over 2.5").
-            resolvedMarket: l.resolvedMarket ?? l.market, oddsSource: l.oddsSource ?? "same-market" })),
-          combinedOdds: t.combinedOdds,
-          // V2's contradiction handling is exclude-at-candidacy (in
-          // computeLiveDecomposeLegs), not flag-and-still-show like V1's
-          // matchCAConditions — so this is genuinely empty, not unchecked.
-          flaggedLegs: [],
-        }));
-        setTgpLive(prev => ({
-          ...(prev || {}),
-          wholeShapeCandidates,
-          totalShapes: data.populationSize ?? 0, filteredShapesCount: data.liveTicketCount ?? wholeShapeCandidates.length,
-          minedGeneratedAt: data.generatedAt, criteria: null,
-        }));
-      })
-      .catch(e => {
-        if (cancelled) return;
-        setTgpLiveError(e.message);
-        setTgpLive(prev => ({ ...(prev || {}), wholeShapeCandidates: [] }));
-      })
-      .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
-    return () => { cancelled = true; };
-  }, [tgpVersion, mode, date, modelMinProb, applyModelFloor]);
-
-  // 2026-08-30: V2 decompose fetch — the counterpart to the whole-shape
-  // fetch above, now that /api/tgp-decompose-legs exists
-  // (tgp-decompose-live.mjs's computeLiveDecomposeLegs). Normalizes its raw
-  // `legs` array into pool entries via tgpDecomposeLegToPoolEntryClient,
-  // which mirrors server.js's tgpDecomposeLegToPoolEntry (the same
-  // normalizer the locked /api/tgp-decompose-pool endpoint uses) field-for-
-  // field, so the live and locked V2 pool shapes never diverge. Only
-  // `date` is sent — none of this component's filter params have
-  // server-side support for V2 yet (see the render note below), so this
-  // shows the full unfiltered live leg pool, same honesty V2 whole-shape
-  // mode already carries.
-  useEffect(() => {
-    if (tgpVersion !== "v2" || mode !== "decompose") return;
-    let cancelled = false;
-    setTgpLiveLoading(true);
-    setTgpLiveError(null);
-    // Same stale-data guard as the whole-shape effect above.
-    setTgpLive(prev => ({ ...(prev || {}), decomposedPool: [], availableMarkets: [] }));
-    fetch(`${SERVER}/api/tgp-decompose-legs?date=${date || todayStr()}&modelMinProb=${modelMinProb}&applyModelFloor=${applyModelFloor}`)
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e.error || `HTTP ${r.status}`))))
-      .then(data => {
-        if (cancelled) return;
-        const decomposedPool = (data.legs || []).map(tgpDecomposeLegToPoolEntryClient);
-        const availableMarkets = [...new Set(decomposedPool.map(e => e.market))];
-        setTgpLive(prev => ({
-          ...(prev || {}),
-          decomposedPool, availableMarkets,
-          totalShapes: data.legs?.length ?? 0, decomposeFilteredShapesCount: decomposedPool.length,
-          minedGeneratedAt: data.generatedAt, criteria: null,
-        }));
-      })
-      .catch(e => {
-        if (cancelled) return;
-        setTgpLiveError(e.message);
-        setTgpLive(prev => ({ ...(prev || {}), decomposedPool: [], availableMarkets: [] }));
-      })
-      .finally(() => { if (!cancelled) setTgpLiveLoading(false); });
-    return () => { cancelled = true; };
-  }, [tgpVersion, mode, date, modelMinProb, applyModelFloor]);
+  }, [date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter, tgpExcludedMarkets]);
 
   const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
   const decomposedPool = tgpLive?.decomposedPool || [];
@@ -16421,23 +16245,6 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ fontSize: 8, color: C.muted, letterSpacing: ".06em", textTransform: "uppercase" }}>Source</span>
-        <div style={{ display:"flex", gap:2, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:2 }}>
-          {["v1", "v2"].map(v => (
-            <button key={v} onClick={() => setTgpVersion(v)}
-              style={{
-                fontSize:9, fontWeight:800, padding:"4px 12px", borderRadius:6, border:"none",
-                background: tgpVersion === v ? C.edge : "transparent",
-                color: tgpVersion === v ? "#fff" : C.muted,
-                letterSpacing:".04em", textTransform:"uppercase",
-              }}>
-              {v.toUpperCase()}
-            </button>
-          ))}
-        </div>
-      </div>
-
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         {[{ id: "decompose", label: "Decompose", desc: "Feed target-odds stack" },
           { id: "whole", label: "Whole Shapes", desc: "Untested combo — see note" }].map(m => {
@@ -16454,11 +16261,6 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
           );
         })}
       </div>
-      {tgpVersion === "v2" && (
-        <div style={{ fontSize: 7, color: C.muted, marginBottom: 8, fontStyle: "italic" }}>
-          Cut, source, lift, and holdout filters below apply to V1 only — V2 shows its full live ticket list unfiltered for now.
-        </div>
-      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
         {/* 2026-08-16 fix: Leg count and Market only apply to Decompose's
