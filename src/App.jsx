@@ -15357,6 +15357,134 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 // infrastructure directly rather than re-deriving it server-side — the same
 // reasoning liveSaMatchCache/liveCaMatchCache above already runs on, just
 // generalized across ALL markets per fixture instead of one.
+// PoolBuilderControls — server-side SA+CA fused pool (GET /api/pool-builder,
+// sa-core.mjs's buildSACandidates fusion + pool-builder.mjs's odds bands),
+// following the same "fetch server output, flatten to the shared leg shape,
+// report up via onPoolChange" contract PatternEngineControls/TGPControls
+// already establish — no new pool-consumption path, just a third producer
+// of the same shape (see App.jsx's customEngine==="pool" build branch).
+//
+// Deliberately thin compared to PatternEngineControls: the matching/fusion/
+// veto logic already happened server-side (loadSAPatternsByMarket's
+// beatsBaseline fix, loadCAPatternsByMarket's Wilson floor, buildSACandidates'
+// agree/conflict gating) — this component's job is fetch + flatten + a
+// couple of display-layer knobs (topN per market), not re-deriving anything.
+const POOL_BUILDER_TOPN_OPTIONS = [
+  { id: "5",  label: "Top 5" },
+  { id: "10", label: "Top 10" },
+  { id: "",   label: "Uncapped" },
+];
+// V1 = full CA union, live off the raw miner file, Wilson-floor filtered.
+// V2 = select-diverse-ca-patterns.mjs's curated set — small, diversity-
+// selected, positive-direction only (no CA avoid-vetoes under V2 — see
+// server.js's buildPoolBuilderPools header comment).
+const POOL_BUILDER_SOURCE_OPTIONS = [
+  { id: "v1", label: "V1 · Full", desc: "Full CA union" },
+  { id: "v2", label: "V2 · Curated", desc: "Diversity-selected set" },
+];
+function PoolBuilderControls({ C, onPoolChange, date }) {
+  const [topN, setTopN] = useState("5");
+  const [source, setSource] = useState("v1");
+  const [data, setData] = useState(null);   // raw /api/pool-builder payload
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  // Race guard: a fast date/topN/source change must not let a slower,
+  // now-stale request overwrite a newer one's result — same class of bug
+  // the SC-match fetch dedup elsewhere in this file (scFetchedIdsRef)
+  // exists to prevent.
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    const qs = new URLSearchParams({ date: date || todayStr(), source });
+    if (topN) qs.set("topN", topN);
+    fetch(`${SERVER}/api/pool-builder?${qs.toString()}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+      .then(d => { if (requestIdRef.current === requestId) { setData(d); setLoading(false); } })
+      .catch(err => { if (requestIdRef.current === requestId) { setError(err.message || "Failed to load pool"); setData(null); setLoading(false); } });
+  }, [date, topN, source]);
+
+  // Flatten { [market]: candidate[] } into the flat leg shape
+  // buildManualParlaysFromPool expects (same fields PatternEngineControls'
+  // pushLeg/qualifyingLegs and TGPControls' decomposedPool already produce).
+  const pool = useMemo(() => {
+    if (!data?.pool) return [];
+    const legs = [];
+    for (const [market, candidates] of Object.entries(data.pool)) {
+      for (const c of candidates) {
+        if (!Number.isFinite(c.odds) || c.odds <= 1) continue; // not priceable — same guard everywhere else in this file
+        // Best real-world estimate of this leg's win rate, in priority
+        // order: CA's own holdout hit rate (an actual empirical rate) >
+        // SA's baseline+lift estimate > raw model probability. Mirrors the
+        // priority PoolBuilder's own combinedZ ranking already implies
+        // (CA agreement/lift is weighted alongside SA, not below it).
+        const empiricalRate = c.ca?.holdoutHitRate
+          ?? (c.sa.marketBaseHR != null && c.sa.adjLift != null ? c.sa.marketBaseHR + c.sa.adjLift : null)
+          ?? c.prob;
+        const empClamped = Math.max(0, Math.min(100, empiricalRate));
+        // Same p^POOL_SCORE_P_EXP × ln(odds)/odds shape used everywhere else
+        // in this file (buildSignalPool, evaluatePick) — reused, not
+        // reinvented, per the Existing Pattern Rule.
+        const p = empClamped / 100;
+        const score = Math.pow(p, POOL_SCORE_P_EXP) * (Math.log(c.odds) / c.odds);
+        legs.push({
+          fixtureId: c.gameId, game: `${c.home} vs ${c.away}`,
+          pick: market.replace(/^TB:/, ""), odds: parseFloat(c.odds.toFixed(2)),
+          conf: Math.round(c.prob), market, league: c.league || "",
+          score, utility: score / Math.max(0.01, 1 - p),
+          empiricalRate: parseFloat(empClamped.toFixed(1)),
+          strategyLabel: c.fusion?.agree ? "SA+CA agree" : (c.ca ? "CA" : "SA"),
+          strategyTags: [], isVolatile: isLeagueVolatile(c.league || ""),
+        });
+      }
+    }
+    return legs.sort((a, b) => b.utility - a.utility);
+  }, [data]);
+
+  useEffect(() => { onPoolChange(pool); }, [pool, onPoolChange]);
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display:"flex",gap:6,marginBottom:6,
+                    background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
+        {POOL_BUILDER_SOURCE_OPTIONS.map(o => (
+          <button key={o.id} onClick={() => setSource(o.id)} title={o.desc}
+            style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                     background:source===o.id?C.accent:"transparent",
+                     color:source===o.id?C.accentText:C.muted,
+                     fontSize:9,fontWeight:800,cursor:"pointer",fontFamily:C.font }}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ display:"flex",gap:6,marginBottom:10,
+                    background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
+        {POOL_BUILDER_TOPN_OPTIONS.map(o => (
+          <button key={o.id} onClick={() => setTopN(o.id)}
+            style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                     background:topN===o.id?C.accent:"transparent",
+                     color:topN===o.id?C.accentText:C.muted,
+                     fontSize:9,fontWeight:800,cursor:"pointer",fontFamily:C.font }}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+      {loading && <div style={{ fontSize:9,color:C.muted }}>Loading pool…</div>}
+      {error && <div style={{ fontSize:9,color:C.danger || "#e55" }}>Couldn't load Pool Builder: {error}</div>}
+      {!loading && !error && (
+        <div style={{ fontSize:8,color:C.text,lineHeight:1.6 }}>
+          {pool.length} qualifying leg{pool.length !== 1 ? "s" : ""} across {Object.keys(data?.pool || {}).length} market{Object.keys(data?.pool || {}).length !== 1 ? "s" : ""}
+          {data?.saPatternCount != null ? ` · SA ${data.saPatternCount} patterns` : ""}
+          {data?.caComboCount != null ? `, CA ${data.caComboCount} combos` : ""} loaded ({source === "v2" ? "curated" : "full"}).
+          {source === "v2" && <span style={{ display:"block",marginTop:2,color:C.muted }}>V2 is positive-direction only — CA can't veto a leg here, only agree with it.</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date }) {
   const [sources, setSources] = useState(() => new Set(["sa", "ca"]));
   // Same "viewing a past date allows finished games through, live/cancelled
@@ -16959,6 +17087,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
   const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
   const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
+  const [poolBuilderPool, setPoolBuilderPool] = useState([]); // live pool reported by PoolBuilderControls (server-side SA+CA fusion, GET /api/pool-builder)
   // 2026-08-16 fix (Sterling request): TGPControls reports its own
   // decompose/whole toggle up here so the shared Stake/Target Odds/
   // Tickets/Max Same Market block and Build button below — which Whole
@@ -17607,6 +17736,39 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         );
       });
       setTickets(results);
+    } else if (customEngine === "pool") {
+      // Pool Builder mode — pool is fetched server-side by PoolBuilderControls
+      // (GET /api/pool-builder, sa-core.mjs's fused SA+CA candidates, odds-
+      // banded per market) and reported up via poolBuilderPool exactly like
+      // patternEnginePool/tgpPool are. Same builder, same shared controls —
+      // only the pool source differs.
+      if (poolBuilderPool.length === 0) {
+        setAutoMessage("No qualifying Pool Builder legs today — check back once more fixtures load, or a market's odds band may just be thin today.");
+        setBuilding(false); return;
+      }
+      const filteredPoolBuilderPool = poolBuilderPool.filter(e => {
+        const f = fixtures.find(fx => fx.id === e.fixtureId);
+        const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
+        return !excluded;
+      });
+      if (filteredPoolBuilderPool.length < numParlays * 3) {
+        setAutoMessage(`⚠ Pool has ${filteredPoolBuilderPool.length} qualifying leg${filteredPoolBuilderPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
+        setTimeout(() => setAutoMessage(""), 5000);
+      }
+      if (filteredPoolBuilderPool.length < 2) {
+        setAutoMessage("No qualifying Pool Builder legs remain after the active market filters.");
+        setBuilding(false); return;
+      }
+      const results = buildManualParlaysFromPool(filteredPoolBuilderPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
+      if (results.length === 0) {
+        setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
+      }
+      results.forEach(t => {
+        t.combinedEmpiricalRate = Math.round(
+          t.legs.reduce((acc, l) => acc * ((l.empiricalRate ?? 50) / 100), 1) * 100
+        );
+      });
+      setTickets(results);
     } else {
       // Manual mode
       // customPool === "all": every fixture with a Read/Edge/Radar signal, no
@@ -17966,6 +18128,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       { id:"manual",  label:"Manual",         desc:"Pool + your rules" },
                       { id:"pattern", label:"Pattern Engine",  desc:"SA / CA / SC / Model" },
                       { id:"tgp",     label:"TGP",             desc:"Mined multi-leg shapes" },
+                      { id:"pool",    label:"Pool Builder",    desc:"SA+CA fused, odds-banded" },
                     ].map(e => (
                       <button key={e.id} onClick={() => setCustomEngine(e.id)}
                         style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
@@ -17997,6 +18160,14 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       date={date}
                       setTickets={setTickets}
                       onModeChange={setTgpMode}
+                    />
+                  )}
+
+                  {customEngine === "pool" && (
+                    <PoolBuilderControls
+                      C={C}
+                      onPoolChange={setPoolBuilderPool}
+                      date={date}
                     />
                   )}
 
