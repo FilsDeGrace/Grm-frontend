@@ -2390,6 +2390,369 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
   return families;
 }
 
+
+// ── EVIDENCE STORY SYNTHESIS (2026-09-09) ──────────────────────────────────
+// Fresh synthesis layer requested by Alden. This intentionally sits ABOVE the
+// CA/SC miners and does not rewrite their mining/classification logic. CA is
+// treated as focused continuous-condition evidence; SC is treated as broader
+// contextual/settlement evidence. The layer converts every matched positive /
+// avoid pattern for each real target market into a bounded evidence profile,
+// discounts correlated/redundant patterns, treats traps as reliability risk,
+// and ranks markets by "best expression of the fixture evidence" rather than
+// raw hit rate. It also distinguishes real bookmaker price from model-implied
+// price so missing odds never masquerade as verified market value.
+
+const EVIDENCE_STORY_MARKETS = [
+  'TB:Under 3.5', 'TB:Under 4.5', 'TB:Over 1.5', 'TB:Over 2.5', 'TB:BTTS',
+  'TB:Home Over 0.5', 'TB:Away Over 0.5', 'TB:Home Over 1.5', 'TB:Away Over 1.5',
+  'TB:DC1X', 'TB:DCX2', 'TB:1X2-Home', 'TB:1X2-Away', 'TB:1X2-Draw',
+];
+const EVIDENCE_STORY_ENGINE_WEIGHT = { ca: 0.55, sc: 0.45 };
+const EVIDENCE_STORY_STATUS_WEIGHT = { VALID: 1.00, EMERGING: 0.55, TRAP: 0.12 };
+const EVIDENCE_STORY_FAMILY_CAPS = {
+  dataQuality: 11,
+  matchup: 22,
+  behaviour: 22,
+  bookmaker: 10,
+  model: 20,
+  other: 14,
+};
+const EVIDENCE_STORY_MARKET_PRIOR = {
+  'TB:Over 1.5': 0.95,
+  'TB:Under 4.5': 0.95,
+  'TB:Home Over 0.5': 0.95,
+  'TB:Away Over 0.5': 0.95,
+  'TB:DC1X': 0.80,
+  'TB:DCX2': 0.80,
+  'TB:Under 3.5': 0.65,
+  'TB:Over 2.5': 0.45,
+  'TB:BTTS': 0.40,
+  'TB:Home Over 1.5': 0.35,
+  'TB:Away Over 1.5': 0.35,
+  'TB:1X2-Home': 0.25,
+  'TB:1X2-Away': 0.20,
+  'TB:1X2-Draw': 0.10,
+};
+
+function evidenceStoryClamp(v, lo = 0, hi = 100) {
+  return Math.max(lo, Math.min(hi, Number.isFinite(v) ? v : lo));
+}
+function evidenceStoryRound(v, dp = 1) {
+  const p = 10 ** dp;
+  return Number.isFinite(v) ? Math.round(v * p) / p : null;
+}
+function evidenceStoryFamily(field = '') {
+  const f = String(field).toLowerCase();
+  if (f.startsWith('_') || /confidence|calibration|season|recentleague|deflation|crosscompetition|crossrisk|estimatedxg|formweight|gamesused/.test(f)) return 'dataQuality';
+  if (/xg|attackedge|leaguemean/.test(f)) return 'matchup';
+  if (/scored|fts|cs|form|position|points|teamstats|played/.test(f)) return 'behaviour';
+  if (/odds|impliedprob|modeledge|fullodds/.test(f)) return 'bookmaker';
+  if (/homewin|awaywin|draw|bttsyes|modelprob|goaltail|twogoal|likelyscore/.test(f)) return 'model';
+  return 'other';
+}
+function evidenceStoryStatus(raw, engine) {
+  const s = String(raw?.status || '').toUpperCase().replace(/\s+/g, '-');
+  if (s === 'VALID') return 'VALID';
+  if (s === 'EMERGING') return 'EMERGING';
+  if (s === 'OVERFIT' || s === 'DEGRADED' || s === 'LOOKED-GOOD-FAILED' || s === 'LOOKED-BAD-HELD-UP') return 'TRAP';
+  if (s === 'LOW-TEST-N') return 'EMERGING';
+  // SA is not part of this first CA+SC synthesis pass. Defensive fallback for
+  // future callers: a fully populated, stable holdout combo is treated as
+  // established; otherwise it is developing rather than silently upgraded.
+  if (engine === 'ca' || engine === 'sc') {
+    const n = raw?.holdoutSample ?? raw?.testN ?? 0;
+    const hr = raw?.holdoutHitRate ?? raw?.testHR;
+    if (hr != null && n >= 20) return 'VALID';
+  }
+  return 'EMERGING';
+}
+function evidenceStoryConditionKeys(raw) {
+  const conds = Array.isArray(raw?.conditions) ? raw.conditions : [];
+  return conds.map(c => String(c?.field || c?.key || '').toLowerCase()).filter(Boolean);
+}
+function evidenceStorySimilarity(a, b) {
+  const aa = new Set(evidenceStoryConditionKeys(a));
+  const bb = new Set(evidenceStoryConditionKeys(b));
+  if (!aa.size || !bb.size) return 0;
+  let inter = 0;
+  for (const x of aa) if (bb.has(x)) inter++;
+  const union = new Set([...aa, ...bb]).size;
+  return union ? inter / union : 0;
+}
+function evidenceStoryCanonicalPattern(raw) {
+  const conds = Array.isArray(raw?.conditions) ? raw.conditions : [];
+  return conds.map(c => `${c?.field || c?.key || ''}${c?.op || ''}${c?.value ?? ''}`).sort().join('&');
+}
+function evidenceStoryPatternStrength(engine, raw, isAvoid, modelProb) {
+  const sig = normalizeSignal(engine, raw, isAvoid);
+  if (!sig || sig.holdoutHR == null) return null;
+  const scored = scoreSignal(sig, isAvoid, modelProb);
+  if (!scored) return null;
+  const status = evidenceStoryStatus(raw, engine);
+  const baseEdge = Math.max(0, scored.edge);
+  const depth = Math.max(1, Array.isArray(raw?.conditions) ? raw.conditions.length : 1);
+  const depthFactor = 1 / (1 + 0.12 * (depth - 1));
+  const statusFactor = EVIDENCE_STORY_STATUS_WEIGHT[status] ?? 0.55;
+  const reliabilityFactor = 0.55 + 0.45 * (evidenceStoryClamp(scored.reliability, 0, 100) / 100);
+  const rawStrength = baseEdge * depthFactor * statusFactor * reliabilityFactor;
+  return { sig, scored, status, depth, rawStrength };
+}
+function evidenceStoryCollectPatterns(engine, raws, isAvoid, market, modelProb) {
+  const enriched = [];
+  for (const raw of raws || []) {
+    const x = evidenceStoryPatternStrength(engine, raw, isAvoid, modelProb);
+    if (!x) continue;
+    enriched.push({ engine, market, raw, ...x });
+  }
+  enriched.sort((a, b) => b.rawStrength - a.rawStrength);
+  const accepted = [];
+  for (const item of enriched) {
+    const key = evidenceStoryCanonicalPattern(item.raw);
+    if (accepted.some(a => evidenceStoryCanonicalPattern(a.raw) === key)) continue;
+    const maxSim = accepted.reduce((m, a) => Math.max(m, evidenceStorySimilarity(a.raw, item.raw)), 0);
+    const independence = 1 - 0.65 * maxSim;
+    item.independenceWeight = evidenceStoryClamp(independence, 0.25, 1);
+    item.strength = item.rawStrength * item.independenceWeight * (EVIDENCE_STORY_ENGINE_WEIGHT[engine] ?? 1);
+    accepted.push(item);
+  }
+  return accepted;
+}
+function evidenceStoryAggregate(items) {
+  const byFamily = new Map();
+  let total = 0;
+  for (const item of items) {
+    const family = evidenceStoryFamily((item.raw?.conditions || [])[0]?.field || item.raw?.field || item.raw?.key || '');
+    const cur = byFamily.get(family) || 0;
+    const next = Math.min(EVIDENCE_STORY_FAMILY_CAPS[family] ?? EVIDENCE_STORY_FAMILY_CAPS.other, cur + item.strength);
+    byFamily.set(family, next);
+    total += next - cur;
+  }
+  return { total, byFamily };
+}
+function evidenceStoryBaseline(candidates) {
+  const vals = candidates
+    .map(x => x.sig?.baseHR)
+    .filter(v => Number.isFinite(v));
+  if (!vals.length) return null;
+  vals.sort((a, b) => a - b);
+  const mid = Math.floor(vals.length / 2);
+  return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+}
+function evidenceStoryMarketNarrative(rows) {
+  const get = m => rows.find(x => x.market === m)?.support ?? 0;
+  const over = get('TB:Over 2.5') + get('TB:Over 1.5') + get('TB:BTTS');
+  const under = get('TB:Under 3.5') + get('TB:Under 4.5');
+  const home = get('TB:1X2-Home') + get('TB:Home Over 1.5') + get('TB:Home Over 0.5');
+  const away = get('TB:1X2-Away') + get('TB:Away Over 1.5') + get('TB:Away Over 0.5');
+  if (over > under * 1.35 && over > home * 1.15 && over > away * 1.15) return 'Open attacking environment';
+  if (under > over * 1.30) return 'Controlled / lower-scoring environment';
+  if (home > away * 1.25 && home > over * 0.8) return 'Home-control environment';
+  if (away > home * 1.25 && away > over * 0.8) return 'Away-control environment';
+  return 'Mixed / competitive environment';
+}
+function evidenceStoryReasonFields(item) {
+  const fields = [];
+  for (const c of item?.raw?.conditions || []) {
+    const label = String(c?.field || '').replace(/_/g, ' ');
+    if (!label) continue;
+    fields.push(`${label} ${c?.op || ''} ${c?.value ?? ''}`.trim());
+  }
+  return fields.slice(0, 2);
+}
+
+export function computeEvidenceStoryVerdict(f, ctx = {}) {
+  const { caPositive = [], caAvoid = [], scPositive = [], scAvoid = [], modelProbFor } = ctx;
+  const modelFn = modelProbFor || caModelProbFor;
+  const rows = [];
+  for (const market of EVIDENCE_STORY_MARKETS) {
+    const familyId = familyOfMarket('sa', market);
+    const scKey = familyId ? marketForEngine('sc', familyId) : null;
+    if (!familyId || market === 'TB:1X2-Draw') {
+      // Draw remains informational in the underlying system and is never an
+      // actionable Story Verdict candidate.
+    }
+    const modelProb = modelFn(f, market);
+    const caPos = caPositive.filter(c => c.market === market);
+    const caAv = caAvoid.filter(c => c.market === market);
+    const scPos = scKey ? scPositive.filter(c => c.market === scKey) : [];
+    const scAv = scKey ? scAvoid.filter(c => c.market === scKey) : [];
+
+    const pos = [
+      ...evidenceStoryCollectPatterns('ca', caPos, false, market, modelProb),
+      ...evidenceStoryCollectPatterns('sc', scPos, false, market, modelProb),
+    ];
+    const neg = [
+      ...evidenceStoryCollectPatterns('ca', caAv, true, market, modelProb),
+      ...evidenceStoryCollectPatterns('sc', scAv, true, market, modelProb),
+    ];
+    const posAgg = evidenceStoryAggregate(pos);
+    const negAgg = evidenceStoryAggregate(neg);
+    const validSupport = pos.filter(x => x.status === 'VALID').reduce((s, x) => s + x.strength, 0);
+    const emergingSupport = pos.filter(x => x.status === 'EMERGING').reduce((s, x) => s + x.strength, 0);
+    const trapSupport = pos.filter(x => x.status === 'TRAP').reduce((s, x) => s + x.strength, 0);
+    const validOpposition = neg.filter(x => x.status === 'VALID').reduce((s, x) => s + x.strength, 0);
+    const emergingOpposition = neg.filter(x => x.status === 'EMERGING').reduce((s, x) => s + x.strength, 0);
+    const trapOpposition = neg.filter(x => x.status === 'TRAP').reduce((s, x) => s + x.strength, 0);
+    const support = posAgg.total;
+    const opposition = negAgg.total;
+    const directionalEvidence = support - opposition;
+    const evidenceTotal = support + opposition;
+    const conflictShare = evidenceTotal > 0 ? Math.min(support, opposition) / evidenceTotal : 0;
+    const conflict = conflictShare >= 0.42 ? 'HARD' : conflictShare >= 0.25 ? 'SOFT' : conflictShare > 0 ? 'LOW' : 'NONE';
+    const trapRaw = trapSupport + trapOpposition;
+    const trapRisk = evidenceTotal > 0 ? evidenceStoryClamp((trapRaw / evidenceTotal) * 100) : 0;
+
+    const baselines = [...pos, ...neg];
+    const baseline = evidenceStoryBaseline(baselines);
+    const prior = EVIDENCE_STORY_MARKET_PRIOR[market] ?? 0.25;
+    const obviousness = baseline != null
+      ? evidenceStoryClamp((baseline - 60) / 30, 0, 1)
+      : prior;
+    const baselinePenalty = obviousness * 8;
+
+    const enginePositive = new Set(pos.map(x => x.engine));
+    const engineAgreement = enginePositive.size >= 2 ? 100 : enginePositive.size === 1 ? 48 : 0;
+    const independentFamilies = new Set(pos.map(x => evidenceStoryFamily((x.raw?.conditions || [])[0]?.field || x.raw?.field || ''))).size;
+    const independence = evidenceStoryClamp(independentFamilies / 4, 0, 1);
+
+    const bestSupport = pos.length ? Math.max(...pos.map(x => x.scored.reliability)) : 0;
+    const weightedReliability = pos.length
+      ? pos.reduce((s, x) => s + x.scored.reliability * x.strength, 0) / Math.max(0.001, support)
+      : 0;
+    const evidenceQuality = evidenceStoryClamp(
+      0.55 * bestSupport +
+      0.25 * weightedReliability +
+      20 * independence +
+      0.10 * engineAgreement,
+      0, 100
+    );
+
+    const modelDelta = (modelProb != null && baseline != null) ? modelProb - baseline : 0;
+    const realOdds = SA_MARKETS[market]?.oddsKey ? f.odds?.[SA_MARKETS[market].oddsKey] : null;
+    const hasRealOdds = Number.isFinite(realOdds) && realOdds > 1.01;
+    const realPriceEdge = hasRealOdds && modelProb != null ? modelProb - (100 / realOdds) : null;
+    const modelOpportunity = !hasRealOdds && baseline != null && modelProb != null ? modelProb - baseline : null;
+    const priceModifier = hasRealOdds && realPriceEdge != null
+      ? evidenceStoryClamp(realPriceEdge * 0.9, -5, 8)
+      : 0;
+
+    const directionalScore = evidenceStoryClamp(50 + directionalEvidence * 1.25, 0, 100);
+    const confidenceScore = evidenceStoryClamp(
+      0.48 * evidenceQuality +
+      0.22 * evidenceStoryClamp(100 - trapRisk) +
+      0.15 * evidenceStoryClamp(100 - conflictShare * 120) +
+      0.15 * engineAgreement,
+      0, 100
+    );
+    const incrementalEdge = evidenceStoryClamp(
+      Math.max(0, directionalEvidence) * 1.2 + Math.max(0, modelDelta) * 0.45,
+      0, 35
+    );
+    const actionScore = evidenceStoryClamp(
+      0.48 * directionalScore +
+      0.32 * confidenceScore +
+      0.20 * (incrementalEdge / 35 * 100) +
+      priceModifier -
+      baselinePenalty -
+      trapRisk * 0.10 -
+      conflictShare * 12,
+      0, 100
+    );
+    const status = actionScore >= 78 && conflict !== 'HARD' && trapRisk < 28 ? 'STRONG ACTIONABLE'
+      : actionScore >= 66 && conflict !== 'HARD' ? 'ACTIONABLE'
+      : actionScore >= 56 ? 'LEAN'
+      : conflict === 'HARD' ? 'CONFLICT'
+      : 'PASS';
+
+    const topSupport = [...pos].sort((a, b) => b.strength - a.strength)[0] || null;
+    const topOppose = [...neg].sort((a, b) => b.strength - a.strength)[0] || null;
+    const storyReasons = topSupport ? evidenceStoryReasonFields(topSupport) : [];
+    const supportingEngines = [...new Set(pos.map(x => x.engine))];
+    const estimatedOdds = modelProb != null ? safeImpliedOdds(modelProb) : null;
+    const odds = hasRealOdds ? +realOdds : estimatedOdds;
+
+    rows.push({
+      market,
+      marketLabel: market.replace(/^TB:/, ''),
+      modelProbability: evidenceStoryRound(modelProb),
+      baseline: evidenceStoryRound(baseline),
+      support: evidenceStoryRound(support),
+      opposition: evidenceStoryRound(opposition),
+      validSupport: evidenceStoryRound(validSupport),
+      emergingSupport: evidenceStoryRound(emergingSupport),
+      validOpposition: evidenceStoryRound(validOpposition),
+      emergingOpposition: evidenceStoryRound(emergingOpposition),
+      trapRisk: evidenceStoryRound(trapRisk),
+      independence: evidenceStoryRound(independence),
+      evidenceQuality: evidenceStoryRound(evidenceQuality),
+      confidenceScore: evidenceStoryRound(confidenceScore),
+      directionalScore: evidenceStoryRound(directionalScore),
+      incrementalEdge: evidenceStoryRound(incrementalEdge),
+      modelDelta: evidenceStoryRound(modelDelta),
+      realPriceEdge: evidenceStoryRound(realPriceEdge),
+      modelOpportunity: evidenceStoryRound(modelOpportunity),
+      priceSource: hasRealOdds ? 'BOOKMAKER' : (estimatedOdds ? 'MODEL-IMPLIED' : 'NONE'),
+      odds,
+      actionScore: evidenceStoryRound(actionScore),
+      status,
+      conflict,
+      supportingEngines,
+      narrativeReasons: storyReasons,
+      warning: topOppose ? evidenceStoryReasonFields(topOppose).join(', ') : '',
+      matchedPatterns: [...pos.map(x => ({
+        engine: x.engine, direction: 'positive', status: x.status, strength: evidenceStoryRound(x.strength),
+        reliability: evidenceStoryRound(x.scored.reliability), edge: evidenceStoryRound(x.scored.edge),
+        depth: x.depth, independenceWeight: evidenceStoryRound(x.independenceWeight),
+      })), ...neg.map(x => ({
+        engine: x.engine, direction: 'negative', status: x.status, strength: evidenceStoryRound(x.strength),
+        reliability: evidenceStoryRound(x.scored.reliability), edge: evidenceStoryRound(x.scored.edge),
+        depth: x.depth, independenceWeight: evidenceStoryRound(x.independenceWeight),
+      }))],
+      _supportByFamily: Object.fromEntries(posAgg.byFamily),
+      _oppositionByFamily: Object.fromEntries(negAgg.byFamily),
+    });
+  }
+
+  const actionableRows = rows.filter(r => r.market !== 'TB:1X2-Draw' && r.odds > 1 && r.matchedPatterns.length > 0);
+  actionableRows.sort((a, b) => b.actionScore - a.actionScore);
+  const top = actionableRows[0] || null;
+  const second = actionableRows[1] || null;
+  const selectionMargin = top && second ? top.actionScore - second.actionScore : (top ? top.actionScore : 0);
+  const narrative = evidenceStoryMarketNarrative(rows);
+  if (!top) {
+    return {
+      version: 1,
+      marketCount: EVIDENCE_STORY_MARKETS.length,
+      narrative,
+      winner: null,
+      rankedMarkets: rows.sort((a, b) => b.actionScore - a.actionScore),
+      story: 'No market accumulated enough priceable, validated evidence to form an actionable story.'
+    };
+  }
+
+  const why = [
+    top.narrativeReasons.length ? `Strongest support: ${top.narrativeReasons.join('; ')}.` : '',
+    top.supportingEngines.length >= 2 ? 'CA and Settlement independently support the direction.' : `${top.supportingEngines[0]?.toUpperCase() || 'Pattern'} provides the primary support.`,
+    second && top.baseline != null && second.baseline != null && top.incrementalEdge > second.incrementalEdge
+      ? `${top.marketLabel} provides more fixture-specific separation than its nearest alternative.` : '',
+  ].filter(Boolean).join(' ');
+  const risks = [
+    top.conflict === 'HARD' ? 'Evidence is genuinely bipolar.' : top.conflict === 'SOFT' ? 'There is meaningful opposing evidence.' : '',
+    top.trapRisk >= 20 ? 'Trap exposure is material; confidence is reduced.' : top.trapRisk >= 10 ? 'There is some trap exposure.' : 'No decisive trap signal.',
+  ].filter(Boolean).join(' ');
+
+  return {
+    version: 1,
+    marketCount: EVIDENCE_STORY_MARKETS.length,
+    narrative,
+    winner: { ...top, selectionMargin: evidenceStoryRound(selectionMargin), storyQuality: top.status },
+    runnerUp: second,
+    rankedMarkets: rows.sort((a, b) => b.actionScore - a.actionScore),
+    why,
+    risks,
+  };
+}
+
 // ── CA Verdict headline resolver (2026-08-02) ───────────────────────────────
 // Single source of truth for "which verdict is THE headline" — same
 // promotion rule FullModelPage's CAVerdictBlock uses (an avoid-direction
@@ -15573,7 +15936,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   const [scLoading, setScLoading] = useState(false);
   const scFetchedIdsRef = useRef(new Set());
 
-  const needsSC = sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus");
+  const needsSC = sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus") || sources.has("evidence-story");
   useEffect(() => {
     if (!needsSC || !fixtures?.length || scLoading) return;
     const missing = fixtures.filter(f => f?.id != null && !scFetchedIdsRef.current.has(f.id));
@@ -15673,7 +16036,10 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
       if (peExcludedMarkets.has(market)) return;
       const fam = familyOfMarket(engineOfSource(source), market);
-      if (fam != null && currentVetoFamilies.has(fam)) return;
+      // Legacy Consensus and the ordinary CA/SC/SA/Model sources retain the
+      // existing veto behavior. Evidence Story is separate so it can reason
+      // over conflicting evidence instead of being erased by that veto set.
+      if (source !== "Evidence Story" && fam != null && currentVetoFamilies.has(fam)) return;
       const mp = modelProbFor(f, market);
       // Global floor (opt-in, see applyGlobalFloor above) — applies to every
       // source's legs, not just Model's own (which already self-gates below
@@ -15789,6 +16155,32 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
             { consensusGrade: win.consensusGrade, supportingEngines: win.supportingEngines });
         }
       }
+      // Evidence Story (2026-09-09) — separate synthesis source. This does NOT
+      // replace the established multi-pattern Consensus engine. It consumes CA +
+      // Settlement evidence across all target markets and chooses the best
+      // expression of the fixture evidence using overlap discounting, status
+      // weighting, conflict handling, baseline-dominance control, and price
+      // awareness.
+      if (sources.has("evidence-story")) {
+        const story = computeEvidenceStoryVerdict(f, {
+          caPositive: caMatchesForFixture?.positive,
+          caAvoid: caMatchesForFixture?.avoid,
+          scPositive: scResults?.[f.id]?.positive,
+          scAvoid: scResults?.[f.id]?.avoid,
+          modelProbFor,
+        });
+        const win = story.winner;
+        if (win && win.odds > 1) {
+          const label = win.marketLabel;
+          pushLeg(f, win.market, label, win.odds, win.modelProbability, win.realPriceEdge ?? win.incrementalEdge ?? 0, "Evidence Story", {
+            storyVerdict: story, storyStatus: win.status, storyNarrative: story.narrative,
+            storySelectionMargin: win.selectionMargin, storyConflict: win.conflict,
+            storyTrapRisk: win.trapRisk, storyEvidenceQuality: win.evidenceQuality,
+            storyIncrementalEdge: win.incrementalEdge, storyPriceSource: win.priceSource,
+            storySupportingEngines: win.supportingEngines,
+          });
+        }
+      }
       // Model — the raw base model's own probability, no pattern-mining
       // engine required. Only markets clearing modelMinProb qualify; a leg
       // from this source has hitRate:null (no engine backs it), so it ranks
@@ -15849,6 +16241,14 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // one purely for being flagged twice.
   const CORROBORATION_BONUS_PER_ENGINE = 3;
   const legScore = l => {
+    // Evidence Story already performs the full cross-market synthesis and
+    // exposes an action score calibrated specifically for "best expression
+    // of the fixture evidence". Use that as its ranking signal rather than
+    // feeding the Story result back through the legacy hit-rate + lift score,
+    // which would reintroduce the natural-baseline dominance we just removed.
+    if (l.source === "Evidence Story" && l.storyVerdict?.winner?.actionScore != null) {
+      return l.storyVerdict.winner.actionScore;
+    }
     const base = l.hitRate != null
       ? ((l.hitRate + (l.modelProb ?? l.hitRate)) / 2) + (l.lift ?? 0)
       : (l.modelProb ?? 0);
@@ -15894,10 +16294,12 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   // same ~0-1 range Manual's evaluatePick scores land in (legScore here
   // is roughly 0-100 + lift points), just for the tier-shuffle stratification
   // inside buildManualParlaysFromPool — not a precision-critical conversion.
-  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus", tgp: "TGP" };
+  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus", evidenceStory: "Evidence Story", tgp: "TGP" };
   useEffect(() => {
     const pool = stackedLegs.map(l => {
-      const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
+      const conf = l.source === "Evidence Story" && l.storyVerdict?.winner?.confidenceScore != null
+        ? Math.round(l.storyVerdict.winner.confidenceScore)
+        : Math.round(l.hitRate ?? l.modelProb ?? 0);
       // When multiple engines independently agreed on this fixture+market,
       // show all of them (e.g. "SA + CA") instead of just whichever one
       // happened to produce the winning leg object — the agreement itself
@@ -15919,6 +16321,14 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         strategyTags: [],
         isVolatile: isLeagueVolatile(l.league || ""),
         modelProb: l.modelProb ?? null,
+        actionScore: l.storyVerdict?.winner?.actionScore ?? null,
+        storyStatus: l.storyStatus ?? null,
+        storyNarrative: l.storyNarrative ?? null,
+        storyConflict: l.storyConflict ?? null,
+        storyTrapRisk: l.storyTrapRisk ?? null,
+        storyEvidenceQuality: l.storyEvidenceQuality ?? null,
+        storyIncrementalEdge: l.storyIncrementalEdge ?? null,
+        storyPriceSource: l.storyPriceSource ?? null,
       };
     });
     onPoolChange(pool);
@@ -15926,6 +16336,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
 
   const SOURCE_OPTS = [
     { id: "consensus", label: "Consensus" },
+    { id: "evidence-story", label: "Evidence Story" },
     { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
     { id: "sc", label: "SC" }, { id: "sc-verdict", label: "SC Verdict" }, { id: "model", label: "Model" },
   ];
@@ -15938,7 +16349,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   return (
     <div style={{ padding: "4px 0" }}>
       <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into three market families — Result, Dominance, Goals (Radar folded into Goals) — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Every other source works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
+        Pulls whatever qualifies across Consensus/Evidence Story/SA/CA/SC/Model into a shared pool. Consensus remains the established multi-pattern family consensus. Evidence Story evaluates all target markets together: matched CA + Settlement patterns become signed evidence, redundant conditions are discounted, VALID/EMERGING/TRAP evidence is tiered, natural-baseline markets face a soft dominance penalty, and the final market is chosen as the best expression of the fixture evidence rather than simply the highest raw hit rate. Real bookmaker prices are treated as real price evidence; model-implied prices are labeled separately. Every other source works as before. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
         {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && (
           <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
         )}
