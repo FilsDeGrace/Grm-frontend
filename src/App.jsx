@@ -15369,6 +15369,21 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 // beatsBaseline fix, loadCAPatternsByMarket's Wilson floor, buildSACandidates'
 // agree/conflict gating) — this component's job is fetch + flatten + a
 // couple of display-layer knobs (topN per market), not re-deriving anything.
+// MarketFilterSelect — "Any market, or narrow to one" dropdown. Originally
+// TGP-only; shared here so TGP and Pool Builder both narrow their pool to a
+// single market the same way, with the same control.
+function MarketFilterSelect({ C, value, onChange, markets, label = "Market" }) {
+  return (
+    <div>
+      <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>{label}</div>
+      <select value={value || ""} onChange={e => onChange(e.target.value || null)} className="gi">
+        <option value="">Any</option>
+        {markets.map(m => <option key={m} value={m}>{m.replace(/^TB:/, "")}</option>)}
+      </select>
+    </div>
+  );
+}
+
 const POOL_BUILDER_TOPN_OPTIONS = [
   { id: "5",  label: "Top 5" },
   { id: "10", label: "Top 10" },
@@ -15379,12 +15394,13 @@ const POOL_BUILDER_TOPN_OPTIONS = [
 // selected, positive-direction only (no CA avoid-vetoes under V2 — see
 // server.js's buildPoolBuilderPools header comment).
 const POOL_BUILDER_SOURCE_OPTIONS = [
-  { id: "v1", label: "V1 · Full", desc: "Full CA union" },
-  { id: "v2", label: "V2 · Curated", desc: "Diversity-selected set" },
+  { id: "v1", label: "Full Pool",    desc: "Every qualifying pattern" },
+  { id: "v2", label: "Curated Pool", desc: "A smaller, hand-picked set" },
 ];
 function PoolBuilderControls({ C, onPoolChange, date }) {
   const [topN, setTopN] = useState("5");
   const [source, setSource] = useState("v1");
+  const [marketFilter, setMarketFilter] = useState(null); // null = every market
   const [data, setData] = useState(null);   // raw /api/pool-builder payload
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -15409,10 +15425,13 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
   // Flatten { [market]: candidate[] } into the flat leg shape
   // buildManualParlaysFromPool expects (same fields PatternEngineControls'
   // pushLeg/qualifyingLegs and TGPControls' decomposedPool already produce).
+  const availableMarkets = useMemo(() => Object.keys(data?.pool || {}), [data]);
+
   const pool = useMemo(() => {
     if (!data?.pool) return [];
     const legs = [];
     for (const [market, candidates] of Object.entries(data.pool)) {
+      if (marketFilter && market !== marketFilter) continue;
       for (const c of candidates) {
         if (!Number.isFinite(c.odds) || c.odds <= 1) continue; // not priceable — same guard everywhere else in this file
         // Best real-world estimate of this leg's win rate, in priority
@@ -15441,7 +15460,7 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
       }
     }
     return legs.sort((a, b) => b.utility - a.utility);
-  }, [data]);
+  }, [data, marketFilter]);
 
   useEffect(() => { onPoolChange(pool); }, [pool, onPoolChange]);
 
@@ -15471,14 +15490,17 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
           </button>
         ))}
       </div>
+      <div style={{ marginBottom:10 }}>
+        <MarketFilterSelect C={C} value={marketFilter} onChange={setMarketFilter} markets={availableMarkets} />
+      </div>
       {loading && <div style={{ fontSize:9,color:C.muted }}>Loading pool…</div>}
       {error && <div style={{ fontSize:9,color:C.danger || "#e55" }}>Couldn't load Pool Builder: {error}</div>}
       {!loading && !error && (
         <div style={{ fontSize:8,color:C.text,lineHeight:1.6 }}>
-          {pool.length} qualifying leg{pool.length !== 1 ? "s" : ""} across {Object.keys(data?.pool || {}).length} market{Object.keys(data?.pool || {}).length !== 1 ? "s" : ""}
+          {pool.length} qualifying leg{pool.length !== 1 ? "s" : ""} across {marketFilter ? 1 : availableMarkets.length} market{(marketFilter ? 1 : availableMarkets.length) !== 1 ? "s" : ""}
           {data?.saPatternCount != null ? ` · SA ${data.saPatternCount} patterns` : ""}
           {data?.caComboCount != null ? `, CA ${data.caComboCount} combos` : ""} loaded ({source === "v2" ? "curated" : "full"}).
-          {source === "v2" && <span style={{ display:"block",marginTop:2,color:C.muted }}>V2 is positive-direction only — CA can't veto a leg here, only agree with it.</span>}
+          {source === "v2" && <span style={{ display:"block",marginTop:2,color:C.muted }}>This pool only includes patterns to bet on, never patterns to avoid.</span>}
         </div>
       )}
     </div>
@@ -16439,11 +16461,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
             </select>
           </div>
           <div>
-            <div style={{ fontSize: 8, color: C.text, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".1em" }}>Market</div>
-            <select value={marketFilter || ""} onChange={e => setMarketFilter(e.target.value || null)} className="gi">
-              <option value="">Any</option>
-              {availableMarkets.map(m => <option key={m} value={m}>{m.replace(/^TB:/, "")}</option>)}
-            </select>
+            <MarketFilterSelect C={C} value={marketFilter} onChange={setMarketFilter} markets={availableMarkets} />
           </div>
         </>)}
         {availableMarkets.length > 0 && (
@@ -17079,6 +17097,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   const [builderMode, setBuilderMode] = useState("jarvis"); // "jarvis" | "custom"
   const [jarvisModes, setJarvisModes] = useState(new Set(["safe"])); // multi-select: safe/value/longshot
   const [customPool, setCustomPool]   = useState("all"); // "all" | "engine"
+  const [manualMarketFilter, setManualMarketFilter] = useState(null); // null = every market
   // Custom tab engine toggle (2026-08-06) — "manual" is the original pool +
   // rules builder; "pattern" is the former "Multi Gen" tab, folded in here
   // instead of living on its own top-level tab. Both engines share the same
@@ -17313,6 +17332,25 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     if (!parlayLeagueFilter) return fixtures;
     return fixtures.filter(f => matchesLeagueFilter(f.leagueId || f.league, parlayLeagueFilter, parlayLeagueFilterMode));
   }, [fixtures, parlayLeagueFilter, parlayLeagueFilterMode]);
+
+  // Preview-only — populates Manual's market dropdown and a live leg count
+  // before you hit Build. NOT used to build the actual ticket: Build (below)
+  // always computes its own pool fresh, after historical rates are fully
+  // loaded, so the numbers staked are never based on this preview's
+  // possibly-still-loading rate data.
+  const manualPoolPreview = useMemo(() => {
+    const eligible = customPool === "engine" && engineFixtureIds?.size
+      ? parlayFixtures.filter(f => engineFixtureIds.has(f.id))
+      : parlayFixtures;
+    const raw = customPool === "engine"
+      ? buildUniversalPool(eligible, historicalRates)
+      : buildSignalPool(eligible, historicalRates);
+    return raw.filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, e.fixture)));
+  }, [customPool, parlayFixtures, engineFixtureIds, historicalRates, parlayExcludedMarkets]);
+  const manualAvailableMarkets = useMemo(
+    () => [...new Set(manualPoolPreview.map(e => e.market))],
+    [manualPoolPreview]
+  );
 
   // ── Remix a whole ticket ──────────────────────────────────────────────────
   // Rebuilds this ticket with a fresh stratified shuffle.
@@ -17782,7 +17820,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const rawPool = (customPool === "engine"
         ? buildUniversalPool(allCustomFixtures, rates, isPastBuild)
         : buildSignalPool(allCustomFixtures, rates, isPastBuild)
-      ).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)));
+      ).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)))
+       .filter(e => !manualMarketFilter || e.market === manualMarketFilter);
       if (rawPool.length === 0) {
         setAutoMessage(customPool==="engine"
           ? "No qualifying games in engine pool — switch to All Fixtures or build the engine pool first."
@@ -18189,6 +18228,12 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   <div style={{ fontSize:8,color:C.text,marginBottom:12,lineHeight:1.6 }}>
                     Builds <span style={{ color:C.gold }}>N non-overlapping tickets</span> — each picks from fixtures unused by previous tickets.{customPool==="engine"?" Engine pool only — highest confidence games.":" All fixtures today, confidence ranked high to low."}
+                  </div>
+                  <div style={{ marginBottom:12 }}>
+                    <MarketFilterSelect C={C} value={manualMarketFilter} onChange={setManualMarketFilter} markets={manualAvailableMarkets} />
+                    <div style={{ fontSize:8,color:C.muted,marginTop:4 }}>
+                      {manualPoolPreview.filter(e => !manualMarketFilter || e.market === manualMarketFilter).length} game{manualPoolPreview.filter(e => !manualMarketFilter || e.market === manualMarketFilter).length !== 1 ? "s" : ""} qualify right now.
+                    </div>
                   </div>
                   </>)}
 
