@@ -5721,7 +5721,8 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
       setTimeout(() => setFinishedFlash(""), 2500);
       return;
     }
-    const resolvedOdds = pick.odds || safeImpliedOdds(pick.prob);
+    const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
+    const resolvedOdds = pick.odds || io(pick.prob);
     if (!resolvedOdds && !pick.prob) {
       setFinishedFlash("No model data — adding anyway");
       setTimeout(() => setFinishedFlash(""), 2500);
@@ -5730,7 +5731,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
       setFinishedFlash("Added — game is LIVE, odds may have shifted");
       setTimeout(() => setFinishedFlash(""), 3000);
     }
-    onAddToParlay(f, { pick: pick.pick, prob: pick.prob, odds: resolvedOdds || null, market: pick.market, isModelImplied: !pick.odds });
+    onAddToParlay(f, { pick: pick.pick, prob: pick.prob, odds: resolvedOdds || null, market: pick.market });
   }, [f, onAddToParlay, isFinished, isPPD, isLive]);
 
   const fetchCardResult = async (e) => {
@@ -10789,27 +10790,24 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
 
   const handleAdd = () => {
     if (!pick || !onAddToParlay) return;
+    const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
     const m = fixture.markets || {};
     const o = fixture.odds || {};
 
-    // Look up model prob and real/implied odds based on the selected market+pick.
-    // safeImpliedOdds (canonical implied-odds formula, margin included) is the
-    // one fallback used everywhere below — this screen previously had its own
-    // margin-free copy (`io`), which is why a model-implied Over 0.5 could
-    // display shorter odds than a real bookmaker Win price on the same fixture.
-    let prob = null, realOdds = null;
+    // Look up model prob and real/implied odds based on the selected market+pick
+    let prob = null, odds = null;
     const mf = market;
     if (mf === "1X2") {
-      if (pick.includes("Win") && pick.includes(home)) { prob = m.homeWin; realOdds = o.o1; }
-      else if (pick === "Draw")                         { prob = m.draw;    realOdds = o.oX; }
-      else                                              { prob = m.awayWin; realOdds = o.o2; }
+      if (pick.includes("Win") && pick.includes(home)) { prob = m.homeWin; odds = o.o1 || io(m.homeWin); }
+      else if (pick === "Draw")                         { prob = m.draw;    odds = o.oX || io(m.draw);    }
+      else                                              { prob = m.awayWin; odds = o.o2 || io(m.awayWin); }
     } else if (mf === "DC") {
-      if (pick === "Home or Draw")      { prob = m.dc1X || (m.homeWin + m.draw); realOdds = o.dc1X; }
-      else if (pick === "Away or Draw") { prob = m.dcX2 || (m.awayWin + m.draw); realOdds = o.dcX2; }
-      else                               { prob = m.dc12  || (m.homeWin + m.awayWin); realOdds = o.dc12; }
+      if (pick === "Home or Draw")  { prob = m.dc1X || (m.homeWin + m.draw); odds = o.dc1X || io(prob); }
+      else if (pick === "Away or Draw") { prob = m.dcX2 || (m.awayWin + m.draw); odds = o.dcX2 || io(prob); }
+      else                          { prob = m.dc12  || (m.homeWin + m.awayWin); odds = o.dc12  || io(prob); }
     } else if (mf === "BTTS") {
-      if (pick === "BTTS Yes") { prob = m.bttsYes; realOdds = o.bttsYesOdds; }
-      else                     { prob = m.bttsNo;  realOdds = o.bttsNoOdds;  }
+      if (pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || io(m.bttsYes); }
+      else                     { prob = m.bttsNo;  odds = o.bttsNoOdds  || io(m.bttsNo);  }
     } else if (mf === "TeamTotal_H" || mf === "TeamTotal_A") {
       const isHome = mf === "TeamTotal_H";
       const isOver = pick.includes("Over");
@@ -10818,26 +10816,28 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       const probKey = `${isHome ? "home" : "away"}Over${lineKey}`;
       const basePr  = m[probKey];
       prob = isOver ? basePr : (basePr != null ? 100 - basePr : null);
-      // No real per-team-total odds field exists yet — always model-implied.
+      odds = io(prob);
     } else if (mf === "Goals_OU") {
       const line = pick.match(/[\d.]+/)?.[0] || "2.5";
       const isOver = pick.startsWith("Over");
       const lineKey = line.replace(".","");
       if (isOver) {
-        prob = m[`over${lineKey}`] ?? null;
-        realOdds = o[`over${lineKey}odds`];
+        const key = `over${lineKey}`;
+        const oddsKey = `over${lineKey}odds`;
+        prob = m[key] ?? null;
+        odds = prob ? (o[oddsKey] || io(prob)) : null;
       } else {
         // Under X.5 — derive from over if direct field missing
-        prob = m[`under${lineKey}`] ?? (m[`over${lineKey}`] != null ? parseFloat((100 - m[`over${lineKey}`]).toFixed(1)) : null);
-        realOdds = o[`under${lineKey}odds`];
+        const underKey = `under${lineKey}`;
+        const overKey  = `over${lineKey}`;
+        const oddsKey  = `under${lineKey}odds`;
+        prob = m[underKey] ?? (m[overKey] != null ? parseFloat((100 - m[overKey]).toFixed(1)) : null);
+        odds = prob ? (o[oddsKey] || io(prob)) : null;
       }
     }
     if (!prob) prob = null;
-    // Real odds win when present; otherwise fall back to the canonical
-    // model-implied formula — sportybet books by outcomeId, not odds, so a
-    // pick always needs SOME odds value even without a bookmaker quote.
-    let odds = realOdds || safeImpliedOdds(prob);
-    const isModelImplied = !!odds && !realOdds;
+    // Always derive implied odds from prob if no real odds — sportybet books by outcomeId not odds
+    if (!odds && prob) odds = io(prob);
     // Floor implied odds at 1.02 so the ticket math doesn't break
     if (odds && odds < 1.02) odds = 1.02;
 
@@ -10856,7 +10856,6 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       market: resolveDisplayMarket(market, pick),
       odds:   odds,
       prob:   prob || null,
-      isModelImplied,
     });
     setFlash(true);
     setTimeout(() => { setFlash(false); setOpen(false); }, 1200);
@@ -10922,28 +10921,27 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       )}
 
       {pick && (() => {
-        // Live preview of resolved prob/odds for selected pick.
-        // Canonical safeImpliedOdds() replaces the old margin-free io2 copy —
-        // see handleAdd above for why the two formulas had to be unified.
+        // Live preview of resolved prob/odds for selected pick
+        const io2 = p => (p > 0 && p < 100) ? parseFloat((1/(p/100)).toFixed(2)) : null;
         const m2 = fixture.markets || {}, o2 = fixture.odds || {};
-        let previewProb = null, previewRealOdds = null;
+        let previewProb = null, previewOdds = null;
         const lineKey = pick.match(/[\d.]+/)?.[0]?.replace(".","") || "";
         if (market === "1X2") {
-          if (pick.includes(home)) { previewProb = m2.homeWin; previewRealOdds = o2.o1; }
-          else if (pick === "Draw") { previewProb = m2.draw; previewRealOdds = o2.oX; }
-          else { previewProb = m2.awayWin; previewRealOdds = o2.o2; }
+          if (pick.includes(home)) { previewProb = m2.homeWin; previewOdds = o2.o1 || io2(m2.homeWin); }
+          else if (pick === "Draw") { previewProb = m2.draw; previewOdds = o2.oX || io2(m2.draw); }
+          else { previewProb = m2.awayWin; previewOdds = o2.o2 || io2(m2.awayWin); }
         } else if (market === "BTTS") {
-          if (pick === "BTTS Yes") { previewProb = m2.bttsYes; previewRealOdds = o2.bttsYesOdds; }
-          else { previewProb = m2.bttsNo; previewRealOdds = o2.bttsNoOdds; }
+          if (pick === "BTTS Yes") { previewProb = m2.bttsYes; previewOdds = o2.bttsYesOdds || io2(m2.bttsYes); }
+          else { previewProb = m2.bttsNo; previewOdds = o2.bttsNoOdds || io2(m2.bttsNo); }
         } else if (market === "Goals_OU" && lineKey) {
           const isOver = pick.startsWith("Over");
           previewProb = isOver ? (m2[`over${lineKey}`] ?? null) : (m2[`under${lineKey}`] ?? (m2[`over${lineKey}`] != null ? parseFloat((100-m2[`over${lineKey}`]).toFixed(1)) : null));
-          previewRealOdds = isOver ? o2[`over${lineKey}odds`] : o2[`under${lineKey}odds`];
+          previewOdds = isOver ? (o2[`over${lineKey}odds`] || io2(previewProb)) : (o2[`under${lineKey}odds`] || io2(previewProb));
         } else if ((market === "TeamTotal_H" || market === "TeamTotal_A") && lineKey) {
           const isHome = market === "TeamTotal_H", isOver = pick.includes("Over");
           const base = m2[`${isHome?"home":"away"}Over${lineKey}`];
           previewProb = isOver ? base : (base != null ? 100 - base : null);
-          // No real per-team-total odds field exists yet — always model-implied.
+          previewOdds = io2(previewProb);
         } else if (market === "DC") {
           // N23-FIX: DC odds preview was entirely missing — previewProb/Odds stayed null,
           // so the preview strip never rendered when DC was selected.
@@ -10951,32 +10949,22 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
           const pickLower = (pick || "").toLowerCase();
           if (pickLower.includes("or draw") || pickLower === "home or draw" || pickLower === "1x") {
             previewProb = m2.dc1X ?? (m2.homeWin != null && m2.draw != null ? Math.min(99, m2.homeWin + m2.draw) : null);
-            previewRealOdds = o2.dc1X;
+            previewOdds = o2.dc1X || io2(previewProb);
           } else if (pickLower.includes("draw or away") || pickLower === "x2") {
             previewProb = m2.dcX2 ?? (m2.draw != null && m2.awayWin != null ? Math.min(99, m2.draw + m2.awayWin) : null);
-            previewRealOdds = o2.dcX2;
+            previewOdds = o2.dcX2 || io2(previewProb);
           } else if (pickLower.includes("home or away") || pickLower === "12") {
             previewProb = m2.dc12 ?? (m2.homeWin != null && m2.awayWin != null ? Math.min(99, m2.homeWin + m2.awayWin) : null);
-            previewRealOdds = o2.dc12;
+            previewOdds = o2.dc12 || io2(previewProb);
           }
         }
-        const previewOdds = previewRealOdds || safeImpliedOdds(previewProb);
-        const previewIsModelImplied = !!previewOdds && !previewRealOdds;
         if (!previewProb && !previewOdds) return null;
         return (
-          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:5,padding:"5px 8px",marginBottom:8,fontSize:8 }}>
+          <div style={{ display:"flex",justifyContent:"space-between",background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:5,padding:"5px 8px",marginBottom:8,fontSize:8 }}>
             <span style={{ color:C.text }}>Model prob</span>
             <span style={{ color:C.gold,fontWeight:700 }}>{previewProb ? `${Math.round(previewProb)}%` : "—"}</span>
             <span style={{ color:C.text }}>Odds</span>
-            <span style={{ display:"flex", alignItems:"center", gap:4 }}>
-              <span style={{ color:previewOdds?C.green:C.red,fontWeight:700 }}>{previewOdds ? `${parseFloat(previewOdds).toFixed(2)}x` : "No data"}</span>
-              {previewIsModelImplied && (
-                <span title="Estimated from model probability — no bookmaker odds available"
-                      style={{ fontSize:6, fontWeight:800, color:C.muted, border:`1px solid ${C.faint}`, borderRadius:3, padding:"1px 3px", letterSpacing:".03em" }}>
-                  MODEL EST.
-                </span>
-              )}
-            </span>
+            <span style={{ color:previewOdds?C.green:C.red,fontWeight:700 }}>{previewOdds ? `${parseFloat(previewOdds).toFixed(2)}x` : "No data"}</span>
           </div>
         );
       })()}
@@ -11142,29 +11130,30 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
       const fx = selectedFixtures[legs.indexOf(l)] || null;
       const m  = fx?.markets || {};
       const o  = fx?.odds    || {};
+      const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
       let prob = null, odds = null;
       const mf = l.market;
       if (mf === "1X2") {
-        if (l.pick.includes(l.home))      { prob = m.homeWin; odds = o.o1 || safeImpliedOdds(m.homeWin); }
-        else if (l.pick === "Draw")        { prob = m.draw;    odds = o.oX || safeImpliedOdds(m.draw);    }
-        else                               { prob = m.awayWin; odds = o.o2 || safeImpliedOdds(m.awayWin); }
+        if (l.pick.includes(l.home))      { prob = m.homeWin; odds = o.o1 || io(m.homeWin); }
+        else if (l.pick === "Draw")        { prob = m.draw;    odds = o.oX || io(m.draw);    }
+        else                               { prob = m.awayWin; odds = o.o2 || io(m.awayWin); }
       } else if (mf === "DC") {
-        if (l.pick.includes("1X"))      { prob = m.dc1X; odds = o.dc1X || safeImpliedOdds(m.dc1X); }
-        else if (l.pick.includes("X2")) { prob = m.dcX2; odds = o.dcX2 || safeImpliedOdds(m.dcX2); }
-        else                            { prob = m.dc12; odds = o.dc12 || safeImpliedOdds(m.dc12);  }
+        if (l.pick.includes("1X"))      { prob = m.dc1X; odds = o.dc1X || io(m.dc1X); }
+        else if (l.pick.includes("X2")) { prob = m.dcX2; odds = o.dcX2 || io(m.dcX2); }
+        else                            { prob = m.dc12; odds = o.dc12 || io(m.dc12);  }
       } else if (mf === "BTTS") {
-        if (l.pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || safeImpliedOdds(m.bttsYes); }
-        else                       { prob = m.bttsNo;  odds = o.bttsNoOdds  || safeImpliedOdds(m.bttsNo);  }
-      } else if (mf === "TeamTotal_H") { prob = m.homeOver05; odds = safeImpliedOdds(m.homeOver05); }
-      else if (mf === "TeamTotal_A")   { prob = m.awayOver05; odds = safeImpliedOdds(m.awayOver05); }
+        if (l.pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || io(m.bttsYes); }
+        else                       { prob = m.bttsNo;  odds = o.bttsNoOdds  || io(m.bttsNo);  }
+      } else if (mf === "TeamTotal_H") { prob = m.homeOver05; odds = io(m.homeOver05); }
+      else if (mf === "TeamTotal_A")   { prob = m.awayOver05; odds = io(m.awayOver05); }
       else if (mf === "Goals_OU") {
         const line = l.pick.match(/[\d.]+/)?.[0] || "2.5";
         const isOver = l.pick.startsWith("Over");
         const key = isOver ? `over${line.replace(".","")}`  : `under${line.replace(".","")}`;
         const oddsKey = isOver ? `over${line.replace(".","")}odds` : `under${line.replace(".","")}odds`;
-        prob = m[key]; odds = o[oddsKey] || safeImpliedOdds(prob);
+        prob = m[key]; odds = o[oddsKey] || io(prob);
       }
-      if (!odds && prob) odds = safeImpliedOdds(prob);
+      if (!odds && prob) odds = io(prob);
       return {
         fixtureId: l.fixtureId,
         game:      `${l.home} vs ${l.away}`,
@@ -15395,6 +15384,25 @@ function MarketFilterSelect({ C, value, onChange, markets, label = "Market" }) {
   );
 }
 
+// Tier filter chips — labels only; the actual A/B/C cutoffs live server-side
+// in pool-builder.mjs's AUTO_TICKET_TIERS (a starting point, not calibrated
+// — see that file's header comment).
+const AUTO_TICKET_TIER_LABELS = [
+  { id: "A", label: "Tier A" },
+  { id: "B", label: "Tier B" },
+  { id: "C", label: "Tier C" },
+];
+// Translates the server's internal strategyId into plain copy — never show
+// "bestOfBest"/"pureLadder:TB:..." to the user (Product-Facing Copy Rule).
+function autoTicketStrategyLabel(strategyId) {
+  if (strategyId === "bestOfBest") return "Best of the Best";
+  if (strategyId === "mixedLadder") return "Mixed Ladder";
+  if (strategyId?.startsWith("pureLadder:")) {
+    return `Ladder — ${strategyId.slice("pureLadder:".length).replace(/^TB:/, "")}`;
+  }
+  return "Ticket";
+}
+
 const POOL_BUILDER_TOPN_OPTIONS = [
   { id: "5",  label: "Top 5" },
   { id: "10", label: "Top 10" },
@@ -15475,6 +15483,30 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
 
   useEffect(() => { onPoolChange(pool); }, [pool, onPoolChange]);
 
+  // ── Auto Ticket Generator ──────────────────────────────────────────────
+  // Separate, button-triggered fetch (not eager like the pool above) —
+  // generation does real work server-side (multiple strategies x rotation
+  // batches), no reason to re-run it on every topN/market click the way the
+  // lightweight pool preview does.
+  const [autoTickets, setAutoTickets] = useState(null);
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [autoError, setAutoError] = useState(null);
+  const [autoTierFilter, setAutoTierFilter] = useState(null); // null = every tier
+
+  const generateTickets = () => {
+    setAutoLoading(true); setAutoError(null);
+    const qs = new URLSearchParams({ date: date || todayStr(), source });
+    fetch(`${SERVER}/api/pool-builder/tickets?${qs.toString()}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+      .then(d => { setAutoTickets(d.tickets || []); setAutoLoading(false); })
+      .catch(err => { setAutoError(err.message || "Failed to generate tickets"); setAutoTickets(null); setAutoLoading(false); });
+  };
+
+  const visibleAutoTickets = useMemo(
+    () => (autoTickets || []).filter(t => !autoTierFilter || t.tier === autoTierFilter),
+    [autoTickets, autoTierFilter]
+  );
+
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display:"flex",gap:6,marginBottom:6,
@@ -15514,6 +15546,54 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
           {source === "v2" && <span style={{ display:"block",marginTop:2,color:C.muted }}>This pool only includes patterns to bet on, never patterns to avoid.</span>}
         </div>
       )}
+
+      <div style={{ marginTop:14, borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
+        <button onClick={generateTickets} disabled={autoLoading || pool.length === 0}
+          style={{ width:"100%", padding:"9px 4px", borderRadius:8, border:"none",
+                   background:C.accent, color:C.accentText, fontSize:10, fontWeight:800,
+                   cursor:(autoLoading || pool.length === 0)?"default":"pointer", fontFamily:C.font,
+                   opacity:(autoLoading || pool.length === 0)?0.6:1 }}>
+          {autoLoading ? "Generating…" : "Generate Tickets"}
+        </button>
+        {autoError && <div style={{ fontSize:9,color:C.danger || "#e55", marginTop:6 }}>Couldn't generate tickets: {autoError}</div>}
+
+        {autoTickets && !autoError && (<>
+          <div style={{ display:"flex", gap:6, margin:"10px 0" }}>
+            {[{ id:null, label:"All" }, ...AUTO_TICKET_TIER_LABELS].map(t => (
+              <button key={t.id ?? "all"} onClick={() => setAutoTierFilter(t.id)}
+                style={{ flex:1, padding:"6px 4px", borderRadius:8,
+                         border:`1px solid ${autoTierFilter===t.id?C.accent:C.border}`,
+                         background:autoTierFilter===t.id?C.accent:"transparent",
+                         color:autoTierFilter===t.id?C.accentText:C.muted,
+                         fontSize:9, fontWeight:800, cursor:"pointer", fontFamily:C.font }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize:8, color:C.muted, marginBottom:8 }}>
+            {visibleAutoTickets.length} ticket{visibleAutoTickets.length !== 1 ? "s" : ""} — every leg used only once within its own ticket, ranked by confidence.
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8, maxHeight:420, overflowY:"auto" }}>
+            {visibleAutoTickets.map((t, i) => (
+              <div key={i} style={{ padding:"8px 10px", borderRadius:8, border:`1px solid ${C.border}`, background:C.bg }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                  <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{autoTicketStrategyLabel(t.strategyId)} · {t.legCount} legs</span>
+                  <span style={{ fontSize:9, fontWeight:800,
+                                  color: t.tier === "A" ? (C.gold || C.accent) : (t.tier === "B" ? C.text : C.muted) }}>
+                    {t.tierLabel} · {t.avgConfidence}%
+                  </span>
+                </div>
+                <div style={{ fontSize:8, color:C.muted, marginBottom:4 }}>Combined odds {t.combinedOdds}×</div>
+                <div style={{ fontSize:8, color:C.text, lineHeight:1.6 }}>
+                  {t.legs.map((l, j) => (
+                    <div key={j}>{l.home} vs {l.away} — {l.market.replace(/^TB:/, "")} @ {l.odds}</div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>)}
+      </div>
     </div>
   );
 }
