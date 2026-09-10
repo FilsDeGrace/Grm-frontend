@@ -2425,8 +2425,21 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
       // ordering — "TT 0.5 only wins when no good 1.5" — so it only enters
       // once the ENTIRE Over ladder (2.5, then 1.5) has already failed to
       // admit anything; it never competes against a live Over 2.5/1.5 pick.
+      // FIX (2026-09-10, Alden root-cause session): that comment's promise
+      // ("never competes against a live pick") was only actually enforced
+      // for the Over ladder — BTTS and Under 3.5 were left out of the gate
+      // below, so TT 0.5 was entering the pool and directly competing
+      // against an already-admitted BTTS/Under 3.5 pick via netScore. TT
+      // 0.5's naturally high baseline (80-90% in football) gives it far more
+      // abundant, easy-to-clear candidates than BTTS/Over 2.5/Over 1.5's
+      // sparse CA coverage, so it was winning that fight across fixtures
+      // where a perfectly good BTTS/Under 3.5 signal already existed — this
+      // is the direct cause of TT 0.5 dominating Consensus tickets across
+      // fixtures that have nothing else in common. Now gated on the WHOLE
+      // tierA set, matching the comment's actual stated intent.
       const tierB2Add = [];
-      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5")) {
+      if (!admitted.has("TB:Over 2.5") && !admitted.has("TB:Over 1.5") &&
+          !admitted.has("TB:Under 3.5") && !admitted.has("TB:BTTS")) {
         tierB2Add.push("TB:Home Over 0.5", "TB:Away Over 0.5");
       }
       if (tierB2Add.length) {
@@ -7430,7 +7443,23 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // tail-end filters rather than falling through, same trade-off
       // CA:Verdict makes.
       if (scMarket === "SC:Verdict") {
-        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
+        // 2026-09-10 (Alden report + root-cause trace): headline.market here
+        // is ALWAYS a "TB:..." canonical id, never SC's own bare id
+        // ("awayOver05" etc) — bestEngineCandidateForThesis tags every
+        // candidate with the THESIS's TB: market (the loop variable in
+        // resolveFamilyTheses), not the engine-native id it was matched
+        // under, because cross-engine corroboration requires one shared id
+        // for "CA and SC agree on this market" to mean anything. SC's own
+        // positive/avoid combos legitimately carry bare ids (scKey lookup
+        // above finds them), but that gets discarded the moment they're
+        // pushed into the thesis candidate pool. CA:Verdict below already
+        // handles this correctly (simple TB: strip + caResolveFamily) — this
+        // branch was still written as if headline.market were bare, so
+        // BOTH the label and the family/pricing lookup silently missed on
+        // every single verdict, which is the exact "TB:Away Over 0.5, 0%,
+        // no odds" bug reported. Mirrors CA:Verdict's approach exactly, no
+        // new mechanism invented.
+        const scLabelOf = m => (m || "").replace(/^TB:/, "").replace(/^SYNTH:/, "");
         // 2026-09-10 (Alden + Claude, root-cause session): same fix as
         // CA:Verdict above — emergingPositive/emergingAvoid were fetched for
         // Consensus's own SC integration but never reached SC:Verdict's
@@ -7448,7 +7477,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const headline = resolveCAVerdictHeadline(verdicts);
         if (!headline) { continue; } // no verdict at all for this fixture
         const isAvoidLean = headline.direction === "avoid";
-        const scFamilyForHeadline = headline.market ? SC_MARKET_TO_FAMILY_ID[headline.market] : null;
+        // caResolveFamily, not SC_MARKET_TO_FAMILY_ID — headline.market is a
+        // TB: id (see comment above), so it needs the TB:-keyed lookup
+        // CA:Verdict already uses, not SC's bare-id table. No manual
+        // Pick-Market override exists for SC, so null (same as "no override
+        // active") — caResolveFamily falls back to the default family.
+        const scFamilyForHeadline = headline.market ? caResolveFamily(headline.market, null) : null;
         const marketLabel = headline.market ? scLabelOf(headline.market) : "";
         // 2026-08-16 fix — same bug/fix as CA:Verdict above, SC_MARKET_TO_
         // FAMILY_ID already maps onto the SAME family ids FAMILY_ID_
@@ -7614,12 +7648,35 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     const wantSC = scMarket === "SC:Verdict" && !!scResults;
     if (!wantCA && !wantSC) return null;
     let caHasData = 0, scHasData = 0;
-    let scCleared = 0;
-    let scClosestMiss = null; // rejected candidate with the smallest combined shortfall
+    let caCleared = 0, scCleared = 0;
+    let caClosestMiss = null, scClosestMiss = null; // rejected candidate with the smallest combined shortfall
     for (const f of fixtures) {
       if (wantCA) {
-        const { positive, avoid } = matchCAConditions(f, caPatternsRow);
+        const { positive, avoid, emergingPositive, emergingAvoid } = matchCAConditions(f, caPatternsRow);
         if ((positive?.length || 0) > 0 || (avoid?.length || 0) > 0) caHasData++;
+        // 2026-09-10: mirrors scCleared/scClosestMiss below — added now because
+        // the roles have flipped since this diagnostic was first built
+        // (2026-08-22, when SC was the one at 0). Post emerging-admission fix,
+        // SC clears 39/67 and CA clears 1/67 on the same fixture set, and
+        // there was no CA equivalent of this instrumentation to see why.
+        const { top, rejected } = computeEngineVerdict(
+          "ca", f,
+          [...(positive || []), ...(emergingPositive || [])],
+          [...(avoid || []), ...(emergingAvoid || [])],
+          caModelProbFor, { debug: true }
+        );
+        if (top) { caCleared++; }
+        else {
+          for (const r of (rejected || [])) {
+            if (!Number.isFinite(r.reliability) || !Number.isFinite(r.edge)) continue;
+            const relShortfall = Math.max(0, SIGNAL_MIN_RELIABILITY - r.reliability);
+            const edgeShortfall = Math.max(0, SIGNAL_MIN_EDGE - r.edge);
+            const shortfall = relShortfall + edgeShortfall;
+            if (!caClosestMiss || shortfall < caClosestMiss.shortfall) {
+              caClosestMiss = { ...r, shortfall, game: `${f.teams?.home || "?"} vs ${f.teams?.away || "?"}` };
+            }
+          }
+        }
       }
       if (wantSC) {
         const p = scResults[f.id]?.positive, a = scResults[f.id]?.avoid;
@@ -7657,7 +7714,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         }
       }
     }
-    return { wantCA, wantSC, caHasData, scHasData, scCleared, scClosestMiss, total: fixtures.length };
+    return { wantCA, wantSC, caHasData, scHasData, caCleared, scCleared, caClosestMiss, scClosestMiss, total: fixtures.length };
   }, [caMarket, caPatternsRow, scMarket, scResults, fixtures]);
 
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
@@ -9060,7 +9117,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           })()}
           {verdictCoverageDiag && (
             <span style={{ fontSize:8,color:C.muted }}>
-              {verdictCoverageDiag.wantCA && `CA: ${verdictCoverageDiag.caHasData}/${verdictCoverageDiag.total} fixtures had any pattern data · ${displayRows.length} cleared to a verdict`}
+              {verdictCoverageDiag.wantCA && (() => {
+                const m = verdictCoverageDiag.caClosestMiss;
+                const base = `CA: ${verdictCoverageDiag.caHasData}/${verdictCoverageDiag.total} fixtures had any pattern data · ${verdictCoverageDiag.caCleared} cleared to a verdict`;
+                if (!m) return base;
+                return `${base} · closest miss: ${(m.market||"").replace(/^TB:/,"")} on ${m.game} — reliability ${m.reliability} (need ${SIGNAL_MIN_RELIABILITY}), edge ${m.edge} (need ${SIGNAL_MIN_EDGE})`;
+              })()}
               {verdictCoverageDiag.wantSC && (() => {
                 const m = verdictCoverageDiag.scClosestMiss;
                 const base = `SC: ${verdictCoverageDiag.scHasData}/${verdictCoverageDiag.total} fixtures had any pattern data · ${verdictCoverageDiag.scCleared} cleared to a verdict`;
@@ -16047,7 +16109,10 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         // still reading that ONE entry type from the server response rather
         // than silently dropping that veto signal — everything else from
         // the server array is ignored now.
-        const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
+        // 2026-09-10: same TB: vs bare-id fix as SC:Verdict's own branch
+        // above — engineVerdictEntries' top.market/second.market are always
+        // TB: canonical ids, SC_MARKET_LABELS is bare-id keyed.
+        const scLabelOf = m => (m || "").replace(/^TB:/, "").replace(/^SYNTH:/, "");
         // 2026-09-10: mirrors the same emerging-pattern admission fix applied
         // to SC:Verdict's own branch above — kept identical on purpose so
         // Consensus's veto-family extraction can't disagree with what
@@ -16062,7 +16127,13 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         const serverContradictions = (scResults[f.id]?.verdicts || []).filter(v => v.type === "contradiction");
         scVerdictsForFixture = [...engineVerdictEntries(scTopV, scSecondV, scLabelOf), ...serverContradictions];
         for (const m of extractVetoMarkets(scVerdictsForFixture)) {
-          const fam = familyOfMarket("sc", m);
+          // 2026-09-10: extractVetoMarkets mixes two id formats here — TB:
+          // canonical ids from engineVerdictEntries' top/second (client-fused,
+          // same root cause as the label fix above) and SC's own bare ids
+          // from serverContradictions (server-side scComputeVerdicts output,
+          // untouched by the fusion machinery). Route each by its actual
+          // format rather than assuming every entry in this array is SC-native.
+          const fam = m.startsWith("TB:") ? familyOfMarket("ca", m) : familyOfMarket("sc", m);
           if (fam != null) currentVetoFamilies.add(fam);
         }
       }
@@ -16116,9 +16187,19 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
       // grouping by family is to avoid two correlated picks (e.g. Over 2.5 +
       // BTTS) landing in the same pool from one fixture.
       if (sources.has("consensus")) {
+        // 2026-09-10 (Alden request): same emerging-pattern admission fix
+        // already applied to CA:Verdict/SC:Verdict — Consensus had its own
+        // separate ctx construction and was still VALID-only for both
+        // engines. Gated by the same SIGNAL_MIN_RELIABILITY/SIGNAL_MIN_EDGE
+        // floor inside computeFamilyConsensus as VALID matches, same as
+        // everywhere else this fix landed today.
         const consensus = computeFamilyConsensus(f, {
-          saPatternsByMarket, caPositive: caMatchesForFixture?.positive, caAvoid: caMatchesForFixture?.avoid,
-          scPositive: scResults?.[f.id]?.positive, scAvoid: scResults?.[f.id]?.avoid, modelProbFor,
+          saPatternsByMarket,
+          caPositive: [...(caMatchesForFixture?.positive || []), ...(caMatchesForFixture?.emergingPositive || [])],
+          caAvoid: [...(caMatchesForFixture?.avoid || []), ...(caMatchesForFixture?.emergingAvoid || [])],
+          scPositive: [...(scResults?.[f.id]?.positive || []), ...(scResults?.[f.id]?.emergingPositive || [])],
+          scAvoid: [...(scResults?.[f.id]?.avoid || []), ...(scResults?.[f.id]?.emergingAvoid || [])],
+          modelProbFor,
         });
         for (const [familyId, verdict] of Object.entries(consensus)) {
           const win = verdict.strongest;
