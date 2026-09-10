@@ -15476,6 +15476,29 @@ function JarvisTASlate({ date, SERVER, onUseTicket, C, onFullModel }) {
 // beatsBaseline fix, loadCAPatternsByMarket's Wilson floor, buildSACandidates'
 // agree/conflict gating) — this component's job is fetch + flatten + a
 // couple of display-layer knobs (topN per market), not re-deriving anything.
+// Canonical market universe — mirrors pool-builder.mjs's ODDS_BANDS keys,
+// the single source of truth for which markets the shared pool
+// infrastructure (Pool Builder, TGP, Manual/Parlay System) supports.
+// Fixed on purpose, not derived from a day's live data: an "Any market"
+// dropdown that only lists whatever happens to have qualifying legs today
+// silently hides markets with zero picks right now, so picking one to
+// narrow down to is impossible until something in it happens to qualify.
+// TB:1X2-Draw is intentionally excluded — pool-builder.mjs never pools it.
+const ALL_TB_MARKETS = [
+  "TB:1X2-Home", "TB:1X2-Away",
+  "TB:DC1X", "TB:DCX2",
+  "TB:BTTS",
+  "TB:Over 1.5", "TB:Over 2.5", "TB:Under 3.5",
+  "TB:Home Over 0.5", "TB:Away Over 0.5",
+  "TB:Home Over 1.5", "TB:Away Over 1.5",
+];
+// Combines the fixed market list above with whatever a live payload
+// additionally reports, so a market this list hasn't been updated for yet
+// still shows up rather than being silently dropped.
+function withAllMarkets(liveMarkets) {
+  return [...new Set([...ALL_TB_MARKETS, ...(liveMarkets || [])])];
+}
+
 // MarketFilterSelect — "Any market, or narrow to one" dropdown. Originally
 // TGP-only; shared here so TGP and Pool Builder both narrow their pool to a
 // single market the same way, with the same control.
@@ -15551,7 +15574,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
   // Flatten { [market]: candidate[] } into the flat leg shape
   // buildManualParlaysFromPool expects (same fields PatternEngineControls'
   // pushLeg/qualifyingLegs and TGPControls' decomposedPool already produce).
-  const availableMarkets = useMemo(() => Object.keys(data?.pool || {}), [data]);
+  const availableMarkets = useMemo(() => withAllMarkets(Object.keys(data?.pool || {})), [data]);
 
   const pool = useMemo(() => {
     if (!data?.pool) return [];
@@ -16537,7 +16560,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView,
 
   const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
   const decomposedPool = tgpLive?.decomposedPool || [];
-  const availableMarkets = tgpLive?.availableMarkets || [];
+  const availableMarkets = withAllMarkets(tgpLive?.availableMarkets || []);
 
   useEffect(() => { if (mode === "decompose") onPoolChange(decomposedPool); }, [mode, decomposedPool, onPoolChange]);
 
@@ -17728,7 +17751,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
     return raw.filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, e.fixture)));
   }, [customPool, parlayFixtures, engineFixtureIds, historicalRates, parlayExcludedMarkets]);
   const manualAvailableMarkets = useMemo(
-    () => [...new Set(manualPoolPreview.map(e => e.market))],
+    () => withAllMarkets(manualPoolPreview.map(e => e.market)),
     [manualPoolPreview]
   );
 
