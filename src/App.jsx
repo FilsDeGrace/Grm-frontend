@@ -1288,7 +1288,7 @@ function caOriginClassifications(positive, avoid) {
 // the UI currently has capped/filtered for display) — the fixture-level
 // picture, independent of which market pill is selected.
 export function computeCAVerdicts(caMatches, f) {
-  const { positive = [], avoid = [], contradictoryMarkets = [] } = caMatches || {};
+  const { positive = [], avoid = [], emergingPositive = [], emergingAvoid = [], contradictoryMarkets = [] } = caMatches || {};
   const verdicts = [];
   // Rule 0 — same-market conflicting signal (dev journal, 2026-07-13). Checked
   // before the `!positive.length` early-return below, since a market can be
@@ -1377,8 +1377,24 @@ export function computeCAVerdicts(caMatches, f) {
   );
   const contradictorySet = new Set(contradictoryMarkets);
   const excludedMarkets = new Set([...contradictorySet, ...unclearOriginMarkets]);
-  const verdictPositive = positive.filter(c => !excludedMarkets.has(c.market));
-  const verdictAvoid = avoid.filter(c => !excludedMarkets.has(c.market));
+  // 2026-09-10 (Alden + Claude, root-cause session): emergingPositive/
+  // emergingAvoid are matchCAConditions' own output — computed on the exact
+  // same call as positive/avoid above — but were never forwarded into the
+  // headline-lean candidate pool. CA:Verdict only ever saw VALID-status
+  // matches, which is the smaller pool by construction (byMarketEmerging
+  // exists specifically because many matches don't clear VALID's stricter
+  // bar). That's the direct cause of "CA has very few verdicts."
+  // Emerging combos go into the SAME pool, gated by the SAME
+  // SIGNAL_MIN_RELIABILITY/SIGNAL_MIN_EDGE floor as VALID ones — no separate,
+  // untested weaker tier. Wilson lower bound already shrinks toward zero for
+  // low-n patterns, which is what "emerging" (low-test-n) actually is, so
+  // the existing statistical gate does the discounting for us. Rules 0-2
+  // above (conflicting-signal/origin-caveat) stay VALID-only on purpose —
+  // that wording ("the pattern held up on holdout") oversells confidence for
+  // a combo that hasn't cleared the VALID bar, so emerging combos don't
+  // trigger those caveats, they just get a fair shot at the headline lean.
+  const verdictPositive = [...positive, ...emergingPositive].filter(c => !excludedMarkets.has(c.market));
+  const verdictAvoid = [...avoid, ...emergingAvoid].filter(c => !excludedMarkets.has(c.market));
 
   const { top, second } = computeEngineVerdict("ca", f, verdictPositive, verdictAvoid, caModelProbFor);
   const topMarket = top?.market ?? null;
@@ -2022,14 +2038,14 @@ const ENGINE_VERDICT_CLOSENESS = CONSENSUS_CONTEST_CLOSENESS; // one number, not
 // market — no odds subtraction at all. Two different philosophies: odds-value
 // asks "does the market already know this," weighted-probability asks "is
 // this market family structurally trustworthy as a headline, independent of
-// today's price." Davies's own weights are already backtested (Over 1.5 at
-// 0.75 — the LOWEST weight in his whole pool, even below TeamTotal's 0.82,
-// per his comment "ranked at 0.75 so even an 85% O1.5 loses to a 65% 1X2"),
-// so this replaces the odds-value formula with the same mechanism rather
-// than running two different philosophies in parallel. VERDICT_RANK_WEIGHT
-// below reuses his exact numbers where a market overlaps his Read pool
-// (1X2/DC/BTTS/Over 2.5/Under 3.5/TeamTotal/Over 1.5). Any market with no
-// entry below defaults to neutral (1.0) — see verdictRankWeightFor.
+// today's price." NOTE (2026-09-10, corrected by Alden): an earlier version
+// of this comment claimed these weights were "backtested" — they aren't,
+// they're Alden's own config numbers, carried over as-is because they were
+// the only ordering available at the time. Treat them as a working prior,
+// not validated ground truth. VERDICT_RANK_WEIGHT below reuses his exact
+// numbers where a market overlaps his Read pool (1X2/DC/BTTS/Over
+// 2.5/Under 3.5/TeamTotal/Over 1.5). Any market with no entry below
+// defaults to neutral (1.0) — see verdictRankWeightFor.
 // 2026-09-05 (Davies): Under 4.5 previously inherited Under 3.5's 1.00
 // weight on the reasoning that they're ladder siblings — wrong once Davies
 // spelled out his actual pool ordering directly: 1X2/Over 2.5/BTTS/Under 3.5
@@ -2057,9 +2073,57 @@ function verdictRankWeightFor(market) {
 // Absolute-point closeness margin — no equivalent in config.js (The Read
 // only ever surfaces one pick, it doesn't have a "second lean" concept;
 // that's Verdict's own addition). Placeholder, same as before.
+// NOT YET RECALIBRATED for the new edge-first familyPickRank scale below —
+// this constant was tuned for the old reliability×weight range (roughly
+// 0-100). The new formula's range is much smaller (roughly single digits to
+// mid-40s), so this margin's effective "how close counts as close" behavior
+// has shifted and needs a spot-check against real fixtures, not just trusted
+// as-is because the number didn't change.
 const ENGINE_VERDICT_RANK_CLOSENESS_PP = 5;
+// 2026-09-10 (Alden + Claude, root-cause session): replaces the old
+// `reliability * verdictRankWeightFor(market)` ranking. That ranked
+// cross-family headline picks on RAW Wilson reliability — which is
+// naturally inflated for high-baseline markets (Home/Away Over 0.5 sits at
+// an 80-90% natural baseline in football) even when the underlying pattern
+// isn't fixture-specific or informative. A boring TT Over 0.5 combo could
+// out-rank a genuinely strong RESULT pick purely for being numerically
+// taller, not for saying more about the fixture. This is what Alden meant
+// by "TT O0.5 feels wrong."
+//
+// scoreSignal already computes `edge = reliability - favBaseline` (the
+// pattern's performance ABOVE its own baseline) but familyPickRank never
+// used it. Ranking on edge instead directly implements "best market ≠ best
+// probability" — a market only ranks highly for telling you something you
+// didn't already know from its baseline alone.
+//
+// Kept as edge-primary + a small reliability term (not edge alone): a pick
+// that only just clears the SIGNAL_MIN_RELIABILITY floor (e.g. reliability
+// 55) can have a large edge purely from a low baseline, and edge-alone
+// ranking would let that beat a solidly reliable pick (e.g. reliability 68)
+// with a smaller edge. The 0.15 reliability weight is a deliberate,
+// UNBACKTESTED starting point — chosen so it nudges close calls toward the
+// statistically safer pick without letting raw reliability dominate again
+// the way it did before. Needs validation against real fixtures before this
+// weight is trusted, same as everything else changed today.
+const FAMILY_PICK_RANK_RELIABILITY_WEIGHT = 0.15;
 function familyPickRank(pick) {
-  return pick.candidate.scored.reliability * verdictRankWeightFor(pick.market);
+  const { edge, reliability } = pick.candidate.scored;
+  return edge * verdictRankWeightFor(pick.market) + reliability * FAMILY_PICK_RANK_RELIABILITY_WEIGHT;
+}
+// 2026-09-10 (Alden + Claude): real bookmaker price vs model-implied price,
+// same distinction consensusOddsFor already draws (SA_MARKETS[market].oddsKey
+// present + a real f.odds value beats a market with no such field at all).
+// Doesn't call consensusOddsFor/teamTotalOddsFor directly since those return
+// a priced number (falling back to implied) — this only needs the yes/no of
+// whether a REAL quote exists, not the price itself.
+// Engine-aware on purpose: SC does NOT share CA/SA's "TB:..." market-id
+// namespace (see the cross-engine market-id translation comment above) — it
+// uses bare ids with their own SC_MARKET_ODDS_FIELD lookup table. Checking
+// SA_MARKETS for an SC market id would silently miss every time.
+function hasRealOdds(f, engine, market) {
+  const oddsKey = engine === "sc" ? SC_MARKET_ODDS_FIELD[market] : SA_MARKETS[market]?.oddsKey;
+  if (!oddsKey) return false; // e.g. the 4 TeamTotal markets — always implied, no real field exists
+  return (f.odds?.[oddsKey] ?? 0) > 1;
 }
 export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor, opts = {}) {
   const ctx = engine === "sc"
@@ -2073,7 +2137,17 @@ export function computeEngineVerdict(engine, f, positiveList, avoidList, modelPr
   if (!picks.length) return { top: null, second: null, rejected: families.__rejected || null };
   const top = picks[0];
   const topRank = familyPickRank(top);
-  const second = picks.find(p => p !== top && p.market !== top.market && (topRank - familyPickRank(p)) <= ENGINE_VERDICT_RANK_CLOSENESS_PP) ?? null;
+  // Every candidate within the evidence-closeness margin of top, excluding
+  // top's own market (same eligibility as before). Among THESE — not among
+  // all picks — a real-priced candidate now wins the second-lean slot over
+  // a model-implied one, even if the model-implied one ranks marginally
+  // higher on evidence alone: evidence says they're close enough to call a
+  // toss-up, so real market confirmation is the tiebreaker, not more
+  // decimal places of a reliability score. Falls back to the old
+  // highest-ranked-within-closeness behavior when none of the close
+  // candidates have a real price (previous behavior, unchanged in that case).
+  const closeCandidates = picks.filter(p => p !== top && p.market !== top.market && (topRank - familyPickRank(p)) <= ENGINE_VERDICT_RANK_CLOSENESS_PP);
+  const second = closeCandidates.find(p => hasRealOdds(f, engine, p.market)) ?? closeCandidates[0] ?? null;
   return { top, second };
 }
 
@@ -5721,8 +5795,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
       setTimeout(() => setFinishedFlash(""), 2500);
       return;
     }
-    const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
-    const resolvedOdds = pick.odds || io(pick.prob);
+    const resolvedOdds = pick.odds || safeImpliedOdds(pick.prob);
     if (!resolvedOdds && !pick.prob) {
       setFinishedFlash("No model data — adding anyway");
       setTimeout(() => setFinishedFlash(""), 2500);
@@ -5731,7 +5804,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
       setFinishedFlash("Added — game is LIVE, odds may have shifted");
       setTimeout(() => setFinishedFlash(""), 3000);
     }
-    onAddToParlay(f, { pick: pick.pick, prob: pick.prob, odds: resolvedOdds || null, market: pick.market });
+    onAddToParlay(f, { pick: pick.pick, prob: pick.prob, odds: resolvedOdds || null, market: pick.market, isModelImplied: !pick.odds });
   }, [f, onAddToParlay, isFinished, isPPD, isLive]);
 
   const fetchCardResult = async (e) => {
@@ -7093,7 +7166,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // falling through to the shared tail — a little repetition is the safer
       // trade against risking the well-tested Mix/single-market path just below.
       if (caMarket === "CA:Verdict") {
-        const verdicts = computeCAVerdicts({ positive, avoid, contradictoryMarkets }, f);
+        const verdicts = computeCAVerdicts({ positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets }, f);
         const headline = resolveCAVerdictHeadline(verdicts);
         if (!headline) continue; // no verdict at all for this fixture (no clean positive/avoid match)
         const isAvoidLean = headline.direction === "avoid";
@@ -7358,8 +7431,18 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // CA:Verdict makes.
       if (scMarket === "SC:Verdict") {
         const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
+        // 2026-09-10 (Alden + Claude, root-cause session): same fix as
+        // CA:Verdict above — emergingPositive/emergingAvoid were fetched for
+        // Consensus's own SC integration but never reached SC:Verdict's
+        // candidate pool, which is the direct cause of "SC has many matched
+        // games but almost no verdicts." Gated by the same
+        // SIGNAL_MIN_RELIABILITY/SIGNAL_MIN_EDGE floor inside
+        // computeEngineVerdict as VALID matches — no separate weaker tier.
         const { top: scTop, second: scSecond } = computeEngineVerdict(
-          "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
+          "sc", f,
+          [...(scResults[f.id]?.positive || []), ...(scResults[f.id]?.emergingPositive || [])],
+          [...(scResults[f.id]?.avoid || []), ...(scResults[f.id]?.emergingAvoid || [])],
+          caModelProbFor
         );
         const verdicts = engineVerdictEntries(scTop, scSecond, scLabelOf);
         const headline = resolveCAVerdictHeadline(verdicts);
@@ -7541,7 +7624,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       if (wantSC) {
         const p = scResults[f.id]?.positive, a = scResults[f.id]?.avoid;
         if ((p?.length || 0) > 0 || (a?.length || 0) > 0) scHasData++;
-        const { top, rejected } = computeEngineVerdict("sc", f, p, a, caModelProbFor, { debug: true });
+        // 2026-09-10: mirrors the emerging-pattern admission fix applied to
+        // SC:Verdict's real call site — this diagnostic exists specifically
+        // to measure SC's verdict coverage, so if it stayed VALID-only it
+        // would keep reporting the stale "few verdicts" numbers this
+        // session's fix already resolved, which is worse than not having
+        // the diagnostic at all.
+        const ep = scResults[f.id]?.emergingPositive, ea = scResults[f.id]?.emergingAvoid;
+        const { top, rejected } = computeEngineVerdict(
+          "sc", f,
+          [...(p || []), ...(ep || [])],
+          [...(a || []), ...(ea || [])],
+          caModelProbFor, { debug: true }
+        );
         if (top) { scCleared++; continue; }
         for (const r of (rejected || [])) {
           // Only scored candidates can be ranked as a quantitative near-miss.
@@ -10790,24 +10885,27 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
 
   const handleAdd = () => {
     if (!pick || !onAddToParlay) return;
-    const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
     const m = fixture.markets || {};
     const o = fixture.odds || {};
 
-    // Look up model prob and real/implied odds based on the selected market+pick
-    let prob = null, odds = null;
+    // Look up model prob and real/implied odds based on the selected market+pick.
+    // safeImpliedOdds (canonical implied-odds formula, margin included) is the
+    // one fallback used everywhere below — this screen previously had its own
+    // margin-free copy (`io`), which is why a model-implied Over 0.5 could
+    // display shorter odds than a real bookmaker Win price on the same fixture.
+    let prob = null, realOdds = null;
     const mf = market;
     if (mf === "1X2") {
-      if (pick.includes("Win") && pick.includes(home)) { prob = m.homeWin; odds = o.o1 || io(m.homeWin); }
-      else if (pick === "Draw")                         { prob = m.draw;    odds = o.oX || io(m.draw);    }
-      else                                              { prob = m.awayWin; odds = o.o2 || io(m.awayWin); }
+      if (pick.includes("Win") && pick.includes(home)) { prob = m.homeWin; realOdds = o.o1; }
+      else if (pick === "Draw")                         { prob = m.draw;    realOdds = o.oX; }
+      else                                              { prob = m.awayWin; realOdds = o.o2; }
     } else if (mf === "DC") {
-      if (pick === "Home or Draw")  { prob = m.dc1X || (m.homeWin + m.draw); odds = o.dc1X || io(prob); }
-      else if (pick === "Away or Draw") { prob = m.dcX2 || (m.awayWin + m.draw); odds = o.dcX2 || io(prob); }
-      else                          { prob = m.dc12  || (m.homeWin + m.awayWin); odds = o.dc12  || io(prob); }
+      if (pick === "Home or Draw")      { prob = m.dc1X || (m.homeWin + m.draw); realOdds = o.dc1X; }
+      else if (pick === "Away or Draw") { prob = m.dcX2 || (m.awayWin + m.draw); realOdds = o.dcX2; }
+      else                               { prob = m.dc12  || (m.homeWin + m.awayWin); realOdds = o.dc12; }
     } else if (mf === "BTTS") {
-      if (pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || io(m.bttsYes); }
-      else                     { prob = m.bttsNo;  odds = o.bttsNoOdds  || io(m.bttsNo);  }
+      if (pick === "BTTS Yes") { prob = m.bttsYes; realOdds = o.bttsYesOdds; }
+      else                     { prob = m.bttsNo;  realOdds = o.bttsNoOdds;  }
     } else if (mf === "TeamTotal_H" || mf === "TeamTotal_A") {
       const isHome = mf === "TeamTotal_H";
       const isOver = pick.includes("Over");
@@ -10816,28 +10914,26 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       const probKey = `${isHome ? "home" : "away"}Over${lineKey}`;
       const basePr  = m[probKey];
       prob = isOver ? basePr : (basePr != null ? 100 - basePr : null);
-      odds = io(prob);
+      // No real per-team-total odds field exists yet — always model-implied.
     } else if (mf === "Goals_OU") {
       const line = pick.match(/[\d.]+/)?.[0] || "2.5";
       const isOver = pick.startsWith("Over");
       const lineKey = line.replace(".","");
       if (isOver) {
-        const key = `over${lineKey}`;
-        const oddsKey = `over${lineKey}odds`;
-        prob = m[key] ?? null;
-        odds = prob ? (o[oddsKey] || io(prob)) : null;
+        prob = m[`over${lineKey}`] ?? null;
+        realOdds = o[`over${lineKey}odds`];
       } else {
         // Under X.5 — derive from over if direct field missing
-        const underKey = `under${lineKey}`;
-        const overKey  = `over${lineKey}`;
-        const oddsKey  = `under${lineKey}odds`;
-        prob = m[underKey] ?? (m[overKey] != null ? parseFloat((100 - m[overKey]).toFixed(1)) : null);
-        odds = prob ? (o[oddsKey] || io(prob)) : null;
+        prob = m[`under${lineKey}`] ?? (m[`over${lineKey}`] != null ? parseFloat((100 - m[`over${lineKey}`]).toFixed(1)) : null);
+        realOdds = o[`under${lineKey}odds`];
       }
     }
     if (!prob) prob = null;
-    // Always derive implied odds from prob if no real odds — sportybet books by outcomeId not odds
-    if (!odds && prob) odds = io(prob);
+    // Real odds win when present; otherwise fall back to the canonical
+    // model-implied formula — sportybet books by outcomeId, not odds, so a
+    // pick always needs SOME odds value even without a bookmaker quote.
+    let odds = realOdds || safeImpliedOdds(prob);
+    const isModelImplied = !!odds && !realOdds;
     // Floor implied odds at 1.02 so the ticket math doesn't break
     if (odds && odds < 1.02) odds = 1.02;
 
@@ -10856,6 +10952,7 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       market: resolveDisplayMarket(market, pick),
       odds:   odds,
       prob:   prob || null,
+      isModelImplied,
     });
     setFlash(true);
     setTimeout(() => { setFlash(false); setOpen(false); }, 1200);
@@ -10921,27 +11018,28 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
       )}
 
       {pick && (() => {
-        // Live preview of resolved prob/odds for selected pick
-        const io2 = p => (p > 0 && p < 100) ? parseFloat((1/(p/100)).toFixed(2)) : null;
+        // Live preview of resolved prob/odds for selected pick.
+        // Canonical safeImpliedOdds() replaces the old margin-free io2 copy —
+        // see handleAdd above for why the two formulas had to be unified.
         const m2 = fixture.markets || {}, o2 = fixture.odds || {};
-        let previewProb = null, previewOdds = null;
+        let previewProb = null, previewRealOdds = null;
         const lineKey = pick.match(/[\d.]+/)?.[0]?.replace(".","") || "";
         if (market === "1X2") {
-          if (pick.includes(home)) { previewProb = m2.homeWin; previewOdds = o2.o1 || io2(m2.homeWin); }
-          else if (pick === "Draw") { previewProb = m2.draw; previewOdds = o2.oX || io2(m2.draw); }
-          else { previewProb = m2.awayWin; previewOdds = o2.o2 || io2(m2.awayWin); }
+          if (pick.includes(home)) { previewProb = m2.homeWin; previewRealOdds = o2.o1; }
+          else if (pick === "Draw") { previewProb = m2.draw; previewRealOdds = o2.oX; }
+          else { previewProb = m2.awayWin; previewRealOdds = o2.o2; }
         } else if (market === "BTTS") {
-          if (pick === "BTTS Yes") { previewProb = m2.bttsYes; previewOdds = o2.bttsYesOdds || io2(m2.bttsYes); }
-          else { previewProb = m2.bttsNo; previewOdds = o2.bttsNoOdds || io2(m2.bttsNo); }
+          if (pick === "BTTS Yes") { previewProb = m2.bttsYes; previewRealOdds = o2.bttsYesOdds; }
+          else { previewProb = m2.bttsNo; previewRealOdds = o2.bttsNoOdds; }
         } else if (market === "Goals_OU" && lineKey) {
           const isOver = pick.startsWith("Over");
           previewProb = isOver ? (m2[`over${lineKey}`] ?? null) : (m2[`under${lineKey}`] ?? (m2[`over${lineKey}`] != null ? parseFloat((100-m2[`over${lineKey}`]).toFixed(1)) : null));
-          previewOdds = isOver ? (o2[`over${lineKey}odds`] || io2(previewProb)) : (o2[`under${lineKey}odds`] || io2(previewProb));
+          previewRealOdds = isOver ? o2[`over${lineKey}odds`] : o2[`under${lineKey}odds`];
         } else if ((market === "TeamTotal_H" || market === "TeamTotal_A") && lineKey) {
           const isHome = market === "TeamTotal_H", isOver = pick.includes("Over");
           const base = m2[`${isHome?"home":"away"}Over${lineKey}`];
           previewProb = isOver ? base : (base != null ? 100 - base : null);
-          previewOdds = io2(previewProb);
+          // No real per-team-total odds field exists yet — always model-implied.
         } else if (market === "DC") {
           // N23-FIX: DC odds preview was entirely missing — previewProb/Odds stayed null,
           // so the preview strip never rendered when DC was selected.
@@ -10949,22 +11047,32 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
           const pickLower = (pick || "").toLowerCase();
           if (pickLower.includes("or draw") || pickLower === "home or draw" || pickLower === "1x") {
             previewProb = m2.dc1X ?? (m2.homeWin != null && m2.draw != null ? Math.min(99, m2.homeWin + m2.draw) : null);
-            previewOdds = o2.dc1X || io2(previewProb);
+            previewRealOdds = o2.dc1X;
           } else if (pickLower.includes("draw or away") || pickLower === "x2") {
             previewProb = m2.dcX2 ?? (m2.draw != null && m2.awayWin != null ? Math.min(99, m2.draw + m2.awayWin) : null);
-            previewOdds = o2.dcX2 || io2(previewProb);
+            previewRealOdds = o2.dcX2;
           } else if (pickLower.includes("home or away") || pickLower === "12") {
             previewProb = m2.dc12 ?? (m2.homeWin != null && m2.awayWin != null ? Math.min(99, m2.homeWin + m2.awayWin) : null);
-            previewOdds = o2.dc12 || io2(previewProb);
+            previewRealOdds = o2.dc12;
           }
         }
+        const previewOdds = previewRealOdds || safeImpliedOdds(previewProb);
+        const previewIsModelImplied = !!previewOdds && !previewRealOdds;
         if (!previewProb && !previewOdds) return null;
         return (
-          <div style={{ display:"flex",justifyContent:"space-between",background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:5,padding:"5px 8px",marginBottom:8,fontSize:8 }}>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",background:`${C.gold}08`,border:`1px solid ${C.gold}20`,borderRadius:5,padding:"5px 8px",marginBottom:8,fontSize:8 }}>
             <span style={{ color:C.text }}>Model prob</span>
             <span style={{ color:C.gold,fontWeight:700 }}>{previewProb ? `${Math.round(previewProb)}%` : "—"}</span>
             <span style={{ color:C.text }}>Odds</span>
-            <span style={{ color:previewOdds?C.green:C.red,fontWeight:700 }}>{previewOdds ? `${parseFloat(previewOdds).toFixed(2)}x` : "No data"}</span>
+            <span style={{ display:"flex", alignItems:"center", gap:4 }}>
+              <span style={{ color:previewOdds?C.green:C.red,fontWeight:700 }}>{previewOdds ? `${parseFloat(previewOdds).toFixed(2)}x` : "No data"}</span>
+              {previewIsModelImplied && (
+                <span title="Estimated from model probability — no bookmaker odds available"
+                      style={{ fontSize:6, fontWeight:800, color:C.muted, border:`1px solid ${C.faint}`, borderRadius:3, padding:"1px 3px", letterSpacing:".03em" }}>
+                  MODEL EST.
+                </span>
+              )}
+            </span>
           </div>
         );
       })()}
@@ -11130,30 +11238,29 @@ function CustomBookNow({ fixtures = [], onAddToTicket }) {
       const fx = selectedFixtures[legs.indexOf(l)] || null;
       const m  = fx?.markets || {};
       const o  = fx?.odds    || {};
-      const io = p => (p > 0 && p < 100) ? parseFloat((1 / (p / 100)).toFixed(2)) : null;
       let prob = null, odds = null;
       const mf = l.market;
       if (mf === "1X2") {
-        if (l.pick.includes(l.home))      { prob = m.homeWin; odds = o.o1 || io(m.homeWin); }
-        else if (l.pick === "Draw")        { prob = m.draw;    odds = o.oX || io(m.draw);    }
-        else                               { prob = m.awayWin; odds = o.o2 || io(m.awayWin); }
+        if (l.pick.includes(l.home))      { prob = m.homeWin; odds = o.o1 || safeImpliedOdds(m.homeWin); }
+        else if (l.pick === "Draw")        { prob = m.draw;    odds = o.oX || safeImpliedOdds(m.draw);    }
+        else                               { prob = m.awayWin; odds = o.o2 || safeImpliedOdds(m.awayWin); }
       } else if (mf === "DC") {
-        if (l.pick.includes("1X"))      { prob = m.dc1X; odds = o.dc1X || io(m.dc1X); }
-        else if (l.pick.includes("X2")) { prob = m.dcX2; odds = o.dcX2 || io(m.dcX2); }
-        else                            { prob = m.dc12; odds = o.dc12 || io(m.dc12);  }
+        if (l.pick.includes("1X"))      { prob = m.dc1X; odds = o.dc1X || safeImpliedOdds(m.dc1X); }
+        else if (l.pick.includes("X2")) { prob = m.dcX2; odds = o.dcX2 || safeImpliedOdds(m.dcX2); }
+        else                            { prob = m.dc12; odds = o.dc12 || safeImpliedOdds(m.dc12);  }
       } else if (mf === "BTTS") {
-        if (l.pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || io(m.bttsYes); }
-        else                       { prob = m.bttsNo;  odds = o.bttsNoOdds  || io(m.bttsNo);  }
-      } else if (mf === "TeamTotal_H") { prob = m.homeOver05; odds = io(m.homeOver05); }
-      else if (mf === "TeamTotal_A")   { prob = m.awayOver05; odds = io(m.awayOver05); }
+        if (l.pick === "BTTS Yes") { prob = m.bttsYes; odds = o.bttsYesOdds || safeImpliedOdds(m.bttsYes); }
+        else                       { prob = m.bttsNo;  odds = o.bttsNoOdds  || safeImpliedOdds(m.bttsNo);  }
+      } else if (mf === "TeamTotal_H") { prob = m.homeOver05; odds = safeImpliedOdds(m.homeOver05); }
+      else if (mf === "TeamTotal_A")   { prob = m.awayOver05; odds = safeImpliedOdds(m.awayOver05); }
       else if (mf === "Goals_OU") {
         const line = l.pick.match(/[\d.]+/)?.[0] || "2.5";
         const isOver = l.pick.startsWith("Over");
         const key = isOver ? `over${line.replace(".","")}`  : `under${line.replace(".","")}`;
         const oddsKey = isOver ? `over${line.replace(".","")}odds` : `under${line.replace(".","")}odds`;
-        prob = m[key]; odds = o[oddsKey] || io(prob);
+        prob = m[key]; odds = o[oddsKey] || safeImpliedOdds(prob);
       }
-      if (!odds && prob) odds = io(prob);
+      if (!odds && prob) odds = safeImpliedOdds(prob);
       return {
         fixtureId: l.fixtureId,
         game:      `${l.home} vs ${l.away}`,
@@ -15416,7 +15523,7 @@ const POOL_BUILDER_SOURCE_OPTIONS = [
   { id: "v1", label: "Full Pool",    desc: "Every qualifying pattern" },
   { id: "v2", label: "Curated Pool", desc: "A smaller, hand-picked set" },
 ];
-function PoolBuilderControls({ C, onPoolChange, date }) {
+function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop }) {
   const [topN, setTopN] = useState("5");
   const [source, setSource] = useState("v1");
   const [marketFilter, setMarketFilter] = useState(null); // null = every market
@@ -15493,14 +15600,96 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
   const [autoError, setAutoError] = useState(null);
   const [autoTierFilter, setAutoTierFilter] = useState(null); // null = every tier
 
+  // Selection for the merge/stack action below. Keyed by each ticket's
+  // _ptid (assigned client-side at generation time — the server response
+  // has no stable per-ticket id) rather than array index, so a tier-filter
+  // change re-slicing visibleAutoTickets can't silently shift which cards
+  // a held selection points at.
+  const [ptSelected, setPtSelected] = useState(new Set());
+  const togglePtSelected = (id) => setPtSelected(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   const generateTickets = () => {
-    setAutoLoading(true); setAutoError(null);
+    setAutoLoading(true); setAutoError(null); setPtSelected(new Set());
     const qs = new URLSearchParams({ date: date || todayStr(), source });
     fetch(`${SERVER}/api/pool-builder/tickets?${qs.toString()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
-      .then(d => { setAutoTickets(d.tickets || []); setAutoLoading(false); })
+      .then(d => { setAutoTickets((d.tickets || []).map((t, i) => ({ ...t, _ptid: i }))); setAutoLoading(false); })
       .catch(err => { setAutoError(err.message || "Failed to generate tickets"); setAutoTickets(null); setAutoLoading(false); });
   };
+
+  // Converts one generated ticket into the same flat leg shape the live
+  // pool above already emits (fixtureId/game/pick/market/league/odds/conf
+  // — see the `pool` useMemo above) so it displays and saves exactly like
+  // any other Builder ticket, not a special case.
+  const toBuilderLegs = (legs) => legs.map(l => ({
+    fixtureId: l.gameId, game: `${l.home} vs ${l.away}`,
+    pick: l.market.replace(/^TB:/, ""), market: l.market, league: l.league || "",
+    odds: l.odds, conf: l.conf, strategyLabel: "Pool Builder", strategyTags: [],
+  }));
+
+  // Single-ticket actions — same pair Trim already offers per card
+  // ("Add to Builder" appends a new ticket; "Replace Draft" sends it to
+  // the editable draft slot instead).
+  const addTicketToBuilder = (t) => {
+    setTickets(prev => [...prev, {
+      id: Date.now(), source: "card_add", legs: toBuilderLegs(t.legs),
+      totalOdds: t.combinedOdds.toFixed(2), stake: 0, exhausted: false,
+      slotLabel: `${autoTicketStrategyLabel(t.strategyId)} · ${t.tierLabel}`,
+    }]);
+    setView("parlay"); scrollPanelToTop();
+  };
+  const replaceDraftWithTicket = (t) => {
+    setDraftLegs(toBuilderLegs(t.legs));
+    setView("parlay"); scrollPanelToTop();
+  };
+
+  // Merges every selected ticket's legs into one combined ticket — same
+  // "one leg per fixture, strongest occurrence wins" rule TGP's own
+  // handleStackSelected uses for its stack action. No server round-trip
+  // needed here (unlike TGP): these legs already carry resolved odds and
+  // gameId straight from today's snapshot, so there's no live-fixture
+  // re-matching left to do.
+  const stackSelectedTickets = () => {
+    const chosen = (autoTickets || []).filter(t => ptSelected.has(t._ptid));
+    if (chosen.length < 2) return;
+    const byFixture = new Map(); // gameId -> strongest-confidence leg
+    for (const t of chosen) {
+      for (const l of t.legs) {
+        const prev = byFixture.get(l.gameId);
+        if (!prev || l.conf > prev.conf) byFixture.set(l.gameId, l);
+      }
+    }
+    const mergedLegs = [...byFixture.values()];
+    const totalLegsIn = chosen.reduce((n, t) => n + t.legs.length, 0);
+    const droppedDuplicateLegs = totalLegsIn - mergedLegs.length;
+    const combinedOdds = mergedLegs.reduce((acc, l) => acc * l.odds, 1);
+    setTickets(prev => [...prev, {
+      id: Date.now(), source: "card_add", legs: toBuilderLegs(mergedLegs),
+      totalOdds: combinedOdds.toFixed(2), stake: 0, exhausted: false,
+      slotLabel: `Pool Builder stack (${chosen.length})`,
+      reason: `Pool Builder stacked tickets (${chosen.length}): ${chosen.map(t => `${autoTicketStrategyLabel(t.strategyId)} · ${t.tierLabel}`).join("; ")}.${droppedDuplicateLegs ? ` ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} from overlapping fixtures were consolidated to the strongest occurrence.` : ""}`,
+    }]);
+    setPtSelected(new Set());
+  };
+
+  // Scroll affordance for the ticket list below — plain overflow:auto gave
+  // no visual cue it was scrollable (Davies's report), so this tracks
+  // whether there's more content below the fold and shows a sticky fade +
+  // hint only while that's true.
+  const ticketListRef = useRef(null);
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
+  useEffect(() => {
+    const el = ticketListRef.current;
+    if (!el) { setHasMoreBelow(false); return; }
+    const check = () => setHasMoreBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 8);
+    check();
+    el.addEventListener("scroll", check);
+    return () => el.removeEventListener("scroll", check);
+  });
 
   const visibleAutoTickets = useMemo(
     () => (autoTickets || []).filter(t => !autoTierFilter || t.tier === autoTierFilter),
@@ -15560,7 +15749,7 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
         {autoTickets && !autoError && (<>
           <div style={{ display:"flex", gap:6, margin:"10px 0" }}>
             {[{ id:null, label:"All" }, ...AUTO_TICKET_TIER_LABELS].map(t => (
-              <button key={t.id ?? "all"} onClick={() => setAutoTierFilter(t.id)}
+              <button key={t.id ?? "all"} onClick={() => { setAutoTierFilter(t.id); setPtSelected(new Set()); }}
                 style={{ flex:1, padding:"6px 4px", borderRadius:8,
                          border:`1px solid ${autoTierFilter===t.id?C.accent:C.border}`,
                          background:autoTierFilter===t.id?C.accent:"transparent",
@@ -15570,28 +15759,68 @@ function PoolBuilderControls({ C, onPoolChange, date }) {
               </button>
             ))}
           </div>
-          <div style={{ fontSize:8, color:C.muted, marginBottom:8 }}>
-            {visibleAutoTickets.length} ticket{visibleAutoTickets.length !== 1 ? "s" : ""} — every leg used only once within its own ticket, ranked by confidence.
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:6 }}>
+            <div style={{ fontSize:8, color:C.muted }}>
+              {visibleAutoTickets.length} ticket{visibleAutoTickets.length !== 1 ? "s" : ""} — every leg used only once within its own ticket, ranked by confidence.
+            </div>
+            {visibleAutoTickets.length >= 2 && (
+              <div style={{ display:"flex", gap:10, fontSize:9 }}>
+                <button onClick={() => setPtSelected(new Set(visibleAutoTickets.map(t => t._ptid)))}
+                  style={{ background:"none",border:"none",color:C.accent,cursor:"pointer",padding:0,fontSize:9,fontWeight:700 }}>Select All</button>
+                <button onClick={() => setPtSelected(new Set())}
+                  style={{ background:"none",border:"none",color:C.muted,cursor:"pointer",padding:0,fontSize:9,fontWeight:700 }}>Select None</button>
+              </div>
+            )}
           </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:8, maxHeight:420, overflowY:"auto" }}>
-            {visibleAutoTickets.map((t, i) => (
-              <div key={i} style={{ padding:"8px 10px", borderRadius:8, border:`1px solid ${C.border}`, background:C.bg }}>
+          <div ref={ticketListRef} style={{ display:"flex", flexDirection:"column", gap:8, maxHeight:420, overflowY:"auto", WebkitOverflowScrolling:"touch" }}>
+            {visibleAutoTickets.map((t) => {
+              const isSelected = ptSelected.has(t._ptid);
+              return (
+              <div key={t._ptid} style={{ padding:"8px 10px", borderRadius:8, border:`1px solid ${isSelected?C.accent:C.border}`, background:C.bg }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
-                  <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{autoTicketStrategyLabel(t.strategyId)} · {t.legCount} legs</span>
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                    <input type="checkbox" checked={isSelected} onChange={() => togglePtSelected(t._ptid)}
+                      style={{ width:13, height:13, accentColor:C.accent, cursor:"pointer" }} />
+                    <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{autoTicketStrategyLabel(t.strategyId)} · {t.legCount} legs</span>
+                  </div>
                   <span style={{ fontSize:9, fontWeight:800,
                                   color: t.tier === "A" ? (C.gold || C.accent) : (t.tier === "B" ? C.text : C.muted) }}>
                     {t.tierLabel} · {t.avgConfidence}%
                   </span>
                 </div>
                 <div style={{ fontSize:8, color:C.muted, marginBottom:4 }}>Combined odds {t.combinedOdds}×</div>
-                <div style={{ fontSize:8, color:C.text, lineHeight:1.6 }}>
+                <div style={{ fontSize:8, color:C.text, lineHeight:1.6, marginBottom:6 }}>
                   {t.legs.map((l, j) => (
                     <div key={j}>{l.home} vs {l.away} — {l.market.replace(/^TB:/, "")} @ {l.odds}</div>
                   ))}
                 </div>
+                <div style={{ display:"flex", gap:6 }}>
+                  <button onClick={() => addTicketToBuilder(t)} className="gb-ghost"
+                    style={{ flex:1, padding:"6px 0", fontSize:9, color:C.gold, borderColor:`${C.gold}40` }}>
+                    + Add to Builder
+                  </button>
+                  <button onClick={() => replaceDraftWithTicket(t)} className="gb-ghost"
+                    style={{ flex:1, padding:"6px 0", fontSize:9, color:C.accent, borderColor:`${C.accent}40` }}>
+                    Replace Draft
+                  </button>
+                </div>
               </div>
-            ))}
+              );
+            })}
+            {hasMoreBelow && (
+              <div style={{ position:"sticky", bottom:0, textAlign:"center", fontSize:8, color:C.muted,
+                            background:`linear-gradient(transparent, ${C.bg} 60%)`, padding:"10px 0 2px", pointerEvents:"none" }}>
+                ▼ scroll for more
+              </div>
+            )}
           </div>
+          {ptSelected.size >= 2 && (
+            <button onClick={stackSelectedTickets} className="gb"
+              style={{ width:"100%", padding:"9px 0", marginTop:8, borderRadius:8, border:"none",
+                       fontSize:10, fontWeight:800, color:C.bg, background:C.gold || C.accent, cursor:"pointer", fontFamily:C.font }}>
+              Stack Selected ({ptSelected.size}) into One Ticket
+            </button>
+          )}
         </>)}
       </div>
     </div>
@@ -15796,8 +16025,16 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
         // than silently dropping that veto signal — everything else from
         // the server array is ignored now.
         const scLabelOf = m => SC_MARKET_LABELS.find(l => l.id === m)?.label || m.replace(/^SYNTH:/, "");
+        // 2026-09-10: mirrors the same emerging-pattern admission fix applied
+        // to SC:Verdict's own branch above — kept identical on purpose so
+        // Consensus's veto-family extraction can't disagree with what
+        // SC:Verdict's UI actually shows, the exact thing this function's
+        // 2026-08-21 rewrite was built to prevent (see comment above).
         const { top: scTopV, second: scSecondV } = computeEngineVerdict(
-          "sc", f, scResults[f.id]?.positive, scResults[f.id]?.avoid, caModelProbFor
+          "sc", f,
+          [...(scResults[f.id]?.positive || []), ...(scResults[f.id]?.emergingPositive || [])],
+          [...(scResults[f.id]?.avoid || []), ...(scResults[f.id]?.emergingAvoid || [])],
+          caModelProbFor
         );
         const serverContradictions = (scResults[f.id]?.verdicts || []).filter(v => v.type === "contradiction");
         scVerdictsForFixture = [...engineVerdictEntries(scTopV, scSecondV, scLabelOf), ...serverContradictions];
@@ -16218,7 +16455,7 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
 // pricing, the strongest occurrence must win rather than blocking the
 // entire stack.
 
-function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
+function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop, onModeChange }) {
   // fixtures/appSaPatterns/appCaPatterns props removed (2026-08-26) — no
   // longer needed here. All matching now runs server-side; the server
   // derives its own fixtures from the day's snapshot from `date` alone.
@@ -16478,6 +16715,25 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     setSelectMode(false);
   };
 
+  // Shared by Add to Builder and Replace Draft below — same leg-shape and
+  // partial-odds handling addWholeShapeTicket always used, just no longer
+  // duplicated across the two actions.
+  const buildShapeLegsAndOdds = (candidate) => {
+    const { shape, assignment } = candidate;
+    const legMarkets = shape.legs.map(l => l.market);
+    const pricedOdds = assignment.map(a => a.odds).filter(o => Number.isFinite(o) && o > 0);
+    const unpricedLegCount = assignment.length - pricedOdds.length;
+    const partialOdds = pricedOdds.reduce((p, o) => p * o, 1);
+    const legs = assignment.map((a, i) => ({
+      fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
+      pick: legMarkets[i].replace(/^TB:/, ""), market: legMarkets[i], league: a.league, odds: a.odds,
+      conf: a.modelProb != null ? Math.round(a.modelProb) : null, empiricalRate: Math.round(shape.holdoutHR),
+      score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
+      strategyLabel: "TGP whole-shape", strategyTags: [],
+    }));
+    return { legs, partialOdds, unpricedLegCount };
+  };
+
   const addWholeShapeTicket = (candidate) => {
     // Sterling's call (2026-09-04): don't refuse the add just because one
     // leg's live odds didn't resolve today — the ticket itself is still
@@ -16485,21 +16741,11 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     // combinedOdds is the product of ONLY the legs that do have a price;
     // unpricedLegCount + oddsIncomplete tell the ticket card to label that
     // number as partial instead of presenting it as the real total.
-    const { shape, assignment } = candidate;
-    const legMarkets = shape.legs.map(l => l.market);
-    const pricedOdds = assignment.map(a => a.odds).filter(o => Number.isFinite(o) && o > 0);
-    const unpricedLegCount = assignment.length - pricedOdds.length;
-    const partialOdds = pricedOdds.reduce((p, o) => p * o, 1);
+    const { shape } = candidate;
+    const { legs, partialOdds, unpricedLegCount } = buildShapeLegsAndOdds(candidate);
     const newTicket = {
       id: Date.now() + Math.floor(Math.random() * 1000), source: "card_add",
-      legs: assignment.map((a, i) => ({
-        fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
-        pick: legMarkets[i].replace(/^TB:/, ""), market: legMarkets[i], league: a.league, odds: a.odds,
-        conf: a.modelProb != null ? Math.round(a.modelProb) : null, empiricalRate: Math.round(shape.holdoutHR),
-        score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
-        strategyLabel: "TGP whole-shape", strategyTags: [],
-      })),
-      totalOdds: partialOdds.toFixed(2), exhausted: false,
+      legs, totalOdds: partialOdds.toFixed(2), exhausted: false,
       oddsIncomplete: unpricedLegCount > 0, unpricedLegCount,
       reason: `TGP mined shape — cut${shape.cut}, holdout n=${shape.holdoutN}, lift ${shape.lift}pp. Combination of these specific legs was not itself holdout-tested.${unpricedLegCount ? ` ${unpricedLegCount} leg${unpricedLegCount === 1 ? "" : "s"} had no resolved live odds today — shown odds cover only the priced legs.` : ""}`,
       edgeScore: shape.holdoutHR / 100, jarvisConf: Math.round(shape.holdoutHR),
@@ -16512,6 +16758,32 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
     setAddedShapeTickets(prev => [...prev, newTicket.id]);
     return true;
   };
+
+  // New (2026-09-10): whole-shape cards only ever offered "add a new
+  // ticket" — Pool Builder and Trim both also offer "send straight to the
+  // draft slot for editing," which this was missing. Unlike Add to
+  // Builder above, this does navigate to the parlay view (same as Trim/
+  // Pool Builder's own Replace Draft) since replacing the draft is
+  // inherently "go work on this now," not "keep browsing more shapes."
+  const replaceDraftWithShapeTicket = (candidate) => {
+    const { legs } = buildShapeLegsAndOdds(candidate);
+    setDraftLegs(legs);
+    setView("parlay"); scrollPanelToTop();
+  };
+
+  // Scroll affordance for the whole-shape list below — same fix as Pool
+  // Builder's (plain overflow:auto with no visual cue it scrolls).
+  const wholeListRef = useRef(null);
+  const [wholeHasMoreBelow, setWholeHasMoreBelow] = useState(false);
+  useEffect(() => {
+    const el = wholeListRef.current;
+    if (!el) { setWholeHasMoreBelow(false); return; }
+    const check = () => setWholeHasMoreBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 8);
+    check();
+    el.addEventListener("scroll", check);
+    return () => el.removeEventListener("scroll", check);
+  });
+
 
   if (tgpLiveLoading && !tgpLive) {
     return <div style={{ padding: 16, fontSize: 9, color: C.muted, textAlign: "center" }}>Loading mined ticket shapes…</div>;
@@ -16661,7 +16933,7 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
               Hold a card, then tap others to stack 2+ shapes into one ticket.
             </div>
           )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 480, overflowY: "auto",
+          <div ref={wholeListRef} style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 480, overflowY: "auto",
                         paddingBottom: selectMode ? 56 : 0 }}>
             {!wholeSearchedCandidates.length && (
               <div style={{ fontSize: 9, color: C.red, textAlign: "center", padding: 12 }}>
@@ -16712,9 +16984,16 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: cand.flaggedLegs.length ? 4 : 0 }}>
                   {cand.assignment.map((a, li) => (
-                    <div key={li} style={{ fontSize: 8, color: C.text, display: "flex", justifyContent: "space-between", gap: 6 }}>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.home} vs {a.away}</span>
-                      <span style={{ color: C.muted, flexShrink: 0 }}>{cand.shape.legs[li].market.replace(/^TB:/, "")} @ {a.odds}</span>
+                    <div key={li}>
+                      <div style={{ fontSize: 8, color: C.text, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.home} vs {a.away}</span>
+                        <span style={{ color: C.muted, flexShrink: 0 }}>{cand.shape.legs[li].market.replace(/^TB:/, "")} @ {a.odds}</span>
+                      </div>
+                      {a.strongerOption && (
+                        <div style={{ fontSize: 7, color: C.gold, textAlign: "right" }}>
+                          ↑ also independently clears {a.strongerOption.market.replace(/^TB:/, "")} @ {a.strongerOption.odds.toFixed(2)}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -16722,12 +17001,16 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
                   <div style={{ fontSize: 7, color: C.red, marginBottom: 4 }}>⚠ contains a leg that's frequently a sole reason similar tickets lost historically</div>
                 )}
                 {!selectMode && (
-                  <button onClick={(e) => { e.stopPropagation(); addWholeShapeTicket(cand); }}
-                    style={{ marginTop: 4, width: "100%", padding: "6px 0", borderRadius: 6, border: "none",
-                             background: C.accent, color: C.accentText,
-                             fontSize: 8, fontWeight: 800, cursor: "pointer", fontFamily: C.font }}>
-                    Add to draft
-                  </button>
+                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                    <button onClick={(e) => { e.stopPropagation(); addWholeShapeTicket(cand); }} className="gb-ghost"
+                      style={{ flex: 1, padding: "6px 0", fontSize: 8, color: C.gold, borderColor: `${C.gold}40` }}>
+                      + Add to Builder
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); replaceDraftWithShapeTicket(cand); }} className="gb-ghost"
+                      style={{ flex: 1, padding: "6px 0", fontSize: 8, color: C.accent, borderColor: `${C.accent}40` }}>
+                      Replace Draft
+                    </button>
+                  </div>
                 )}
               </div>
               );
@@ -16738,6 +17021,12 @@ function TGPControls({ C, onPoolChange, date, setTickets, onModeChange }) {
             {addedShapeTickets.length > 0 && (
               <div style={{ fontSize: 8, color: C.text, textAlign: "center", padding: 6 }}>
                 {addedShapeTickets.length} whole-shape ticket{addedShapeTickets.length !== 1 ? "s" : ""} added this session
+              </div>
+            )}
+            {wholeHasMoreBelow && (
+              <div style={{ position: "sticky", bottom: 0, textAlign: "center", fontSize: 8, color: C.muted,
+                            background: `linear-gradient(transparent, ${C.bg} 60%)`, padding: "10px 0 2px", pointerEvents: "none" }}>
+                ▼ scroll for more
               </div>
             )}
           </div>
@@ -18289,6 +18578,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       onPoolChange={setTgpPool}
                       date={date}
                       setTickets={setTickets}
+                      setDraftLegs={setDraftLegs}
+                      setView={setView}
+                      scrollPanelToTop={scrollPanelToTop}
                       onModeChange={setTgpMode}
                     />
                   )}
@@ -18298,6 +18590,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       C={C}
                       onPoolChange={setPoolBuilderPool}
                       date={date}
+                      setTickets={setTickets}
+                      setDraftLegs={setDraftLegs}
+                      setView={setView}
+                      scrollPanelToTop={scrollPanelToTop}
                     />
                   )}
 
