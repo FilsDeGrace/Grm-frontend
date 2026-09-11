@@ -354,15 +354,33 @@ export function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, sa
   for (const f of fixtures || []) {
     if (!isBookableFixtureState(f, isPastDate)) continue; // same live/cancelled gate Pattern Engine uses
     // Never let a fixture flagged cup/friendly/international
-    // (f.competitionRisk) become a live candidate for a mined leg — mined
-    // shapes' holdout stats may be contaminated by that noisier population
-    // (tgp-ticket-miner.mjs mines from settlement-pool-v2.jsonl without
-    // excluding these). This narrows what TGP can match against; it does
-    // not retroactively clean the mined shapes' own stats.
-    if (f.competitionRisk) continue;
+    // (f.competitionRiskHard) become a live candidate for a mined leg —
+    // mined shapes' holdout stats may be contaminated by that noisier
+    // population (tgp-ticket-miner.mjs mines from settlement-pool-v2.jsonl
+    // without excluding these). This narrows what TGP can match against; it
+    // does not retroactively clean the mined shapes' own stats.
+    // 2026-09-11: switched from the plain `competitionRisk` field to
+    // `competitionRiskHard` — UEFA Champions/Europa/Conference League
+    // fixtures are soft-flagged (still get the xG rank-gap correction
+    // server-side) but no longer hard-excluded here; every other flagged
+    // type (cup, copa, trophy, friendlies, World Cup, Coppa Italia,
+    // DFB-Pokal) is still dropped exactly as before.
+    if (f.competitionRiskHard) continue;
     if (appCaPatterns) {
-      const { positive } = matchCAConditions(f, appCaPatterns);
+      const { positive, contradictoryMarkets } = matchCAConditions(f, appCaPatterns);
+      const caContraMarkets = new Set(contradictoryMarkets);
       for (const c of positive) {
+        // Root-cause fix (2026-08-29): matchCAConditions already detects
+        // when this exact fixture matches a VALID positive combo AND a
+        // VALID avoid combo on the SAME market (contradictoryMarkets) —
+        // this loop used to destructure only `positive` and silently
+        // ignore that signal, letting a fixture the CA data itself is
+        // split on become a live leg candidate anyway (caught via Bayern
+        // vs Stuttgart / TB:DCX2, 2026-08-28: matched a VALID 88.2%-
+        // holdout positive combo while also matching several VALID avoid
+        // combos in the 34-43% holdout range on the same market). Skip
+        // rather than build a candidate off a contradicted market.
+        if (caContraMarkets.has(c.market)) continue;
         const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
         const def = SA_MARKETS[c.market];
         const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
@@ -371,7 +389,18 @@ export function computeTgpLiveIndex(fixtures, { appCaPatterns, appSaPatterns, sa
     }
     if (appSaPatterns?.length) {
       for (const mkt of Object.keys(SA_MARKETS)) {
-        const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
+        const { positive, avoid } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
+        // Same contradiction case as the CA branch above, just already
+        // single-market-scoped here since matchSAPatterns evaluates one
+        // market per call: if this fixture also matches an avoid pattern
+        // on the same market, don't add its positive leg to the live
+        // index. NOTE: unlike CA (which is pre-split into VALID-only
+        // byMarket/byMarketAvoid buckets server-side per this file's own
+        // caPatterns comments), I don't have visibility into whether
+        // saPatternsByMarket is already quality-floored (e.g. testN>=30)
+        // before it reaches this function — confirm that upstream filter
+        // exists before relying on this the same way as the CA fix.
+        if (avoid.length) continue;
         const def = SA_MARKETS[mkt];
         const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
         const modelProb = def?.computeProb ? def.computeProb(f.markets || {}) : (def?.probKey ? f.markets?.[def.probKey] : null);
