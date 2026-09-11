@@ -16499,6 +16499,215 @@ function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPo
   );
 }
 
+// ── FUSION LADDER CONTROLS — 2026-09-11 ─────────────────────────────────────
+// Fifth engine tab. Backend (fusion-ladder.mjs's buildFusionLadder, wired
+// into GET /api/fusion-ladder-tickets in server.js) was already fully built
+// per fusion-ladder-handoff.md — this component just points a UI at it.
+// Unlike Pattern Engine/TGP/Pool Builder, Fusion Ladder never reports a flat
+// leg pool for the shared Stake/Target Odds/Build machinery below to act
+// on — it always returns three complete, pre-built candidate tickets (one
+// per odds tier: ~3x/~20x/~130x), same as TGP Whole Shape mode. Each tier
+// card adds directly via its own Add to Builder/Replace Draft buttons.
+// App.jsx's hidePoolBuildControls flag hides the shared block for this tab.
+//
+// A tier's `ticket` is either:
+//   - type:"flat"        — { legs:[...], odds, overshot, confidence }
+//   - type:"whole-shape" — { ws:{shape:{legs,holdoutHR,...}, assignment:[...],
+//                             combinedOdds}, odds, overshot, confidence,
+//                             fixtureIds, alsoInTiers }
+//   - null                — no ticket built for this tier today (see note)
+function friendlyFusionTierNote(note) {
+  // fusion-ladder.mjs's own `note` strings are internal engineering notes
+  // (section references, implementation detail) — never render them
+  // verbatim in the UI (Product-Facing Copy Rule). Map the known shapes to
+  // plain copy; anything unrecognized is dropped rather than leaked as raw
+  // dev text.
+  if (!note) return null;
+  if (note.includes("fixture cap")) return "Skipped today — every match that could fill this tier is already used in enough other tickets.";
+  if (note.includes("substituted a sibling market")) return "One pick was swapped for a related market on the same match, since its original pick went to another tier.";
+  if (note.includes("backfilled with next-best available")) return "One pick was replaced with the next-best option after its match was used in another tier.";
+  if (note.includes("lost its only viable leg")) return "Couldn't build a ticket for this tier today — not enough distinct matches available.";
+  return null;
+}
+
+function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scrollPanelToTop }) {
+  const [source, setSource] = useState("v1");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  // Race guard — same pattern as PoolBuilderControls' requestIdRef above.
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    const qs = new URLSearchParams({ date: date || todayStr(), source });
+    fetch(`${SERVER}/api/fusion-ladder-tickets?${qs.toString()}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+      .then(d => { if (requestIdRef.current === requestId) { setData(d); setLoading(false); } })
+      .catch(err => { if (requestIdRef.current === requestId) { setError(err.message || "Failed to load Fusion Ladder"); setData(null); setLoading(false); } });
+  }, [date, source]);
+
+  // Flat-leg tickets (PB pool / TGP decompose legs, already normalized to
+  // fixtureId/home/away/market/odds server-side) -> the same builder leg
+  // shape every other engine tab produces.
+  const legsFromFlat = (legs) => legs.map(l => ({
+    fixtureId: l.fixtureId, game: `${l.home ?? "?"} vs ${l.away ?? "?"}`,
+    pick: (l.market || "").replace(/^TB:/, ""), market: l.market, league: l.league || "",
+    odds: l.odds, conf: Number.isFinite(l._fusionConf) ? Math.round(l._fusionConf) : null,
+    strategyLabel: "Fusion Ladder", strategyTags: [],
+  }));
+  // Whole-shape tickets — shape.legs carries {market,source,patternKey},
+  // assignment carries the live {fixtureId,home,away,odds,modelProb} per
+  // leg at the same index. No .league here (TGP whole-shape assignment
+  // doesn't carry one anywhere else in the app either — same known gap,
+  // not introduced by this component).
+  const legsFromWholeShape = (ws) => ws.shape.legs.map((leg, i) => {
+    const a = ws.assignment[i];
+    return {
+      fixtureId: a.fixtureId, game: `${a.home ?? "?"} vs ${a.away ?? "?"}`,
+      pick: (leg.market || "").replace(/^TB:/, ""), market: leg.market, league: "",
+      odds: a.odds, conf: a.modelProb != null ? Math.round(a.modelProb) : null,
+      strategyLabel: "Fusion Ladder · Whole Shape", strategyTags: [],
+    };
+  });
+  const legsFor = (ticket) => ticket.type === "whole-shape" ? legsFromWholeShape(ticket.ws) : legsFromFlat(ticket.legs);
+
+  const addTicketToBuilder = (tier) => {
+    setTickets(prev => [...prev, {
+      id: Date.now(), source: "card_add", legs: legsFor(tier.ticket),
+      totalOdds: tier.ticket.odds.toFixed(2), stake: 0, exhausted: false,
+      slotLabel: `Fusion Ladder · ${tier.label}`,
+    }]);
+    setView("parlay"); scrollPanelToTop();
+  };
+  const replaceDraftWithTicket = (tier) => {
+    setDraftLegs(legsFor(tier.ticket));
+    setView("parlay"); scrollPanelToTop();
+  };
+
+  // Source lock — real server behavior, not a display bug: the route
+  // saves+locks the first request's `source` for a given date and serves
+  // that same saved record on every later request for that date regardless
+  // of what a later request's `source` param says (see server.js's
+  // fusionLadderTicketsPath / saveFusionLadderTickets comments). Once a
+  // record comes back, its own .source is the actual locked choice — sync
+  // the toggle to that and disable it, rather than let the toggle imply a
+  // later click would still do something.
+  const lockedSource = data?.source;
+  const sourceIsLocked = !!lockedSource;
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display:"flex",gap:6,marginBottom:8,
+                    background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
+        {POOL_BUILDER_SOURCE_OPTIONS.map(o => {
+          const isOn = (lockedSource || source) === o.id;
+          return (
+            <button key={o.id} disabled={sourceIsLocked} onClick={() => setSource(o.id)} title={o.desc}
+              style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                       background:isOn?C.accent:"transparent",
+                       color:isOn?C.accentText:C.muted,
+                       fontSize:9,fontWeight:800,cursor:sourceIsLocked?"default":"pointer",fontFamily:C.font,
+                       opacity:sourceIsLocked && !isOn ? 0.5 : 1 }}>
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      {sourceIsLocked && (
+        <div style={{ fontSize:8,color:C.muted,marginBottom:10,lineHeight:1.5 }}>
+          Source is set to {POOL_BUILDER_SOURCE_OPTIONS.find(o=>o.id===lockedSource)?.label || lockedSource} for {date || todayStr()} — the first load of the day locks it in.
+        </div>
+      )}
+
+      {loading && <div style={{ fontSize:9,color:C.muted,marginBottom:10 }}>Loading Fusion Ladder…</div>}
+      {error && <div style={{ fontSize:9,color:C.danger || "#e55",marginBottom:10 }}>Couldn't load Fusion Ladder: {error}</div>}
+
+      {!loading && !error && data && !data.tgpShapesAvailable && (
+        <div style={{ fontSize:8,color:C.muted,marginBottom:10,lineHeight:1.5 }}>
+          Whole-shape data isn't available for this date yet — tiers below are built from Pool Builder and TGP legs only.
+        </div>
+      )}
+
+      {!loading && !error && data && (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {data.tiers.map(tier => (
+            <FusionTierCard key={tier.id} C={C} tier={tier}
+              onAdd={() => addTicketToBuilder(tier)}
+              onReplace={() => replaceDraftWithTicket(tier)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FusionTierCard({ C, tier, onAdd, onReplace }) {
+  const t = tier.ticket;
+  const isWhole = t?.type === "whole-shape";
+  // Merge shape.legs' market with assignment's live fixture/odds for
+  // display — no field-name clash (shape.legs only carries
+  // {market,source,patternKey}, never odds/home/away/fixtureId).
+  const legs = !t ? [] : isWhole
+    ? t.ws.shape.legs.map((l, i) => ({ ...l, ...t.ws.assignment[i] }))
+    : t.legs;
+  const friendlyNote = t ? friendlyFusionTierNote(tier.note) : null;
+
+  return (
+    <div style={{ padding:"10px 12px", borderRadius:10, border:`1px solid ${C.border}`, background:C.bg }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
+        <span style={{ fontSize:11, fontWeight:800, color:C.text }}>{tier.label}</span>
+        <span style={{ fontSize:8, color:C.muted }}>
+          {tier.band[0]}x–{tier.band[1]}x{tier.priority === "secondary" ? " · secondary" : ""}
+        </span>
+      </div>
+
+      {!t && (
+        <div style={{ fontSize:8, color:C.muted, marginTop:6 }}>
+          {friendlyFusionTierNote(tier.note) || "No ticket available for this tier today."}
+        </div>
+      )}
+
+      {t && (<>
+        <div style={{ display:"flex", alignItems:"center", flexWrap:"wrap", gap:8, margin:"4px 0 6px" }}>
+          <span style={{ fontSize:9, fontWeight:800, color:C.accent }}>{t.odds.toFixed(2)}×</span>
+          <span style={{ fontSize:8, color:C.muted }}>{Math.round(t.confidence)}% confidence</span>
+          {isWhole && <span style={{ fontSize:8, fontWeight:800, color:C.gold || C.accent }}>Validated Whole Shape</span>}
+          {t.overshot && <span style={{ fontSize:8, fontWeight:800, color:C.red || "#e55" }}>Over target band</span>}
+        </div>
+
+        <div style={{ fontSize:8, color:C.text, lineHeight:1.6, marginBottom:6 }}>
+          {legs.map((l, i) => (
+            <div key={i}>
+              {l.home ?? "?"} vs {l.away ?? "?"} — {(l.market || "").replace(/^TB:/, "")} @ {l.odds}
+              {!isWhole && l.alsoInTiers?.length > 0 && (
+                <span style={{ color:C.muted }}> · also in: {l.alsoInTiers.join(", ")}</span>
+              )}
+            </div>
+          ))}
+        </div>
+        {isWhole && t.alsoInTiers?.length > 0 && (
+          <div style={{ fontSize:8, color:C.muted, marginBottom:6 }}>Also in: {t.alsoInTiers.join(", ")}</div>
+        )}
+        {friendlyNote && <div style={{ fontSize:8, color:C.muted, marginBottom:6 }}>{friendlyNote}</div>}
+
+        <div style={{ display:"flex", gap:6 }}>
+          <button onClick={onAdd} className="gb-ghost"
+            style={{ flex:1, padding:"6px 0", fontSize:9, color:C.gold, borderColor:`${C.gold}40` }}>
+            + Add to Builder
+          </button>
+          <button onClick={onReplace} className="gb-ghost"
+            style={{ flex:1, padding:"6px 0", fontSize:9, color:C.accent, borderColor:`${C.accent}40` }}>
+            Replace Draft
+          </button>
+        </div>
+      </>)}
+    </div>
+  );
+}
+
 // ── TGP (Ticket Gene Pool) CONTROLS — 2026-08-15 handoff ────────────────────
 // Fourth pattern engine, same family as SA/CA/SC above. Unlike those three,
 // TGP's own patterns aren't single-market signals — they're MINED MULTI-LEG
@@ -17620,6 +17829,13 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // instead of shown but inert.
   const [tgpMode, setTgpMode] = useState("decompose"); // "decompose" | "whole"
   const tgpWholeModeActive = customEngine === "tgp" && tgpMode === "whole";
+  // 2026-09-11: Fusion Ladder is the same shape as TGP Whole Shape mode for
+  // this purpose — it always adds its own pre-formed tickets directly (via
+  // FusionLadderControls' own Add to Builder/Replace Draft buttons), never
+  // reports a flat pool, and has no use for Stake/Target Odds/Tickets/Max
+  // Same Market. Folded into one flag so both modes hide the same shared
+  // block instead of duplicating the tgpWholeModeActive checks below.
+  const hidePoolBuildControls = tgpWholeModeActive || customEngine === "fusion";
   // Leg order toggle (2026-08-22, Alden request) — shared across Manual/
   // Pattern Engine/TGP Decompose since all three route through the same
   // buildManualParlaysFromPool. Off (default) = original tier-banded shuffle
@@ -18312,6 +18528,16 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         );
       });
       setTickets(results);
+    } else if (customEngine === "fusion") {
+      // Fusion Ladder mode — always adds its own pre-formed tickets directly
+      // via FusionLadderControls' own Add to Builder/Replace Draft buttons,
+      // same as TGP Whole Shape mode. The Build button is hidden while this
+      // tab is active (see hidePoolBuildControls), so this branch is a
+      // defensive guard, not a normal path — without it, this mode would
+      // silently fall through to Manual mode below and build an unrelated
+      // ticket from customPool.
+      setAutoMessage("Fusion Ladder builds its own tickets — use each tier card's own \"Add to Builder\" or \"Replace Draft\" button instead of Build.");
+      setBuilding(false); return;
     } else {
       // Manual mode
       // customPool === "all": every fixture with a Read/Edge/Radar signal, no
@@ -18733,16 +18959,23 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     />
                   )}
 
-                  {/* 2026-09-10: tab wired, engine not built yet — see
-                      fusion-ladder-handoff.md. Placeholder only, so selecting
-                      this tab doesn't render blank/undefined. Replace with
-                      <FusionLadderControls/> (own component + own
-                      /api/fusion-ladder-tickets route, mirroring
-                      PoolBuilderControls/TGPControls) when that's built. */}
+                  {/* 2026-09-11: built — see FusionLadderControls below
+                      (mirrors PoolBuilderControls/TGPControls' own
+                      self-contained generate+add pattern). Backend was
+                      already live (fusion-ladder.mjs + /api/fusion-ladder-tickets,
+                      per fusion-ladder-handoff.md); this just points a UI
+                      at it. No shared pool is reported — hidePoolBuildControls
+                      hides the Stake/Target Odds/Build block for this tab,
+                      same as TGP Whole Shape mode. */}
                   {customEngine === "fusion" && (
-                    <div style={{ padding:"20px 8px",textAlign:"center",color:C.muted,fontSize:10 }}>
-                      Fusion Ladder — coming soon.
-                    </div>
+                    <FusionLadderControls
+                      C={C}
+                      date={date}
+                      setTickets={setTickets}
+                      setDraftLegs={setDraftLegs}
+                      setView={setView}
+                      scrollPanelToTop={scrollPanelToTop}
+                    />
                   )}
 
                   {customEngine === "manual" && (<>
@@ -18772,8 +19005,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   </>)}
 
-                  {/* Shared market exclusion: Manual + Pattern Engine + TGP Decompose. */}
-                  {!tgpWholeModeActive && (
+                  {/* Shared market exclusion: Manual + Pattern Engine + TGP Decompose.
+                      Hidden for Fusion Ladder too (see hidePoolBuildControls). */}
+                  {!hidePoolBuildControls && (
                     <ExcludeMarketsPanel
                       excluded={parlayExcludedMarkets}
                       toggle={toggleParlayExcludeMarket}
@@ -18788,8 +19022,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       that mode adds its own pre-formed tickets directly and
                       has no pool for these to drive at all (see TGPControls'
                       own onPoolChange, which reports an empty pool on
-                      purpose while in Whole Shape mode). */}
-                  {!tgpWholeModeActive && (
+                      purpose while in Whole Shape mode). Also hidden for
+                      Fusion Ladder, same reasoning (see hidePoolBuildControls). */}
+                  {!hidePoolBuildControls && (
                   <>
                   <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
                     <div>
@@ -18850,8 +19085,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       2026-08-22 fix: got left outside the !tgpWholeModeActive
                       fragment when the block above it was wrapped in <>...</>
                       — was rendering (harmlessly, but misleadingly) even in
-                      Whole Shape mode, which has no pool for it to affect. */}
-                  {!tgpWholeModeActive && (
+                      Whole Shape mode, which has no pool for it to affect.
+                      Also hidden for Fusion Ladder (see hidePoolBuildControls). */}
+                  {!hidePoolBuildControls && (
                   <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",
                                 background:C.faint,border:`1px solid ${C.border}`,borderRadius:8,
                                 padding:"9px 12px",marginBottom:12 }}>
@@ -18949,8 +19185,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   {/* 2026-08-16 fix: hidden in TGP Whole Shape mode — that
                       mode has no pool for Build to act on (see the shared
                       Stake/Target Odds block above); each shape gets added
-                      to the draft via its own "Add to draft" button instead. */}
-                  {!tgpWholeModeActive && (
+                      to the draft via its own "Add to draft" button instead.
+                      Also hidden for Fusion Ladder — its tier cards add
+                      directly via their own buttons (see hidePoolBuildControls). */}
+                  {!hidePoolBuildControls && (
                   <button onClick={handleBuildParlay} disabled={building || !fixtures.length} className="gb-primary"
                     style={{ width:"100%",padding:"13px 0",fontSize:13,fontWeight:800,
                              opacity:building||!fixtures.length?.5:1 }}>
