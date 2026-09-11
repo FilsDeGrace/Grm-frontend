@@ -3,7 +3,7 @@
 // Both server and frontend import from here.
 
 // ── API ──────────────────────────────────────────────────────────────────
-export const SERVER = "https://6064720ee64902.lhr.life"; // Update when tunnel changes
+export const SERVER = "https://6c9b2c3b692c7f.lhr.life"; // Update when tunnel changes
 export const SS_BASE = "https://api.sofascore.com/api/v1";
 // Full browser-accurate headers. Minimal headers (User-Agent + Accept only) are
 // trivially fingerprinted by SofaScore as non-browser and rate-limited aggressively.
@@ -366,6 +366,13 @@ export const VOLATILE_LEAGUES = new Set([
 // Patterns, not exact strings — SofaScore prefixes/suffixes vary by country
 // ("Copa Argentina", "Cup, Round of 32", "Club Friendlies", "International
 // Friendlies", "World Championship" for the World Cup itself).
+// `soft: true` marks a type as cross-tier-mismatch-only: it still feeds
+// applyCrossMismatchXGShift (see getCompetitionRisk consumers), but is
+// exempt from the hard "drop this fixture entirely" guards (Pool Builder
+// Guard 2, TGP's computeTgpLiveIndex, Consensus's computeFamilyConsensus —
+// see SOFT_COMPETITION_RISK_TYPES / competitionRiskHard below). Omitting
+// `soft` (or leaving it false) is the hard-exclude default every existing
+// type already had.
 export const CROSS_COMPETITION_RISK_PATTERNS = [
   { type: "cup",          re: /\bcup(en)?\b/i },          // domestic cups, League Cup, Copa del Rey-style "... Cup" names, Scandinavian "Cupen" form (Svenska Cupen etc. — \bcup\b alone doesn't match "Cupen" since it's one word)
   { type: "copa",         re: /\bcopa\b/i },              // Copa America, Copa Libertadores, Copa Argentina, etc.
@@ -373,7 +380,28 @@ export const CROSS_COMPETITION_RISK_PATTERNS = [
   { type: "clubFriendly", re: /club friendl/i },          // covers "Club Friendlies" AND "Club Friendly Games" (SofaScore's actual string — see 2026-07-19 note below)
   { type: "intFriendly",  re: /\bint(?:ernational)?\.?\s*friendl/i }, // "International Friendlies" / "Int Friendlies" / "Int. Friendlies"
   { type: "worldCup",     re: /world championship/i },    // SofaScore's name for the World Cup itself
+  // 2026-09-11: UEFA continental club competitions — soft. Legitimately
+  // cross-tier (group/knockout draws mix teams from very different domestic
+  // strengths), so the xG rank-gap correction should still apply, but these
+  // are recognizable, well-tracked competitions in their own right — not
+  // cup/friendly noise — so they keep contributing legs/tickets/consensus
+  // picks rather than being dropped outright.
+  { type: "uefaChampionsLeague", re: /\buefa champions league\b/i, soft: true },
+  { type: "uefaEuropaLeague",    re: /\buefa europa league\b/i, soft: true },
+  { type: "uefaConferenceLeague", re: /\buefa (?:europa )?conference league\b/i, soft: true }, // covers both "UEFA Conference League" and the full "UEFA Europa Conference League" form
+  // 2026-09-11: domestic cup competitions, matched by exact name since
+  // neither contains "cup" and would otherwise slip past every pattern
+  // above — hard-excluded like every other cup type.
+  { type: "coppaItalia", re: /\bcoppa italia\b/i },
+  { type: "dfbPokal",    re: /\bdfb[\s-]?pokal\b/i },     // matches "DFB-Pokal", "DFB Pokal", "dfb pokal" case-insensitively regardless of hyphen/space
 ];
+
+// Types in CROSS_COMPETITION_RISK_PATTERNS marked `soft: true`, collected
+// once here so consumers can check `SOFT_COMPETITION_RISK_TYPES.has(type)`
+// instead of re-deriving it from the pattern list each time.
+export const SOFT_COMPETITION_RISK_TYPES = new Set(
+  CROSS_COMPETITION_RISK_PATTERNS.filter(p => p.soft).map(p => p.type)
+);
 
 // ── Cross-Competition Mismatch Guard — no-odds fallback (2026-07-19) ───────
 // processFixture's existing BM-blend "quality gap multiplier" already

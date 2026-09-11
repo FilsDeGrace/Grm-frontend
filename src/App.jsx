@@ -153,9 +153,22 @@ function fmtOdds(v) {
   const n = parseFloat(v);
   return isFinite(n) ? n.toFixed(2) : null;
 }
+// 2026-09-11: dropped the hardcoded ×0.95 margin — this was quietly pricing
+// EVERY model-implied leg (any market with no real bookmaker price: Team to
+// Score, and the no-odds fallback for 1X2/DC/BTTS/Goals_OU) about 5% longer
+// than the model's own probability actually implies, and no real BM price
+// ever exists to override it for Team to Score specifically — it's not an
+// occasional fallback there, it's unconditional every time (confirmed: the
+// data provider has no team-total-goals market at all, see teamTotalOddsFor
+// above). Concretely wrong on a 95%-probability "to Score" pick: this
+// produced 1.11x when the honest fair price is ~1.05x — no bookmaker prices
+// a near-certain outcome that long. Now pure 1/prob, matching server.js's
+// own getGoalRadar `io()` exactly (same formula, same rounding), so a given
+// probability implies the same odds everywhere in the app instead of
+// depending on which screen computed it.
 function safeImpliedOdds(prob) {
   if (!prob || prob <= 0 || prob > 100) return null;
-  const raw = 1 / ((prob / 100) * 0.95);
+  const raw = 1 / (prob / 100);
   return isFinite(raw) && raw > 1 ? parseFloat(raw.toFixed(2)) : null;
 }
 
@@ -2014,7 +2027,7 @@ function consensusOddsFor(f, market) {
 // computeFamilyConsensus, called with only one engine's data instead of
 // three. No separate thesis table, no separate weight table, no separate
 // admission floor. Same RESULT thesis grouping, same tier weights, same
-// specificity discount, same competitionRisk guard (already built into
+// specificity discount, same competitionRiskHard guard (already built into
 // computeFamilyConsensus itself, so it's on here automatically — "guard
 // all" is satisfied by construction, not by adding a second check).
 //
@@ -2186,17 +2199,25 @@ function computeFamilyConsensus(f, ctx, opts = {}) {
   // The gap is SA/CA/SC: their mined pattern stats come from
   // settlement-pool-v2.jsonl without excluding cup/friendly/international
   // fixtures (same contamination TGP's 2026-08-16 fix already documents —
-  // see computeTgpLiveIndex's `if (f.competitionRisk) continue`), so a
+  // see computeTgpLiveIndex's `if (f.competitionRiskHard) continue`), so a
   // pattern's holdout HR/baseline was never validated against fixtures like
   // this one in the first place. dominanceGate (~line 1592) already excludes
   // xG-dominance picks the same way, but only for the DOMINANCE family.
   // Consensus is built entirely out of the same mined SA/CA/SC populations
   // TGP is — not just the dominance signal — so this excludes ALL families
   // for a risk-flagged fixture, matching TGP's broader precedent rather than
-  // dominanceGate's narrower one. f.competitionRisk is set server-side by
-  // getCompetitionRisk (config.js's CROSS_COMPETITION_RISK_PATTERNS) — same
-  // field, no separate client-side pattern list to keep in sync.
-  if (f.competitionRisk) return {};
+  // dominanceGate's narrower one. f.competitionRiskHard is set server-side
+  // by isHardCompetitionRisk (config.js's CROSS_COMPETITION_RISK_PATTERNS +
+  // SOFT_COMPETITION_RISK_TYPES) — same field, no separate client-side
+  // pattern list to keep in sync.
+  // 2026-09-11: switched from the plain `competitionRisk` field to
+  // `competitionRiskHard` — UEFA Champions/Europa/Conference League
+  // fixtures are soft-flagged (their mined-pool contamination concern above
+  // still applies to every OTHER flagged type, but Sterling's call was to
+  // keep CL/EL/ECL contributing to Consensus/Verdict too) and no longer
+  // excluded here; every other flagged type (cup, copa, trophy, friendlies,
+  // World Cup, Coppa Italia, DFB-Pokal) is still excluded exactly as before.
+  if (f.competitionRiskHard) return {};
   const { saPatternsByMarket, caPositive, caAvoid, scPositive, scAvoid, modelProbFor } = ctx;
   // Debug/telemetry only (2026-08-22, Alden request) — opt-in, off by
   // default, never read by the real admission logic below. Lets a caller
@@ -18645,16 +18666,27 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                    differs per engine. ── */}
               {builderMode === "custom" && (
                 <>
-                  <div style={{ display:"flex",gap:6,marginBottom:12,
+                  {/* 2026-09-10: was a flex:1 row (each button = 100%/n width). Fine at
+                      4 tabs, but a 5th (Fusion Ladder) would squeeze "Pattern Engine" /
+                      "Pool Builder" — already the widest labels at 9px bold — into
+                      wrapping/overflow. Switched to the app's existing .cscroll
+                      horizontal-scroll pattern (same one used for league/date/market
+                      pill rows elsewhere) with fixed minWidth buttons instead of
+                      inventing a new layout. minWidth 76 x 5 + gaps intentionally
+                      exceeds typical phone content width, so the last tab visibly
+                      peeks off-edge as a scroll affordance rather than fitting exactly
+                      and looking like a dead end. */}
+                  <div className="cscroll" style={{ marginBottom:12,
                                 background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
                     {[
                       { id:"manual",  label:"Manual",         desc:"Pool + your rules" },
                       { id:"pattern", label:"Pattern Engine",  desc:"SA / CA / SC / Model" },
                       { id:"tgp",     label:"TGP",             desc:"Mined multi-leg shapes" },
                       { id:"pool",    label:"Pool Builder",    desc:"SA+CA fused, odds-banded" },
+                      { id:"fusion",  label:"Fusion Ladder",   desc:"3x / 20x / 130x blended" },
                     ].map(e => (
                       <button key={e.id} onClick={() => setCustomEngine(e.id)}
-                        style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                        style={{ flexShrink:0,minWidth:76,padding:"7px 4px",borderRadius:8,border:"none",
                                  background:customEngine===e.id?C.accent:"transparent",
                                  color:customEngine===e.id?C.accentText:C.muted,
                                  fontSize:9,fontWeight:800,cursor:"pointer",fontFamily:C.font,
@@ -18699,6 +18731,18 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       setView={setView}
                       scrollPanelToTop={scrollPanelToTop}
                     />
+                  )}
+
+                  {/* 2026-09-10: tab wired, engine not built yet — see
+                      fusion-ladder-handoff.md. Placeholder only, so selecting
+                      this tab doesn't render blank/undefined. Replace with
+                      <FusionLadderControls/> (own component + own
+                      /api/fusion-ladder-tickets route, mirroring
+                      PoolBuilderControls/TGPControls) when that's built. */}
+                  {customEngine === "fusion" && (
+                    <div style={{ padding:"20px 8px",textAlign:"center",color:C.muted,fontSize:10 }}>
+                      Fusion Ladder — coming soon.
+                    </div>
                   )}
 
                   {customEngine === "manual" && (<>
