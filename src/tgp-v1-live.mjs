@@ -340,6 +340,26 @@ export function tgpApplyFixtureDiversity(rankedCandidates, maxPerFixture = 3) {
   return result;
 }
 
+// Flat-pool counterpart to tgpApplyFixtureDiversity above, for decomposedPool
+// entries (server.js's computeTgpV1Output) — those are already deduped to
+// one row per (fixtureId, market) before this runs, so there's no
+// per-candidate assignment array to walk, just a direct fixtureId/market
+// pair per entry. Same "strongest wins the slot first" rule: caller must
+// pass `pool` pre-sorted by strength (score descending) for that to hold.
+export function tgpApplyFixtureDiversityFlat(pool, maxPerFixture = 3) {
+  const marketsUsedByFixture = new Map(); // fixtureId -> Set(market) already surfaced
+  const result = [];
+  for (const entry of pool) {
+    const used = marketsUsedByFixture.get(entry.fixtureId);
+    const fits = !used || used.has(entry.market) || used.size < maxPerFixture;
+    if (!fits) continue;
+    if (!used) marketsUsedByFixture.set(entry.fixtureId, new Set());
+    marketsUsedByFixture.get(entry.fixtureId).add(entry.market);
+    result.push(entry);
+  }
+  return result;
+}
+
 // Builds a global index: leg key ("market/source:patternKey") -> every
 // fixture live-matching it right now, with that fixture's odds for the
 // market. One pass over fixtures (not one pass per shape), since shapes can

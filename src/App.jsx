@@ -1613,7 +1613,12 @@ const SIGNAL_MIN_RELIABILITY = 55;
 // market like Home Over 0.5 sits at 85-90% baseline with nothing unusual
 // happening. A market only qualifies if it's elevated above its own normal
 // level, not just naturally high.
-const SIGNAL_MIN_EDGE = 6;
+// 2026-09-11: lowered 6 → 3 as a diagnostic test at Sterling's request, to
+// check whether this threshold is why verdicts feel like they're clearing
+// less often than expected (GRM-Pro-TODO.md item #6). This is the ONLY
+// value that changed for that test — watch verdict output against this
+// build and revert to 6 if 3 lets through matches that don't hold up.
+const SIGNAL_MIN_EDGE = 3;
 // Small nudge, same scale/spirit as Pattern Engine's own cross-source
 // corroboration bonus below — reward model agreement without letting it
 // override a real edge/reliability gap on its own.
@@ -2649,9 +2654,9 @@ const EXCLUDE_SELECTION_GROUPS = [
 function getExcludeSelectionId(pick, f) {
   const label  = (pick?.label ?? pick?.pick ?? "").trim();
   const market = pick?.market || "";
-  // Pattern/TGP SC legs use bare pool-market ids (e.g. over25) while the
+  // TGP SC legs use bare pool-market ids (e.g. over25) while the
   // exclusion UI uses human labels ("Over 2.5"). Normalize those ids here
-  // so the same exclusion toggle works across Manual, Pattern Engine and TGP.
+  // so the same exclusion toggle works across Manual and TGP.
   const scPoolExclusionId = {
     homeWin: "homewin", draw: "draw", awayWin: "awaywin",
     dc1X: "dc_1x", dcX2: "dc_x2",
@@ -2994,6 +2999,32 @@ function recordFailedLegs(legs, ticketCode) {
 // bookmaker (opt-in via unresolvableEnabled, off by default like cross-check),
 // unless that tag has gone stale (its leg's date is in the past — see the
 // date-level-expiry note on recordFailedLegs above).
+// 2026-09-11 (Alden's ask — FT/live awareness for tickets already built or
+// drafted, "like how my RISK toggle works"): single source of truth for "is
+// this match over" — StatusBadge below had its own inline finished-states
+// list; pulled out here so both StatusBadge's display and this FT risk
+// check can never drift apart the same way the Bayern/Stuttgart bug
+// happened from two independent "does this fixture qualify" checks.
+const FINISHED_FIXTURE_STATES = new Set(["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties","3","5"]);
+function isFixtureStateFinished(state) {
+  return FINISHED_FIXTURE_STATES.has((state || "").toLowerCase().replace(/[_\-\s]/g, ""));
+}
+const LIVE_FIXTURE_STATES = new Set(["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"]);
+function isFixtureStateLive(state) {
+  return LIVE_FIXTURE_STATES.has((state || "").toLowerCase().replace(/[_\-\s]/g, ""));
+}
+// Read fresh every call, not memoized here — the window slot itself is kept
+// current by a small effect near the `fixtures` state declaration (updates
+// whenever the existing 45s live-states poll or the initial fixtures load
+// changes `fixtures`). Same "share via a window slot instead of prop-
+// drilling through every intermediate component" pattern todayStr() already
+// uses for the server-date cache — TicketCard is reached through several
+// layers (ParlayJarvisTab, JarvisTicketCard, the plain Builder list) that
+// have no other reason to carry `fixtures`, so drilling it through all of
+// them just for this would touch far more call sites for the same result.
+function currentLiveStatesByFixture() {
+  return (typeof window !== "undefined" && window.__grmLiveStatesByFixture) || new Map();
+}
 function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], otherTickets = [], crossCheckEnabled = false, unresolvableEnabled = false } = {}) {
   const legs = ticket?.legs || [];
   if (!legs.length) return [];
@@ -3022,6 +3053,7 @@ function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], oth
   }
 
   const risks = [];
+  const liveStatesByFixture = currentLiveStatesByFixture();
   legs.forEach(l => {
     const fid = l.fixtureId || l.game;
     if (!fid) return;
@@ -3041,6 +3073,18 @@ function computeCorrelationRisks(ticket, { bookedLegs = [], failedLegs = [], oth
         bookedPicks.push(b.pick || b.market);
       }
       risks.push({ type:"booked", game: l.game || booked[0].game, pick: l.pick, bookedPicks, ticketCode: booked[0].ticketCode });
+    }
+    // Match already gone FT — always on, same as the booked check above
+    // (no reason a user would ever want this OFF, unlike cross-ticket/
+    // unresolvable checks which are genuinely opinion-dependent). Needs the
+    // real fixtureId, not the l.fixtureId||l.game fallback `fid` above —
+    // currentLiveStatesByFixture() is keyed by numeric fixture id, and a
+    // `l.game` string ("Team A vs Team B") would never match one.
+    if (l.fixtureId != null) {
+      const live = liveStatesByFixture.get(l.fixtureId);
+      if (live && isFixtureStateFinished(live.state)) {
+        risks.push({ type:"ft", game: l.game, pick: l.pick });
+      }
     }
     if (unresolvableEnabled) {
       const failed = failedByFixture.get(fid);
@@ -3215,6 +3259,18 @@ function shuffle(arr) {
   return a;
 }
 
+// Item #8 — a pool leg's own model probability, read from whichever field
+// that pool actually carries it on: TGP decompose legs have an explicit
+// unrounded `modelProb` (see server.js's computeTgpV1Output); Manual's
+// evaluatePick and Pool Builder's flattened legs both carry it as `conf`
+// (Manual's is already unrounded; Pool Builder's flat leg also gets an
+// explicit `modelProb` field alongside its rounded `conf` — see
+// PoolBuilderControls' `pool` useMemo). Checking `modelProb` first and
+// falling back to `conf` means one helper works unchanged across all three
+// pool shapes rather than three call-site-specific reads.
+function legModelProbValue(leg) {
+  return leg.modelProb ?? leg.conf ?? null;
+}
 function buildUniversalPool(fixtures, historicalRates, isPastDate = false) {
   const pool = [];
   for (const f of fixtures) {
@@ -4633,7 +4689,7 @@ export function StatusBadge({ state, time, minute, date, startingAt }) {
   const trueDate  = startingAt ? (getFixtureLocalDate({ startingAt, date }) || date) : date;
   const dateLabel = trueDate && trueDate !== todayStr() ? fmtDateLabel(trueDate) : null;
   // Live / in-play states
-  if (["inprogress","live","1sthalf","2ndhalf","halftime","ht","extratime","et","penaltyshootout"].includes(s)) {
+  if (isFixtureStateLive(s)) {
     const label = (s === "halftime" || s === "ht") ? "HT"
                 : (s === "extratime" || s === "et") ? "ET"
                 : s === "penaltyshootout"            ? "PEN"
@@ -4654,7 +4710,7 @@ export function StatusBadge({ state, time, minute, date, startingAt }) {
     );
   }
   // Finished states
-  if (["finished","ft","fulltime","ended","complete","aet","afterextratime","afterpenalties","3","5"].includes(s)) {
+  if (isFixtureStateFinished(s)) {
     return (
       <span style={{ display:"inline-flex",alignItems:"center",gap:3,fontSize:8,color:C.muted,fontWeight:700,letterSpacing:".1em" }}>
         <IcoCheckSm col={C.muted}/>
@@ -12131,9 +12187,21 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
   // separate counter so clearing an unresolvable tag doesn't need to fake-bump
   // the booked-flag one (and vice versa).
   const [failedLegsVersion, setFailedLegsVersion] = useState(0);
+  // 2026-09-11: liveStatesTick — corrRisks' new FT check reads
+  // window.__grmLiveStatesByFixture (see computeCorrelationRisks' header
+  // comment), which the top-level 45s live-states poll keeps current, but
+  // TicketCard has no prop tracking that poll to put in the memo's
+  // dependency array. Self-contained interval on the same ~45s cadence,
+  // same shape as the corrShake interval below — bumping this is enough to
+  // make the memo re-run and re-read the window slot's latest value.
+  const [liveStatesTick, setLiveStatesTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setLiveStatesTick(t => t + 1), 45_000);
+    return () => clearInterval(id);
+  }, []);
   const corrRisks = useMemo(
     () => computeCorrelationRisks(ticket, { bookedLegs: loadBookedLegs(), failedLegs: loadFailedLegs(), otherTickets, crossCheckEnabled, unresolvableEnabled: unresolvableTagEnabled }),
-    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled, unresolvableTagEnabled, bookedLegsVersion, failedLegsVersion]
+    [ticket.legs, ticket.id, otherTickets, crossCheckEnabled, unresolvableTagEnabled, bookedLegsVersion, failedLegsVersion, liveStatesTick]
   );
   const hasCorr = corrRisks.length > 0;
 
@@ -12346,10 +12414,11 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                     const otherTicket = r.type === "session"
                       ? otherTickets.find(t => (t.legs||[]).some(ol => ol.game === r.game))
                       : null;
+                    const isSevere = r.type === "booked" || r.type === "ft";
                     return (
                     <div key={i} style={{ fontSize:9, color:C.text, marginBottom:8, lineHeight:1.5,
-                      padding:"7px 9px", background:`${r.type === "booked" ? C.red : C.amber}08`, borderRadius:8,
-                      border:`1px solid ${r.type === "booked" ? C.red : C.amber}20` }}>
+                      padding:"7px 9px", background:`${isSevere ? C.red : C.amber}08`, borderRadius:8,
+                      border:`1px solid ${isSevere ? C.red : C.amber}20` }}>
                       {/* Description */}
                       <div style={{ marginBottom:7 }}>
                         {r.type === "booked"
@@ -12358,6 +12427,8 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                                 ? `${r.bookedPicks.slice(0,2).join(", ")}, +${r.bookedPicks.length - 2} more`
                                 : (r.bookedPicks || []).join(", ") || "unknown"
                             }. This leg: {r.pick}.</>
+                          : r.type === "ft"
+                          ? <><span style={{ color:C.red, fontWeight:700 }}>Match finished</span> — <em>{r.game}</em> has already gone full-time. This leg: {r.pick}.</>
                           : r.type === "unresolvable"
                           ? <><span style={{ color:C.amber, fontWeight:700 }}>Unresolvable on bookmaker</span> — <em>{r.game}</em> came back unbookable last time you tried this leg today.</>
                           : <><span style={{ color:C.amber, fontWeight:700 }}>Also in {r.otherLabel}</span> — <em>{r.game}</em> appears in another ticket you've got open right now.</>
@@ -12600,6 +12671,16 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                   {leg.isVolatile && (
                     <Pill color={C.muted} bg="transparent">volatile</Pill>
                   )}
+                  {(() => {
+                    // Informational only — doesn't touch corrRisks/removal.
+                    // A live/in-play game is still a valid leg, just worth
+                    // knowing about; FT is handled separately above via the
+                    // red "Match finished" risk banner + Remove action,
+                    // no need to duplicate it here too.
+                    const live = leg.fixtureId != null ? currentLiveStatesByFixture().get(leg.fixtureId) : null;
+                    if (!live || !isFixtureStateLive(live.state)) return null;
+                    return <StatusBadge state={live.state} minute={live.minute} />;
+                  })()}
                   <span style={{ fontSize:10,color:mktStyle((leg.market && leg.market !== "Unknown" ? leg.market : "1X2").replace(/^TB:/, "")).color,fontWeight:700 }}>
                     {leg.pick}
                   </span>
@@ -15683,7 +15764,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
         legs.push({
           fixtureId: c.gameId, game: `${c.home} vs ${c.away}`,
           pick: market.replace(/^TB:/, ""), odds: parseFloat(c.odds.toFixed(2)),
-          conf: Math.round(c.prob), market, league: c.league || "",
+          conf: Math.round(c.prob), modelProb: c.prob, market, league: c.league || "",
           score, utility: score / Math.max(0.01, 1 - p),
           empiricalRate: parseFloat(empClamped.toFixed(1)),
           strategyLabel: c.fusion?.agree ? "SA+CA agree" : (c.ca ? "CA" : "SA"),
@@ -15734,7 +15815,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
   const toBuilderLegs = (legs) => legs.map(l => ({
     fixtureId: l.gameId, game: `${l.home} vs ${l.away}`,
     pick: l.market.replace(/^TB:/, ""), market: l.market, league: l.league || "",
-    odds: l.odds, conf: l.conf, strategyLabel: "Pool Builder", strategyTags: [],
+    odds: l.odds, conf: l.conf, strategyLabel: "Analyst Pool", strategyTags: [],
   }));
 
   // Single-ticket actions — same pair Trim already offers per card
@@ -15776,8 +15857,8 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
     setTickets(prev => [...prev, {
       id: Date.now(), source: "card_add", legs: toBuilderLegs(mergedLegs),
       totalOdds: combinedOdds.toFixed(2), stake: 0, exhausted: false,
-      slotLabel: `Pool Builder stack (${chosen.length})`,
-      reason: `Pool Builder stacked tickets (${chosen.length}): ${chosen.map(t => `${autoTicketStrategyLabel(t.strategyId)} · ${t.tierLabel}`).join("; ")}.${droppedDuplicateLegs ? ` ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} from overlapping fixtures were consolidated to the strongest occurrence.` : ""}`,
+      slotLabel: `Analyst Pool stack (${chosen.length})`,
+      reason: `Analyst Pool stacked tickets (${chosen.length}): ${chosen.map(t => `${autoTicketStrategyLabel(t.strategyId)} · ${t.tierLabel}`).join("; ")}.${droppedDuplicateLegs ? ` ${droppedDuplicateLegs} duplicate leg${droppedDuplicateLegs === 1 ? "" : "s"} from overlapping fixtures were consolidated to the strongest occurrence.` : ""}`,
     }]);
     setPtSelected(new Set());
   };
@@ -15832,7 +15913,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
         <MarketFilterSelect C={C} value={marketFilter} onChange={setMarketFilter} markets={availableMarkets} />
       </div>
       {loading && <div style={{ fontSize:9,color:C.muted }}>Loading pool…</div>}
-      {error && <div style={{ fontSize:9,color:C.danger || "#e55" }}>Couldn't load Pool Builder: {error}</div>}
+      {error && <div style={{ fontSize:9,color:C.danger || "#e55" }}>Couldn't load Analyst Pool: {error}</div>}
       {!loading && !error && (
         <div style={{ fontSize:8,color:C.text,lineHeight:1.6 }}>
           {pool.length} qualifying leg{pool.length !== 1 ? "s" : ""} across {marketFilter ? 1 : availableMarkets.length} market{(marketFilter ? 1 : availableMarkets.length) !== 1 ? "s" : ""}
@@ -15843,12 +15924,17 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
       )}
 
       <div style={{ marginTop:14, borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
+        <div style={{ fontSize:8, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:800, marginBottom:3 }}>
+          Auto-Generate
+        </div>
+        <div style={{ fontSize:8, color:C.muted, lineHeight:1.5, marginBottom:8 }}>
+          Instantly creates a ready-made batch of tickets sorted into confidence tiers, using this pool's own criteria. This is separate from the Build tool further down, which builds one ticket at a time from your Stake and Target Odds settings.
+        </div>
         <button onClick={generateTickets} disabled={autoLoading || pool.length === 0}
-          style={{ width:"100%", padding:"9px 4px", borderRadius:8, border:"none",
-                   background:C.accent, color:C.accentText, fontSize:10, fontWeight:800,
-                   cursor:(autoLoading || pool.length === 0)?"default":"pointer", fontFamily:C.font,
-                   opacity:(autoLoading || pool.length === 0)?0.6:1 }}>
-          {autoLoading ? "Generating…" : "Generate Tickets"}
+          className="gb-ghost"
+          style={{ width:"100%", padding:"9px 4px", fontSize:10,
+                   cursor:(autoLoading || pool.length === 0)?"default":"pointer" }}>
+          {autoLoading ? "Generating…" : "Auto-Generate Tiered Tickets"}
         </button>
         {autoError && <div style={{ fontSize:9,color:C.danger || "#e55", marginTop:6 }}>Couldn't generate tickets: {autoError}</div>}
 
@@ -15933,571 +16019,6 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
   );
 }
 
-function PatternEngineControls({ fixtures, C, appSaPatterns, appCaPatterns, onPoolChange, date }) {
-  const [sources, setSources] = useState(() => new Set(["sa", "ca"]));
-  // Same "viewing a past date allows finished games through, live/cancelled
-  // states never do" rule Manual mode's isPastBuild already applies —
-  // Pattern Engine had no state check at all before this, so live games
-  // could enter the pool with live odds and read as a normal qualifying leg.
-  const isPastDate = !!(date && date !== todayStr());
-  const [strategy, setStrategy] = useState("mixed-ladder"); // "pure-ladder" | "mixed-ladder" | "random"
-  const [ladderMarket, setLadderMarket] = useState(null);
-  const [modelMinProb, setModelMinProb] = useState(65); // floor value shared by both uses below
-  // FIX (2026-08-06): this floor used to gate ONLY the standalone "Model"
-  // source — a CA/SA/SC leg qualifies on its own hit-rate, which can (by
-  // design — that's what an "edge" is) sit well below the model's own
-  // number. Sterling's screenshot showed exactly that: a CA leg at model
-  // 34% while the floor read 65%, because the floor never touched CA legs
-  // at all. That's not a bug in the filter — but the control sits directly
-  // under the full Sources row with everything checked, so it reads as a
-  // global floor. applyGlobalFloor makes that reading actually true — it
-  // suppresses low-model-confidence legs from every source, including CA/SA
-  // edges that intentionally diverge from the model. The UI can still turn
-  // the floor off explicitly when that behavior is desired.
-  const [applyGlobalFloor, setApplyGlobalFloor] = useState(true);
-  // Exclude Markets (2026-08-29) — this panel had no exclude mechanism at
-  // all before; CustomListView's excludedMarkets is a different component,
-  // out of scope here (see conversation: Davies chose a local, self-
-  // contained control per panel over lifting shared state). Same
-  // loadSS/saveSS persistence pattern CustomListView already uses, kept
-  // under its own session key so the two panels' exclusions don't collide
-  // or get confused for one another.
-  const [peExcludedMarkets, setPeExcludedMarketsState] = useState(() => {
-    try {
-      const raw = sessionStorage.getItem("peExcludedMarkets");
-      const a = raw ? JSON.parse(raw) : null;
-      return Array.isArray(a) ? new Set(a) : new Set();
-    } catch { return new Set(); }
-  });
-  const togglePeExcludedMarket = (m) => setPeExcludedMarketsState(prev => {
-    const next = new Set(prev);
-    if (next.has(m)) next.delete(m); else next.add(m);
-    try { sessionStorage.setItem("peExcludedMarkets", JSON.stringify([...next])); } catch {}
-    return next;
-  });
-  // 2026-08-18 fix — same bug as TGPControls' identical block: fetching
-  // scResults ONCE and freezing on `if (scResults) return` meant any
-  // fixture that rotated into the list after the first fetch (new
-  // kickoffs added by the poll/auto-refresh cycles) never got an SC match,
-  // silently starving SC-sourced legs within minutes of the first load.
-  // Now tracks fetched fixture IDs and only fetches+merges the ones still
-  // missing. See TGPControls for the full writeup, including the accepted
-  // trade-off (an already-fetched fixture's SC match won't refresh even if
-  // its own markets/odds move later — only remounting this component does).
-  const [scResults, setScResults] = useState({});
-  const [scLoading, setScLoading] = useState(false);
-  const scFetchedIdsRef = useRef(new Set());
-
-  const needsSC = sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus");
-  useEffect(() => {
-    if (!needsSC || !fixtures?.length || scLoading) return;
-    const missing = fixtures.filter(f => f?.id != null && !scFetchedIdsRef.current.has(f.id));
-    if (!missing.length) return;
-    setScLoading(true);
-    fetch(`${SERVER}/api/sc-match`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: missing.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
-    })
-      .then(r => r.ok ? r.json() : {})
-      .then(d => {
-        for (const f of missing) scFetchedIdsRef.current.add(f.id);
-        setScResults(prev => ({ ...prev, ...(d?.results || {}) }));
-      })
-      .catch(() => { for (const f of missing) scFetchedIdsRef.current.add(f.id); })
-      .finally(() => setScLoading(false));
-  }, [needsSC, fixtures, scLoading]);
-
-  // Model probability — the base model's own predicted probability for a
-  // market, independent of any pattern-mining engine. "TB:..." labeled
-  // markets (SA/CA) resolve via SA_MARKETS' own probKey/computeProb; SC's
-  // raw pool-key markets (homeWin, over25, etc.) map directly onto the same
-  // f.markets field names — same confirmed direct-field mapping used
-  // throughout the SC integration.
-  const modelProbFor = (f, market) => {
-    const m = f.markets || {};
-    const def = SA_MARKETS[market];
-    if (def) return def.computeProb ? def.computeProb(m) : (m[def.probKey] ?? null);
-    return m[market] ?? null;
-  };
-
-  // PERF (2026-08-08): matchSAPatterns filters whatever array it's handed by
-  // `p.market !== market`, so passing the full flat appSaPatterns array made
-  // qualifyingLegs below re-scan every pattern in the whole dataset, once per
-  // market, per fixture (13 full scans per fixture) — the actual cause of
-  // Pattern Engine's slowness with exhaustive depth-2 mining producing a
-  // large patterns array. Grouping by market once here means each of those
-  // 13 calls only scans the patterns that could possibly match, without
-  // touching matchSAPatterns' signature (it's also called from the Custom
-  // List/Smart Tier Trim live-match caches — left untouched to avoid any
-  // regression risk there).
-  const saPatternsByMarket = useMemo(() => {
-    const map = new Map();
-    for (const p of appSaPatterns || []) {
-      if (!map.has(p.market)) map.set(p.market, []);
-      map.get(p.market).push(p);
-    }
-    return map;
-  }, [appSaPatterns]);
-
-  // Market list for the Exclude Markets checklist below — drawn from the
-  // same SA/CA/SC data qualifyingLegs itself pulls from, so it never shows
-  // an option that couldn't produce a leg anyway.
-  const peAvailableMarkets = useMemo(() => {
-    const s = new Set();
-    for (const p of appSaPatterns || []) if (p.market) s.add(p.market);
-    for (const k of Object.keys(appCaPatterns?.byMarket || {})) s.add(k);
-    for (const k of Object.keys(appCaPatterns?.byMarketAvoid || {})) s.add(k);
-    for (const fid of Object.keys(scResults || {})) {
-      for (const c of scResults[fid]?.positive || []) if (c.market) s.add(c.market);
-      for (const c of scResults[fid]?.avoid || []) if (c.market) s.add(c.market);
-    }
-    return [...s].sort();
-  }, [appSaPatterns, appCaPatterns, scResults]);
-
-  // Qualifying-leg pool — any (fixture, market) pair clearing the bar on AT
-  // LEAST ONE selected source (OR across sources, not AND — requiring every
-  // engine to agree at once would leave most days with an almost-empty
-  // pool). No odds -> not priceable -> skipped, same as everywhere else in
-  // this app that builds a leg off live odds.
-  const qualifyingLegs = useMemo(() => {
-    const legs = [];
-    // Cross-source avoid veto (2026-08-07) — reassigned at the top of each
-    // fixture below. Collects every market CA and/or SC's own verdict logic
-    // has flagged as a contradiction, a conflicting signal, or a validated
-    // avoid on THIS fixture — as family ids (see familyOfMarket above) so a
-    // CA-format id and an SC-format id for the same real-world market veto
-    // each other correctly. pushLeg checks every leg against this set,
-    // regardless of which source produced it — a market CA/SC itself calls
-    // a steer-away or a misfire isn't a usable leg from SA or Model either.
-    let currentVetoFamilies = new Set();
-    const engineOfSource = source => (source === "SC" || source === "SC verdict") ? "sc" : "sa";
-    const extractVetoMarkets = (verdicts) => {
-      const out = [];
-      for (const v of verdicts || []) {
-        if (v.type === "conflicting-signal" || v.type === "contradiction") {
-          if (v.market) out.push(v.market);
-          if (v.market2) out.push(v.market2);
-        } else if (v.direction === "avoid" && (v.type === "strongest-lean" || v.type === "second-lean")) {
-          if (v.market) out.push(v.market);
-        }
-      }
-      return out;
-    };
-    const pushLeg = (f, market, marketLabel, odds, hitRate, lift, source, extra) => {
-      const oddsNum = parseFloat(odds);
-      if (!Number.isFinite(oddsNum) || oddsNum <= 1) return;
-      if (peExcludedMarkets.has(market)) return;
-      const fam = familyOfMarket(engineOfSource(source), market);
-      if (fam != null && currentVetoFamilies.has(fam)) return;
-      const mp = modelProbFor(f, market);
-      // Global floor (opt-in, see applyGlobalFloor above) — applies to every
-      // source's legs, not just Model's own (which already self-gates below
-      // before ever calling pushLeg, so this is a harmless no-op re-check
-      // for that source specifically).
-      if (applyGlobalFloor && (mp == null || mp < modelMinProb)) return;
-      legs.push({ fixtureId: f.id, home: f.teams?.home, away: f.teams?.away, league: f.league,
-        market, marketLabel, odds: oddsNum, hitRate: hitRate ?? null, lift: lift ?? 0,
-        modelProb: mp, source, ...extra });
-    };
-    for (const f of fixtures || []) {
-      // BUGFIX (2026-08-08): live in-play and cancelled fixtures had no gate
-      // here at all — only odds validity was checked, and live games still
-      // carry live odds, so they qualified as normal legs. Same rule
-      // evaluatePick/buildSignalPool already enforce everywhere else in the
-      // app: never live/cancelled, finished games only allowed when
-      // backtesting a past date.
-      if (!isBookableFixtureState(f, isPastDate)) continue;
-      currentVetoFamilies = new Set();
-      let caMatchesForFixture = null, caVerdictsForFixture = null;
-      if ((sources.has("ca") || sources.has("ca-verdict") || sources.has("consensus")) && appCaPatterns) {
-        caMatchesForFixture = matchCAConditions(f, appCaPatterns);
-        caVerdictsForFixture = computeCAVerdicts(caMatchesForFixture, f);
-        for (const m of extractVetoMarkets(caVerdictsForFixture)) {
-          const fam = familyOfMarket("ca", m);
-          if (fam != null) currentVetoFamilies.add(fam);
-        }
-      }
-      let scVerdictsForFixture = null;
-      if ((sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && scResults) {
-        // 2026-08-21 fix — this used to read scResults[f.id].verdicts
-        // wholesale (server-side scComputeVerdicts' strongest-lean/
-        // second-lean picks), which would now DISAGREE with what
-        // SC:Verdict's UI shows (rewired to computeEngineVerdict client-side
-        // — see scRows' SC:Verdict branch). Rebuilt the lean entries the
-        // same way here so veto-family extraction can't contradict the
-        // headline the user actually sees. The "contradiction" diagnostic
-        // (SC_CONTRADICTION_PAIRS) hasn't been ported client-side yet, so
-        // still reading that ONE entry type from the server response rather
-        // than silently dropping that veto signal — everything else from
-        // the server array is ignored now.
-        // 2026-09-10: same TB: vs bare-id fix as SC:Verdict's own branch
-        // above — engineVerdictEntries' top.market/second.market are always
-        // TB: canonical ids, SC_MARKET_LABELS is bare-id keyed.
-        const scLabelOf = m => (m || "").replace(/^TB:/, "").replace(/^SYNTH:/, "");
-        // 2026-09-10: mirrors the same emerging-pattern admission fix applied
-        // to SC:Verdict's own branch above — kept identical on purpose so
-        // Consensus's veto-family extraction can't disagree with what
-        // SC:Verdict's UI actually shows, the exact thing this function's
-        // 2026-08-21 rewrite was built to prevent (see comment above).
-        const { top: scTopV, second: scSecondV } = computeEngineVerdict(
-          "sc", f,
-          [...(scResults[f.id]?.positive || []), ...(scResults[f.id]?.emergingPositive || [])],
-          [...(scResults[f.id]?.avoid || []), ...(scResults[f.id]?.emergingAvoid || [])],
-          caModelProbFor
-        );
-        const serverContradictions = (scResults[f.id]?.verdicts || []).filter(v => v.type === "contradiction");
-        scVerdictsForFixture = [...engineVerdictEntries(scTopV, scSecondV, scLabelOf), ...serverContradictions];
-        for (const m of extractVetoMarkets(scVerdictsForFixture)) {
-          // 2026-09-10: extractVetoMarkets mixes two id formats here — TB:
-          // canonical ids from engineVerdictEntries' top/second (client-fused,
-          // same root cause as the label fix above) and SC's own bare ids
-          // from serverContradictions (server-side scComputeVerdicts output,
-          // untouched by the fusion machinery). Route each by its actual
-          // format rather than assuming every entry in this array is SC-native.
-          const fam = m.startsWith("TB:") ? familyOfMarket("ca", m) : familyOfMarket("sc", m);
-          if (fam != null) currentVetoFamilies.add(fam);
-        }
-      }
-      if (sources.has("sa") && appSaPatterns?.length) {
-        for (const mkt of Object.keys(SA_MARKETS)) {
-          const { positive } = matchSAPatterns(f, mkt, saPatternsByMarket.get(mkt) || []);
-          if (!positive.length) continue;
-          const def = SA_MARKETS[mkt];
-          const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
-          pushLeg(f, mkt, mkt.replace(/^TB:/, ""), odds, positive[0].hitRate ?? positive[0].trainHitRate ?? null, positive[0].lift, "SA");
-        }
-      }
-      if (sources.has("ca") && appCaPatterns) {
-        const { positive } = caMatchesForFixture || matchCAConditions(f, appCaPatterns);
-        for (const c of positive) {
-          const odds = SA_MARKETS[c.market]?.oddsKey ? f.odds?.[SA_MARKETS[c.market].oddsKey] : caOddsFor(f, c.market);
-          pushLeg(f, c.market, c.market.replace(/^TB:/, ""), odds, c.holdoutHitRate, c.holdoutLift, "CA");
-        }
-      }
-      if (sources.has("ca-verdict") && appCaPatterns) {
-        const verdictsList = caVerdictsForFixture || computeCAVerdicts(caMatchesForFixture || matchCAConditions(f, appCaPatterns), f);
-        const lean = verdictsList.find(v => v.type === "strongest-lean" && v.direction === "positive");
-        if (lean) {
-          const odds = SA_MARKETS[lean.market]?.oddsKey ? f.odds?.[SA_MARKETS[lean.market].oddsKey] : caOddsFor(f, lean.market);
-          pushLeg(f, lean.market, lean.market.replace(/^TB:/, ""), odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "CA verdict");
-        }
-      }
-      if (sources.has("sc") && scResults) {
-        for (const [mk, flag] of Object.entries(scResults[f.id]?.flags || {})) {
-          if (flag.status !== "favorable") continue;
-          const label = SC_MARKET_LABELS.find(m => m.id === mk)?.label || mk;
-          const odds = SC_MARKET_ODDS_FIELD[mk] ? f.odds?.[SC_MARKET_ODDS_FIELD[mk]] : null;
-          pushLeg(f, mk, label, odds, flag.holdoutHitRate, flag.holdoutLift, "SC");
-        }
-      }
-      if (sources.has("sc-verdict") && scResults) {
-        const lean = (scVerdictsForFixture || []).find(v => v.type === "strongest-lean" && v.direction === "positive");
-        if (lean) {
-          const label = SC_MARKET_LABELS.find(m => m.id === lean.market)?.label || lean.market;
-          const odds = SC_MARKET_ODDS_FIELD[lean.market] ? f.odds?.[SC_MARKET_ODDS_FIELD[lean.market]] : null;
-          pushLeg(f, lean.market, label, odds, lean.holdoutHitRate, lean.verifiedEdge ?? 0, "SC verdict");
-        }
-      }
-      // Consensus (2026-08-08) — per fixture, per family (Result/Goals —
-      // Radar folded into Goals 2026-08-26, TT 0.5 folded from the retired
-      // standalone DOMINANCE family into GOALS 2026-09-05, see
-      // SIGNAL_FAMILIES), the single strongest cross-engine lean, or nothing
-      // if no market in that family clears the reliability/edge bar. At most
-      // 2 legs per fixture (one per family) — deliberately only the strongest
-      // per family, never also the secondary, since the whole point of
-      // grouping by family is to avoid two correlated picks (e.g. Over 2.5 +
-      // BTTS) landing in the same pool from one fixture.
-      if (sources.has("consensus")) {
-        // 2026-09-10 (Alden request): same emerging-pattern admission fix
-        // already applied to CA:Verdict/SC:Verdict — Consensus had its own
-        // separate ctx construction and was still VALID-only for both
-        // engines. Gated by the same SIGNAL_MIN_RELIABILITY/SIGNAL_MIN_EDGE
-        // floor inside computeFamilyConsensus as VALID matches, same as
-        // everywhere else this fix landed today.
-        const consensus = computeFamilyConsensus(f, {
-          saPatternsByMarket,
-          caPositive: [...(caMatchesForFixture?.positive || []), ...(caMatchesForFixture?.emergingPositive || [])],
-          caAvoid: [...(caMatchesForFixture?.avoid || []), ...(caMatchesForFixture?.emergingAvoid || [])],
-          scPositive: [...(scResults?.[f.id]?.positive || []), ...(scResults?.[f.id]?.emergingPositive || [])],
-          scAvoid: [...(scResults?.[f.id]?.avoid || []), ...(scResults?.[f.id]?.emergingAvoid || [])],
-          modelProbFor,
-        });
-        for (const [familyId, verdict] of Object.entries(consensus)) {
-          const win = verdict.strongest;
-          if (!win) continue;
-          const engineTag = win.supportingEngines.map(e => e.toUpperCase()).join("+");
-          const label = `${SIGNAL_FAMILY_LABELS[familyId]}: ${win.market.replace(/^TB:/, "")} · Consensus ${win.consensusGrade} (${engineTag})`;
-          pushLeg(f, win.market, label, win.odds, win.candidate.sig.holdoutHR, win.candidate.sig.lift, "Consensus",
-            { consensusGrade: win.consensusGrade, supportingEngines: win.supportingEngines });
-        }
-      }
-      // Model — the raw base model's own probability, no pattern-mining
-      // engine required. Only markets clearing modelMinProb qualify; a leg
-      // from this source has hitRate:null (no engine backs it), so it ranks
-      // purely on modelProb once blended into legScore below.
-      if (sources.has("model")) {
-        for (const mkt of Object.keys(SA_MARKETS)) {
-          const mp = modelProbFor(f, mkt);
-          if (mp == null || mp < modelMinProb) continue;
-          const def = SA_MARKETS[mkt];
-          const odds = def.oddsKey ? f.odds?.[def.oddsKey] : null;
-          pushLeg(f, mkt, mkt.replace(/^TB:/, ""), odds, null, 0, "Model");
-        }
-      }
-    }
-    // Cross-source corroboration (2026-08-08) — until now, selecting SA+CA
-    // just meant "more legs to pick from"; a fixture+market both SA and CA
-    // independently flagged scored no differently than one only SA flagged.
-    // That's a real signal being thrown away — App.jsx already treats
-    // model/CA agreement as meaningful for CA's own scoring
-    // (caModelAgreementFactor). This applies the same idea across engines:
-    // count how many distinct engines (sa / ca / sc / model) landed a leg on
-    // the same fixture+market, and let legScore below reward agreement.
-    // "CA" and "CA verdict" collapse to one engine (same underlying CA
-    // matcher), same for "SC"/"SC verdict" — corroboration means independent
-    // engines agreeing, not the same engine's own two output shapes.
-    const engineFamily = source =>
-      (source === "SC" || source === "SC verdict") ? "sc" :
-      (source === "CA" || source === "CA verdict") ? "ca" :
-      source === "Model" ? "model" :
-      source === "Consensus" ? "consensus" : "sa";
-    const corroborationByKey = new Map();
-    for (const leg of legs) {
-      const key = `${leg.fixtureId}|${leg.market}`;
-      if (!corroborationByKey.has(key)) corroborationByKey.set(key, new Set());
-      corroborationByKey.get(key).add(engineFamily(leg.source));
-    }
-    for (const leg of legs) {
-      const engines = corroborationByKey.get(`${leg.fixtureId}|${leg.market}`);
-      leg.corroboration = engines.size;
-      leg.corroboratingEngines = [...engines];
-    }
-    return legs;
-  }, [fixtures, sources, appSaPatterns, saPatternsByMarket, appCaPatterns, scResults, modelMinProb, applyGlobalFloor, isPastDate, peExcludedMarkets]);
-
-  const availableMarkets = useMemo(() => [...new Set(qualifyingLegs.map(l => l.market))], [qualifyingLegs]);
-  // Ranking blends model probability in alongside whatever pattern-mining
-  // signal earned the leg its spot (2026-08-05, Davies's request) — a leg
-  // with strong SA/CA/SC support AND a confident base model reads as more
-  // trustworthy than one resting on pattern support alone. hitRate/modelProb
-  // are both already 0-100 scale (directly averageable); lift stays additive
-  // on top, same as before. Model-only legs (hitRate:null) fall back to
-  // modelProb alone.
-  // CORROBORATION_BONUS_PER_ENGINE (2026-08-08): a small additive bonus per
-  // extra independent engine that agrees on the same fixture+market — see
-  // corroboration computation above. Kept deliberately small (well under a
-  // single lift point's typical swing) so it breaks ties toward agreement
-  // without letting a weak, low-hit-rate leg leapfrog a strong single-source
-  // one purely for being flagged twice.
-  const CORROBORATION_BONUS_PER_ENGINE = 3;
-  const legScore = l => {
-    const base = l.hitRate != null
-      ? ((l.hitRate + (l.modelProb ?? l.hitRate)) / 2) + (l.lift ?? 0)
-      : (l.modelProb ?? 0);
-    return base + Math.max(0, (l.corroboration ?? 1) - 1) * CORROBORATION_BONUS_PER_ENGINE;
-  };
-
-  const stackedLegs = useMemo(() => {
-    if (strategy === "pure-ladder") {
-      const mkt = ladderMarket || availableMarkets[0];
-      if (!mkt) return [];
-      const byFixture = new Map();
-      for (const leg of qualifyingLegs) {
-        if (leg.market !== mkt) continue;
-        const cur = byFixture.get(leg.fixtureId);
-        if (!cur || legScore(leg) > legScore(cur)) byFixture.set(leg.fixtureId, leg);
-      }
-      return [...byFixture.values()];
-    }
-    if (strategy === "random") {
-      const shuffled = [...qualifyingLegs].sort(() => Math.random() - 0.5);
-      const seen = new Set(), out = [];
-      for (const leg of shuffled) {
-        if (seen.has(leg.fixtureId)) continue; // still one leg per fixture — random picks WHICH leg, not duplicate fixtures
-        seen.add(leg.fixtureId); out.push(leg);
-      }
-      return out;
-    }
-    // mixed-ladder (default) — best single leg per fixture, any market/source
-    const byFixture = new Map();
-    for (const leg of qualifyingLegs) {
-      const cur = byFixture.get(leg.fixtureId);
-      if (!cur || legScore(leg) > legScore(cur)) byFixture.set(leg.fixtureId, leg);
-    }
-    return [...byFixture.values()];
-  }, [qualifyingLegs, strategy, ladderMarket, availableMarkets]);
-
-  // Reports the live-computed pool up to ParlayJarvisTab on every change —
-  // handleBuildParlay reads this (via patternEnginePool state) when the
-  // Build button is pressed, instead of this component building its own
-  // tickets. Shape matches what buildManualParlaysFromPool expects (same
-  // pool shape Manual mode's buildUniversalPool/buildSignalPool produce),
-  // so both engines share one build path. score is normalized to the
-  // same ~0-1 range Manual's evaluatePick scores land in (legScore here
-  // is roughly 0-100 + lift points), just for the tier-shuffle stratification
-  // inside buildManualParlaysFromPool — not a precision-critical conversion.
-  const ENGINE_DISPLAY_LABEL = { sa: "SA", ca: "CA", sc: "SC", model: "Model", consensus: "Consensus", tgp: "TGP" };
-  useEffect(() => {
-    const pool = stackedLegs.map(l => {
-      const conf = Math.round(l.hitRate ?? l.modelProb ?? 0);
-      // When multiple engines independently agreed on this fixture+market,
-      // show all of them (e.g. "SA + CA") instead of just whichever one
-      // happened to produce the winning leg object — the agreement itself
-      // is the useful signal to surface here.
-      const strategyLabel = (l.corroboration ?? 1) > 1
-        ? l.corroboratingEngines.map(e => ENGINE_DISPLAY_LABEL[e] || e).join(" + ")
-        : l.source;
-      return {
-        fixtureId: l.fixtureId,
-        game: `${l.home || "?"} vs ${l.away || "?"}`,
-        pick: l.marketLabel,
-        odds: l.odds,
-        conf,
-        market: l.marketLabel,
-        league: l.league,
-        score: Math.max(0, Math.min(1, legScore(l) / 100)),
-        empiricalRate: conf,
-        strategyLabel,
-        strategyTags: [],
-        isVolatile: isLeagueVolatile(l.league || ""),
-        modelProb: l.modelProb ?? null,
-      };
-    });
-    onPoolChange(pool);
-  }, [stackedLegs, onPoolChange]);
-
-  const SOURCE_OPTS = [
-    { id: "consensus", label: "Consensus" },
-    { id: "sa", label: "SA" }, { id: "ca", label: "CA" }, { id: "ca-verdict", label: "CA Verdict" },
-    { id: "sc", label: "SC" }, { id: "sc-verdict", label: "SC Verdict" }, { id: "model", label: "Model" },
-  ];
-  const STRATEGY_OPTS = [
-    { id: "mixed-ladder", label: "Mixed Ladder", desc: "Best leg per game" },
-    { id: "pure-ladder", label: "Pure Ladder", desc: "One market" },
-    { id: "random", label: "Random", desc: "Shuffled, not ranked" },
-  ];
-
-  return (
-    <div style={{ padding: "4px 0" }}>
-      <div style={{ fontSize: 8, color: C.muted, padding: "0 2px 12px", lineHeight: 1.5 }}>
-        Pulls whatever qualifies across any combination of Consensus/SA/CA/SC/Model into a shared pool. Consensus (2026-08-08) looks at SA, CA, SC, and the base model together per fixture, grouped into three market families — Result, Dominance, Goals (Radar folded into Goals) — and surfaces the single strongest cross-engine lean per family, weighted by holdout reliability and edge over baseline rather than raw hit rate alone. Every other source works exactly as before, one leg per source per qualifying market. Ranking blends the base model's own probability in alongside whatever engine backed the leg, with a small boost when more than one engine independently agrees on the same pick — except Random, which ignores ranking entirely and shuffles. Live and finished games are never included. Build below uses this pool with your Tickets and Target Odds settings.
-        {(sources.has("ca") || sources.has("ca-verdict") || sources.has("sc") || sources.has("sc-verdict") || sources.has("consensus")) && (
-          <> A market CA or SC flags as a contradiction or a validated avoid is excluded from every source here, not just CA or SC's own picks.</>
-        )}
-      </div>
-
-      <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Sources</div>
-      <div className="cscroll" style={{ marginBottom: 6 }}>
-        {SOURCE_OPTS.map(s => {
-          const isOn = sources.has(s.id);
-          return (
-            <button key={s.id} onClick={() => {
-              const next = new Set(sources);
-              if (isOn) next.delete(s.id); else next.add(s.id);
-              setSources(next);
-            }} className="gb" style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
-              background: isOn ? C.accent : "transparent", color: isOn ? "#fff" : C.muted,
-              border: `1px solid ${isOn ? C.accent : C.faint}`, fontWeight: isOn ? 800 : undefined }}>
-              {isOn ? "✓ " : ""}{s.label}
-            </button>
-          );
-        })}
-      </div>
-      {(sources.has("model") || applyGlobalFloor) && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 8, color: C.muted }}>Model min probability</div>
-          <input type="number" value={modelMinProb} min={50} max={99}
-            onChange={e => setModelMinProb(Math.max(50, Math.min(99, parseInt(e.target.value) || 65)))}
-            className="gb-ghost" style={{ width: 50, padding: "4px 6px", fontSize: 10, color: C.text, background: C.faint, borderColor: C.border }} />
-          <div style={{ fontSize: 8, color: C.muted }}>
-            "% — the minimum model confidence a leg needs, from any selected source, to be included."
-          </div>
-        </div>
-      )}
-      <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, cursor: "pointer" }}>
-        <input type="checkbox" checked={applyGlobalFloor} onChange={e => setApplyGlobalFloor(e.target.checked)}
-          style={{ width: 12, height: 12, accentColor: C.accent }} />
-        <span style={{ fontSize: 8, color: C.muted }}>
-          Apply this floor to <strong style={{ color: C.text }}>every</strong> source, not just Model
-        </span>
-      </label>
-      {peAvailableMarkets.length > 0 && (
-        <>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-            <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, opacity: .75 }}>Exclude Markets</div>
-            {peExcludedMarkets.size > 0 && (
-              <span style={{ fontSize: 8, color: C.muted }}>({peExcludedMarkets.size} excluded)</span>
-            )}
-          </div>
-          <div className="cscroll" style={{ marginBottom: 12 }}>
-            {peAvailableMarkets.map(m => {
-              const isOff = peExcludedMarkets.has(m);
-              return (
-                <button key={m} onClick={() => togglePeExcludedMarket(m)} className="gb"
-                  style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
-                    background: isOff ? `${C.red}18` : "transparent",
-                    color: isOff ? (C.red) : C.muted,
-                    border: `1px solid ${isOff ? (C.red) : C.faint}`,
-                    textDecoration: isOff ? "line-through" : "none" }}>
-                  {m.replace(/^TB:/, "")}
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
-      <div style={{ fontSize: 8, color: C.text, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 5, opacity: .75 }}>Strategy</div>
-      <div className="cscroll" style={{ marginBottom: strategy === "pure-ladder" ? 8 : 12 }}>
-        {STRATEGY_OPTS.map(s => {
-          const isOn = strategy === s.id;
-          return (
-            <button key={s.id} onClick={() => setStrategy(s.id)} className="gb"
-              style={{ flexShrink: 0, padding: "6px 12px", fontSize: 10, textTransform: "none",
-                background: isOn ? C.accent : "transparent", color: isOn ? "#fff" : C.muted,
-                border: `1px solid ${isOn ? C.accent : C.faint}`, fontWeight: isOn ? 800 : undefined }}>
-              {s.label}
-            </button>
-          );
-        })}
-      </div>
-      {strategy === "pure-ladder" && (
-        <div className="cscroll" style={{ marginBottom: 12 }}>
-          {availableMarkets.length === 0 && <div style={{ fontSize: 8, color: C.muted }}>No qualifying markets yet.</div>}
-          {availableMarkets.map(mkt => {
-            const isOn = (ladderMarket || availableMarkets[0]) === mkt;
-            return (
-              <button key={mkt} onClick={() => setLadderMarket(mkt)} className="gb"
-                style={{ flexShrink: 0, padding: "5px 10px", fontSize: 9, textTransform: "none",
-                  background: isOn ? C.purple : "transparent", color: isOn ? "#fff" : C.muted,
-                  border: `1px solid ${isOn ? C.purple : C.faint}` }}>
-                {SC_MARKET_LABELS.find(m => m.id === mkt)?.label || mkt.replace(/^TB:/, "")}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Live pool size — the actual N-ticket build now happens from the
-          shared Tickets/Target Odds/Max Same Market controls below, via the
-          same builder Manual mode uses. No trim-count input here anymore:
-          how many legs land in each ticket is target-odds-driven, same as
-          Manual, not a fixed N. */}
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "9px 12px", borderRadius: 8, marginBottom: 4,
-        background: stackedLegs.length ? `${C.accent}0c` : `${C.red}0c`,
-        border: `1px solid ${stackedLegs.length ? C.accent + "30" : C.red + "30"}`,
-      }}>
-        <span style={{ fontSize: 9, color: stackedLegs.length ? C.text : C.red, fontWeight: 700 }}>
-          {stackedLegs.length
-            ? `${stackedLegs.length} qualifying leg${stackedLegs.length !== 1 ? "s" : ""} in pool`
-            : "No qualifying legs yet — try adding another source or lowering the model floor."}
-        </span>
-        {scLoading && <span style={{ fontSize: 8, color: C.muted }}>Loading settlement conditions…</span>}
-      </div>
-    </div>
-  );
-}
 
 // ── FUSION LADDER CONTROLS — 2026-09-11 ─────────────────────────────────────
 // Fifth engine tab. Backend (fusion-ladder.mjs's buildFusionLadder, wired
@@ -16627,7 +16148,7 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
 
       {!loading && !error && data && !data.tgpShapesAvailable && (
         <div style={{ fontSize:8,color:C.muted,marginBottom:10,lineHeight:1.5 }}>
-          Whole-shape data isn't available for this date yet — tiers below are built from Pool Builder and TGP legs only.
+          Whole-shape data isn't available for this date yet — tiers below are built from Analyst Pool and TGP legs only.
         </div>
       )}
 
@@ -17817,8 +17338,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // instead of living on its own top-level tab. Both engines share the same
   // Stake/Target Odds/Tickets/Max Same Market controls and the same Build
   // button — only how the candidate pool gets built differs.
-  const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "pattern" | "tgp"
-  const [patternEnginePool, setPatternEnginePool] = useState([]); // live pool reported by PatternEngineControls
+  const [customEngine, setCustomEngine] = useState("manual"); // "manual" | "tgp"
   const [tgpPool, setTgpPool] = useState([]); // live pool reported by TGPControls (decompose mode only — empty in whole-shape mode, see that component)
   const [poolBuilderPool, setPoolBuilderPool] = useState([]); // live pool reported by PoolBuilderControls (server-side SA+CA fusion, GET /api/pool-builder)
   // 2026-08-16 fix (Sterling request): TGPControls reports its own
@@ -17837,11 +17357,21 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
   // block instead of duplicating the tgpWholeModeActive checks below.
   const hidePoolBuildControls = tgpWholeModeActive || customEngine === "fusion";
   // Leg order toggle (2026-08-22, Alden request) — shared across Manual/
-  // Pattern Engine/TGP Decompose since all three route through the same
+  // TGP Decompose since both route through the same
   // buildManualParlaysFromPool. Off (default) = original tier-banded shuffle
   // (varied builds). On = deterministic strongest-score-first order, same
   // result every time for the same pool.
   const [rankOrderMode, setRankOrderMode] = useState(false);
+  // Model-probability floor toggle (item #8) — same reach as Rank Order
+  // above: Manual, Pool Builder's Build path, and TGP Decompose (NOT Fusion
+  // Ladder or TGP Whole Shape — see GRM-Pro-TODO.md item #8's resolution).
+  // Default mirrors TGPControls' own separate local floor default (65%) for
+  // consistency; this is an independent state, not a read of that one — TGP
+  // Decompose already applies its own floor server-side before tgpPool ever
+  // reaches this component, so turning this ALSO on for that tab intersects
+  // the two floors rather than replacing one with the other.
+  const [modelFloorMode, setModelFloorMode] = useState(false);
+  const [modelFloorMinProb, setModelFloorMinProb] = useState(65);
   const [focusFixture, setFocus] = useState(null);
   const [returnTo, setReturnTo] = useState("parlay");
   const [building, setBuilding]           = useState(false);
@@ -18420,49 +17950,10 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         `${modeLabels} · pool: ${rawPool.length} qualifying${leagueNote}`
       );
       savePoolToServer(rawPool, date);
-    } else if (customEngine === "pattern") {
-      // Pattern Engine mode (former "Multi Gen" tab) — pool is built live by
-      // PatternEngineControls from whatever SA/CA/SC/Model sources + strategy
-      // are selected there, reported up via patternEnginePool. Same builder
-      // (buildManualParlaysFromPool) and the same Tickets/Target Odds/Max
-      // Same Market controls as Manual mode — only the pool differs.
-      if (patternEnginePool.length === 0) {
-        setAutoMessage("No qualifying legs yet — try adding another source or lowering the model probability floor.");
-        setBuilding(false); return;
-      }
-      const filteredPatternPool = patternEnginePool.filter(e => {
-        const f = fixtures.find(fx => fx.id === e.fixtureId);
-        const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
-        return !excluded;
-      });
-      if (filteredPatternPool.length < numParlays * 3) {
-        setAutoMessage(`⚠ Pool has ${filteredPatternPool.length} qualifying leg${filteredPatternPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
-        setTimeout(() => setAutoMessage(""), 5000);
-      }
-      if (filteredPatternPool.length < 2) {
-        setAutoMessage("No qualifying Pattern Engine legs remain after the active market filters.");
-        setBuilding(false); return;
-      }
-      const results = buildManualParlaysFromPool(filteredPatternPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
-      if (results.length === 0) {
-        setAutoMessage("Pool has fewer than 2 qualifying legs — need at least 2 for a parley.");
-      }
-      // Combined probability — each leg's own hit-rate multiplied across the
-      // whole ticket. Pattern Engine legs carry a real per-source empiricalRate
-      // (SA/CA/SC's own hit-rate, or the model's own probability for the
-      // standalone Model source — see qualifyingLegs), so this number means
-      // something here specifically; Manual/Jarvis tickets don't get it,
-      // same as before.
-      results.forEach(t => {
-        t.combinedEmpiricalRate = Math.round(
-          t.legs.reduce((acc, l) => acc * ((l.empiricalRate ?? 50) / 100), 1) * 100
-        );
-      });
-      setTickets(results);
     } else if (customEngine === "tgp") {
-      // TGP decompose mode — tgpPool is reported by TGPControls exactly like
-      // patternEnginePool is, same buildManualParlaysFromPool call, no new
-      // build path. Whole-shape mode reports an empty pool on purpose (see
+      // TGP decompose mode — tgpPool is reported by TGPControls, same
+      // buildManualParlaysFromPool call, no new build path. Whole-shape
+      // mode reports an empty pool on purpose (see
       // TGPControls) since it builds/adds its own tickets directly via its
       // own "Add to draft" buttons — the Build button has nothing to do in
       // that mode, hence the distinct message here rather than reusing the
@@ -18475,7 +17966,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       const filteredTgpPool = tgpPool.filter(e => {
         const f = fixtures.find(fx => fx.id === e.fixtureId);
         const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
-        return !excluded;
+        if (excluded) return false;
+        if (modelFloorMode) { const p = legModelProbValue(e); if (p != null && p < modelFloorMinProb) return false; }
+        return true;
       });
       if (filteredTgpPool.length < numParlays * 3) {
         setAutoMessage(`⚠ Pool has ${filteredTgpPool.length} qualifying leg${filteredTgpPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
@@ -18499,23 +17992,25 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
       // Pool Builder mode — pool is fetched server-side by PoolBuilderControls
       // (GET /api/pool-builder, sa-core.mjs's fused SA+CA candidates, odds-
       // banded per market) and reported up via poolBuilderPool exactly like
-      // patternEnginePool/tgpPool are. Same builder, same shared controls —
-      // only the pool source differs.
+      // tgpPool is. Same builder, same shared controls — only the pool
+      // source differs.
       if (poolBuilderPool.length === 0) {
-        setAutoMessage("No qualifying Pool Builder legs today — check back once more fixtures load, or a market's odds band may just be thin today.");
+        setAutoMessage("No qualifying Analyst Pool legs today — check back once more fixtures load, or a market's odds band may just be thin today.");
         setBuilding(false); return;
       }
       const filteredPoolBuilderPool = poolBuilderPool.filter(e => {
         const f = fixtures.find(fx => fx.id === e.fixtureId);
         const excluded = parlayExcludedMarkets.has(getExcludeSelectionId({ label: e.pick, market: e.market }, f));
-        return !excluded;
+        if (excluded) return false;
+        if (modelFloorMode) { const p = legModelProbValue(e); if (p != null && p < modelFloorMinProb) return false; }
+        return true;
       });
       if (filteredPoolBuilderPool.length < numParlays * 3) {
         setAutoMessage(`⚠ Pool has ${filteredPoolBuilderPool.length} qualifying leg${filteredPoolBuilderPool.length!==1?"s":""} after market filters for ${numParlays} tickets — some tickets may share legs.`);
         setTimeout(() => setAutoMessage(""), 5000);
       }
       if (filteredPoolBuilderPool.length < 2) {
-        setAutoMessage("No qualifying Pool Builder legs remain after the active market filters.");
+        setAutoMessage("No qualifying Analyst Pool legs remain after the active market filters.");
         setBuilding(false); return;
       }
       const results = buildManualParlaysFromPool(filteredPoolBuilderPool, { numParlays, targetOdds, historicalRates:rates, budget, budgetPct, maxSameMarket: maxSameMarket ?? Infinity, rankOrder: rankOrderMode });
@@ -18552,7 +18047,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
         ? buildUniversalPool(allCustomFixtures, rates, isPastBuild)
         : buildSignalPool(allCustomFixtures, rates, isPastBuild)
       ).filter(e => !parlayExcludedMarkets.has(getExcludeSelectionId({label:e.pick, market:e.market}, e.fixture)))
-       .filter(e => !manualMarketFilter || e.market === manualMarketFilter);
+       .filter(e => !manualMarketFilter || e.market === manualMarketFilter)
+       .filter(e => !modelFloorMode || legModelProbValue(e) == null || legModelProbValue(e) >= modelFloorMinProb);
       if (rawPool.length === 0) {
         setAutoMessage(customPool==="engine"
           ? "No qualifying games in engine pool — switch to All Fixtures or build the engine pool first."
@@ -18884,31 +18380,24 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                 />
               )}
 
-              {/* ── CUSTOM TAB — Manual (pool + rules) / Pattern Engine (former
-                   "Multi Gen" tab, folded in 2026-08-06) toggle. Both engines
-                   share the Stake/Target Odds/Tickets/Max Same Market block
-                   and the Build button below; only the pool-building step
-                   (and, for Manual, the pool/league/exclude/research controls)
-                   differs per engine. ── */}
+              {/* ── CUSTOM TAB — Manual (pool + rules) / TGP / Pool Builder /
+                   Fusion Ladder toggle. All engines share the Stake/Target
+                   Odds/Tickets/Max Same Market block and the Build button
+                   below; only the pool-building step (and, for Manual, the
+                   pool/league/exclude/research controls) differs per engine. ── */}
               {builderMode === "custom" && (
                 <>
-                  {/* 2026-09-10: was a flex:1 row (each button = 100%/n width). Fine at
-                      4 tabs, but a 5th (Fusion Ladder) would squeeze "Pattern Engine" /
-                      "Pool Builder" — already the widest labels at 9px bold — into
-                      wrapping/overflow. Switched to the app's existing .cscroll
-                      horizontal-scroll pattern (same one used for league/date/market
-                      pill rows elsewhere) with fixed minWidth buttons instead of
-                      inventing a new layout. minWidth 76 x 5 + gaps intentionally
-                      exceeds typical phone content width, so the last tab visibly
-                      peeks off-edge as a scroll affordance rather than fitting exactly
-                      and looking like a dead end. */}
+                  {/* 2026-09-10: was a flex:1 row (each button = 100%/n width). Kept
+                      the app's existing .cscroll horizontal-scroll pattern (same one
+                      used for league/date/market pill rows elsewhere) with fixed
+                      minWidth buttons rather than a percentage-width row, so a label
+                      like "Pool Builder" or "Fusion Ladder" never wraps at 9px bold. */}
                   <div className="cscroll" style={{ marginBottom:12,
                                 background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
                     {[
                       { id:"manual",  label:"Manual",         desc:"Pool + your rules" },
-                      { id:"pattern", label:"Pattern Engine",  desc:"SA / CA / SC / Model" },
                       { id:"tgp",     label:"TGP",             desc:"Mined multi-leg shapes" },
-                      { id:"pool",    label:"Pool Builder",    desc:"SA+CA fused, odds-banded" },
+                      { id:"pool",    label:"Analyst Pool",    desc:"SA+CA fused, odds-banded" },
                       { id:"fusion",  label:"Fusion Ladder",   desc:"3x / 20x / 130x blended" },
                     ].map(e => (
                       <button key={e.id} onClick={() => setCustomEngine(e.id)}
@@ -18922,17 +18411,6 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       </button>
                     ))}
                   </div>
-
-                  {customEngine === "pattern" && (
-                    <PatternEngineControls
-                      fixtures={fixtures}
-                      C={C}
-                      appSaPatterns={appSaPatterns}
-                      appCaPatterns={appCaPatterns}
-                      onPoolChange={setPatternEnginePool}
-                      date={date}
-                    />
-                  )}
 
                   {customEngine === "tgp" && (
                     <TGPControls
@@ -19005,7 +18483,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   </>)}
 
-                  {/* Shared market exclusion: Manual + Pattern Engine + TGP Decompose.
+                  {/* Shared market exclusion: Manual + TGP Decompose.
                       Hidden for Fusion Ladder too (see hidePoolBuildControls). */}
                   {!hidePoolBuildControls && (
                     <ExcludeMarketsPanel
@@ -19015,9 +18493,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     />
                   )}
 
-                  {/* SHARED across both engines — Stake, Target Odds, Tickets,
+                  {/* SHARED across engines — Stake, Target Odds, Tickets,
                       Max Same Market drive whichever pool is active (Manual's
-                      rawPool or Pattern Engine's patternEnginePool).
+                      rawPool, tgpPool, or poolBuilderPool).
                       2026-08-16 fix: hidden entirely in TGP Whole Shape mode —
                       that mode adds its own pre-formed tickets directly and
                       has no pool for these to drive at all (see TGPControls'
@@ -19026,6 +18504,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       Fusion Ladder, same reasoning (see hidePoolBuildControls). */}
                   {!hidePoolBuildControls && (
                   <>
+                  {customEngine === "pool" && (
+                    <div style={{ fontSize:8, color:C.muted, textTransform:"uppercase", letterSpacing:".1em", fontWeight:800, marginBottom:8 }}>
+                      Custom Build
+                    </div>
+                  )}
                   <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12 }}>
                     <div>
                       <div style={{ fontSize:8,color:C.text,marginBottom:4,textTransform:"uppercase",letterSpacing:".1em" }}>Stake ($)</div>
@@ -19078,9 +18561,9 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   </>)}
 
-                  {/* Leg order toggle — shared across Manual/Pattern Engine/
-                      TGP Decompose, all three build through the same pool
-                      builder. Off = varied builds (default). On = ticket
+                  {/* Leg order toggle — shared across Manual/TGP Decompose,
+                      both build through the same pool builder.
+                      Off = varied builds (default). On = ticket
                       always fills from strongest score down, deterministic.
                       2026-08-22 fix: got left outside the !tgpWholeModeActive
                       fragment when the block above it was wrapped in <>...</>
@@ -19104,6 +18587,40 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       aria-label="Toggle deterministic rank order"
                       title={rankOrderMode ? "Rank order: on" : "Rank order: off"}>
                       <span style={{ position:"absolute",top:1,left:rankOrderMode?19:1,width:16,height:16,
+                                     borderRadius:8,background:"#fff",transition:"left .15s" }} />
+                    </button>
+                  </div>
+                  )}
+
+                  {/* Model-probability floor toggle (item #8) — same shared-
+                      block visibility as Rank Order above (hidden for Fusion
+                      Ladder / TGP Whole Shape via hidePoolBuildControls). */}
+                  {!hidePoolBuildControls && (
+                  <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",
+                                background:C.faint,border:`1px solid ${C.border}`,borderRadius:8,
+                                padding:"9px 12px",marginBottom:12 }}>
+                    <div>
+                      <div style={{ fontSize:9,color:C.text,fontWeight:700 }}>Model Probability Floor</div>
+                      <div style={{ fontSize:8,color:C.muted,marginTop:2 }}>
+                        {modelFloorMode ? `Only includes legs at ${modelFloorMinProb}%+ model probability.` : "Off — every qualifying leg is eligible regardless of model probability."}
+                      </div>
+                      {modelFloorMode && (
+                        <div style={{ display:"flex",alignItems:"center",gap:6,marginTop:6 }}>
+                          <button onClick={() => setModelFloorMinProb(p => Math.max(50, p - 5))}
+                            style={{ width:24,height:24,fontSize:12,fontWeight:800,padding:0,background:C.bg,border:`1px solid ${C.border}`,color:C.text,borderRadius:5,cursor:"pointer",fontFamily:C.font }}>−</button>
+                          <span style={{ fontSize:11,fontWeight:800,color:C.gold,minWidth:30,textAlign:"center" }}>{modelFloorMinProb}%</span>
+                          <button onClick={() => setModelFloorMinProb(p => Math.min(95, p + 5))}
+                            style={{ width:24,height:24,fontSize:12,fontWeight:800,padding:0,background:C.bg,border:`1px solid ${C.border}`,color:C.text,borderRadius:5,cursor:"pointer",fontFamily:C.font }}>+</button>
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={() => setModelFloorMode(v => !v)}
+                      style={{ width:38,height:20,borderRadius:10,border:`1px solid ${C.border}`,
+                               background:modelFloorMode?C.accent:C.border,position:"relative",cursor:"pointer",
+                               flexShrink:0,padding:0 }}
+                      aria-label="Toggle model probability floor"
+                      title={modelFloorMode ? "Model probability floor: on" : "Model probability floor: off"}>
+                      <span style={{ position:"absolute",top:1,left:modelFloorMode?19:1,width:16,height:16,
                                      borderRadius:8,background:"#fff",transition:"left .15s" }} />
                     </button>
                   </div>
@@ -20979,6 +20496,15 @@ function GRMProInner() {
   const [activeTab, setActiveTab] = useState("live");
   const [date, setDate]           = useState(todayStr());
   const [fixtures, setFixtures]   = useState([]);
+  // 2026-09-11: keeps window.__grmLiveStatesByFixture current for
+  // computeCorrelationRisks' FT check (see that function's header comment
+  // for why this is a window slot rather than a prop threaded through
+  // ParlayJarvisTab/JarvisTicketCard/TicketCard). Runs whenever `fixtures`
+  // changes — both the initial load and every 45s live-states poll already
+  // update `fixtures` via setFixtures, so this needs no polling of its own.
+  useEffect(() => {
+    window.__grmLiveStatesByFixture = new Map((fixtures || []).map(f => [f.id, f]));
+  }, [fixtures]);
 
   // B-FIX: how many distinct dates are currently represented in `fixtures`.
   // Derived, not stored — `.date` is stamped on every fixture at load time
