@@ -5843,7 +5843,7 @@ function FixtureCard(props) {
   return <FixtureCardInner {...props} />;
 }
 
-function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFullModel, backtestSummary, adminToken = "" }) {
+const FixtureCardInner = React.memo(function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFullModel, backtestSummary, adminToken = "" }) {
   const [fetchingResult, setFetchingResult] = useState(false);
   const [localResult,    setLocalResult]    = useState(null);
   const [finishedFlash,  setFinishedFlash]  = useState("");
@@ -6164,7 +6164,7 @@ function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFu
       </div>
     </div>
   );
-}
+});
 
 // ── FULL MODEL PAGE ────────────────────────────────────────────────────────
 // Opens as a full-screen overlay when "▼ Full Model" is tapped.
