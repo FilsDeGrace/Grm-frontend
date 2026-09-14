@@ -5843,7 +5843,7 @@ function FixtureCard(props) {
   return <FixtureCardInner {...props} />;
 }
 
-const FixtureCardInner = React.memo(function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFullModel, backtestSummary, adminToken = "" }) {
+function FixtureCardInner({ f, onAddToParlay, draftLegs, isEngineQualified, onFullModel, backtestSummary, adminToken = "" }) {
   const [fetchingResult, setFetchingResult] = useState(false);
   const [localResult,    setLocalResult]    = useState(null);
   const [finishedFlash,  setFinishedFlash]  = useState("");
@@ -6164,7 +6164,7 @@ const FixtureCardInner = React.memo(function FixtureCardInner({ f, onAddToParlay
       </div>
     </div>
   );
-});
+}
 
 // ── FULL MODEL PAGE ────────────────────────────────────────────────────────
 // Opens as a full-screen overlay when "▼ Full Model" is tapped.
@@ -15710,7 +15710,7 @@ const POOL_BUILDER_SOURCE_OPTIONS = [
   { id: "v1", label: "Full Pool",    desc: "Every qualifying pattern" },
   { id: "v2", label: "Curated Pool", desc: "A smaller, hand-picked set" },
 ];
-function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop }) {
+function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop, leagueFilter, leagueFilterMode }) {
   const [topN, setTopN] = useState("5");
   const [source, setSource] = useState("v1");
   const [marketFilter, setMarketFilter] = useState(null); // null = every market
@@ -15747,6 +15747,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
       if (marketFilter && market !== marketFilter) continue;
       for (const c of candidates) {
         if (!Number.isFinite(c.odds) || c.odds <= 1) continue; // not priceable — same guard everywhere else in this file
+        if (leagueFilter && !matchesLeagueFilter(c.league, leagueFilter, leagueFilterMode)) continue;
         // Best real-world estimate of this leg's win rate, in priority
         // order: CA's own holdout hit rate (an actual empirical rate) >
         // SA's baseline+lift estimate > raw model probability. Mirrors the
@@ -15773,7 +15774,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
       }
     }
     return legs.sort((a, b) => b.utility - a.utility);
-  }, [data, marketFilter]);
+  }, [data, marketFilter, leagueFilter, leagueFilterMode]);
 
   useEffect(() => { onPoolChange(pool); }, [pool, onPoolChange]);
 
@@ -15802,11 +15803,33 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
   const generateTickets = () => {
     setAutoLoading(true); setAutoError(null); setPtSelected(new Set());
     const qs = new URLSearchParams({ date: date || todayStr(), source });
+    // Item #9 — a league filter never touches the saved/locked daily
+    // record (see server.js's own comment on why): refresh=1 asks the
+    // server to compute a fresh, filtered batch for THIS request only,
+    // without overwriting that record. Only sent when a filter is
+    // actually active, so the unfiltered path is byte-identical to before.
+    if (leagueFilter) {
+      const ids = leagueFilter instanceof Set ? [...leagueFilter] : [leagueFilter];
+      qs.set("leagues", ids.join(","));
+      qs.set("leagueMode", leagueFilterMode || "include");
+      qs.set("refresh", "1");
+    }
     fetch(`${SERVER}/api/pool-builder/tickets?${qs.toString()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
       .then(d => { setAutoTickets((d.tickets || []).map((t, i) => ({ ...t, _ptid: i }))); setAutoLoading(false); })
       .catch(err => { setAutoError(err.message || "Failed to generate tickets"); setAutoTickets(null); setAutoLoading(false); });
   };
+  // Item #9 — force-refresh trigger: if a ticket batch is already showing
+  // and the league filter changes, regenerate against the new filter
+  // automatically rather than leaving a stale (or now-too-broad) batch on
+  // screen. Doesn't fire on first mount or when no batch exists yet — the
+  // user's own "Auto-Generate" click is what starts it the first time.
+  const skipNextLeagueRefresh = useRef(true);
+  useEffect(() => {
+    if (skipNextLeagueRefresh.current) { skipNextLeagueRefresh.current = false; return; }
+    if (autoTickets) generateTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leagueFilter, leagueFilterMode]);
 
   // Converts one generated ticket into the same flat leg shape the live
   // pool above already emits (fixtureId/game/pick/market/league/odds/conf
@@ -16051,7 +16074,7 @@ function friendlyFusionTierNote(note) {
   return null;
 }
 
-function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scrollPanelToTop }) {
+function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scrollPanelToTop, leagueFilter, leagueFilterMode, setLeagueFilter, setLeagueFilterMode, availableLeagues }) {
   const [source, setSource] = useState("v1");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -16064,11 +16087,22 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
     setLoading(true);
     setError(null);
     const qs = new URLSearchParams({ date: date || todayStr(), source });
+    // Item #9 — league filter never touches the saved/locked daily record
+    // (server.js's own comment on fusionLadderTicketsPath explains why);
+    // refresh=1 asks for a fresh, filtered computation for this request
+    // only. Included in the effect's own deps below, so changing the
+    // filter re-fetches automatically — no separate "refresh" button.
+    if (leagueFilter) {
+      const ids = leagueFilter instanceof Set ? [...leagueFilter] : [leagueFilter];
+      qs.set("leagues", ids.join(","));
+      qs.set("leagueMode", leagueFilterMode || "include");
+      qs.set("refresh", "1");
+    }
     fetch(`${SERVER}/api/fusion-ladder-tickets?${qs.toString()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
       .then(d => { if (requestIdRef.current === requestId) { setData(d); setLoading(false); } })
       .catch(err => { if (requestIdRef.current === requestId) { setError(err.message || "Failed to load Fusion Ladder"); setData(null); setLoading(false); } });
-  }, [date, source]);
+  }, [date, source, leagueFilter, leagueFilterMode]);
 
   // Flat-leg tickets (PB pool / TGP decompose legs, already normalized to
   // fixtureId/home/away/market/odds server-side) -> the same builder leg
@@ -16140,6 +16174,27 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
       {sourceIsLocked && (
         <div style={{ fontSize:8,color:C.muted,marginBottom:10,lineHeight:1.5 }}>
           Source is set to {POOL_BUILDER_SOURCE_OPTIONS.find(o=>o.id===lockedSource)?.label || lockedSource} for {date || todayStr()} — the first load of the day locks it in.
+        </div>
+      )}
+
+      {/* League filter (item #9) — own instance, since this tab doesn't
+          share the Manual/TGP/Pool Builder block. Filtering here always
+          re-fetches (see the effect above), never edits the locked daily
+          record. */}
+      {availableLeagues?.length > 1 && (
+        <div style={{ marginBottom:12 }}>
+          <LeagueFilter
+            availableLeagues={availableLeagues}
+            leagueFilter={leagueFilter}
+            setLeagueFilter={setLeagueFilter}
+            leagueFilterMode={leagueFilterMode}
+            setLeagueFilterMode={setLeagueFilterMode}
+          />
+          {leagueFilter && (
+            <div style={{ fontSize:8,color:C.muted,marginTop:5,lineHeight:1.5 }}>
+              The 3x/20x tiers rebuild from your filtered legs. The 130x tier (Whole Shape) is validated as a single unit — a filter change there swaps in a different candidate entirely rather than trimming it, when one fits.
+            </div>
+          )}
         </div>
       )}
 
@@ -16310,7 +16365,7 @@ function FusionTierCard({ C, tier, onAdd, onReplace }) {
 // pricing, the strongest occurrence must win rather than blocking the
 // entire stack.
 
-function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop, onModeChange }) {
+function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop, onModeChange, leagueFilter, leagueFilterMode }) {
   // fixtures/appSaPatterns/appCaPatterns props removed (2026-08-26) — no
   // longer needed here. All matching now runs server-side; the server
   // derives its own fixtures from the day's snapshot from `date` alone.
@@ -16391,7 +16446,17 @@ function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView,
   }, [date, minLift, minHoldoutN, sourceFilter, modelMinProb, applyModelFloor, cutFilter, marketFilter, tgpExcludedMarkets]);
 
   const wholeShapeCandidates = tgpLive?.wholeShapeCandidates || [];
-  const decomposedPool = tgpLive?.decomposedPool || [];
+  // Item #9 — league filter applied here so it reaches BOTH this
+  // component's own decompose-mode card list AND handleBuildParlay's Build
+  // path (which reads whatever this reports via onPoolChange below).
+  // useMemo, not a plain filter() on every render, keeps the same array
+  // reference when leagueFilter is off — the effect below fires
+  // onPoolChange keyed on this reference, and a fresh array every render
+  // would re-fire it (and re-render the parent) in a loop.
+  const decomposedPool = useMemo(() => {
+    const raw = tgpLive?.decomposedPool || [];
+    return leagueFilter ? raw.filter(l => matchesLeagueFilter(l.league, leagueFilter, leagueFilterMode)) : raw;
+  }, [tgpLive, leagueFilter, leagueFilterMode]);
   const availableMarkets = withAllMarkets(tgpLive?.availableMarkets || []);
 
   useEffect(() => { if (mode === "decompose") onPoolChange(decomposedPool); }, [mode, decomposedPool, onPoolChange]);
@@ -18422,6 +18487,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       setView={setView}
                       scrollPanelToTop={scrollPanelToTop}
                       onModeChange={setTgpMode}
+                      leagueFilter={parlayLeagueFilter}
+                      leagueFilterMode={parlayLeagueFilterMode}
                     />
                   )}
 
@@ -18434,6 +18501,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       setDraftLegs={setDraftLegs}
                       setView={setView}
                       scrollPanelToTop={scrollPanelToTop}
+                      leagueFilter={parlayLeagueFilter}
+                      leagueFilterMode={parlayLeagueFilterMode}
                     />
                   )}
 
@@ -18444,7 +18513,8 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       per fusion-ladder-handoff.md); this just points a UI
                       at it. No shared pool is reported — hidePoolBuildControls
                       hides the Stake/Target Odds/Build block for this tab,
-                      same as TGP Whole Shape mode. */}
+                      same as TGP Whole Shape mode. Renders its OWN League
+                      filter (item #9) since it doesn't share that block. */}
                   {customEngine === "fusion" && (
                     <FusionLadderControls
                       C={C}
@@ -18453,6 +18523,11 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                       setDraftLegs={setDraftLegs}
                       setView={setView}
                       scrollPanelToTop={scrollPanelToTop}
+                      leagueFilter={parlayLeagueFilter}
+                      leagueFilterMode={parlayLeagueFilterMode}
+                      setLeagueFilter={setParlayLeagueFilter}
+                      setLeagueFilterMode={setParlayLeagueFilterMode}
+                      availableLeagues={parlayAvailableLeagues}
                     />
                   )}
 
@@ -18626,9 +18701,15 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                   </div>
                   )}
 
-                  {customEngine === "manual" && (<>
-                  {/* League filter — Custom tab only */}
-                  {parlayAvailableLeagues.length > 1 && (
+                  {/* League filter (item #9) — same shared-block visibility
+                      as Rank Order/Model Floor above: Manual, TGP Decompose,
+                      Pool Builder all read this same parlayLeagueFilter
+                      state (via props into TGPControls/PoolBuilderControls
+                      for the latter two — see their render calls above).
+                      Fusion Ladder renders its own separate instance of
+                      this same state inside FusionLadderControls, since it
+                      doesn't share this block. Previously Manual-only. */}
+                  {!hidePoolBuildControls && parlayAvailableLeagues.length > 1 && (
                     <div style={{ marginBottom:12 }}>
                       <LeagueFilter
                         availableLeagues={parlayAvailableLeagues}
@@ -18652,6 +18733,7 @@ function ParlayJarvisTab({ fixtures, tickets, setTickets, draftLegs, setDraftLeg
                     </div>
                   )}
 
+                  {customEngine === "manual" && (<>
                   {/* Research Mode toggle — pre-scores top candidates with live web context */}
                   <button onClick={() => setJarvisResearch(r => !r)}
                     style={{

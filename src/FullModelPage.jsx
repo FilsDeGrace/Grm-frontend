@@ -1881,28 +1881,34 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
                   {STATUS_GROUP_LABEL[flag.status] || flag.status}
                 </div>
               )}
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 14px" }}>
-                <Icon size={12} color={color} />
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 10, fontWeight: 800, color: C.text }}>{label}</div>
-                  <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 2 }}>{flag.reason}</div>
-                  {hasNumbers && (
-                    <>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-                        <CAConfidenceBar holdout={flag.holdoutHitRate} baseline={flag.holdoutBaselineHR} color={color} />
-                        <span style={{ fontSize: 10, fontWeight: 800, color }}>{flag.holdoutHitRate}%</span>
-                        <span style={{ fontSize: 8, color: C.text, opacity: 0.62 }}>
-                          vs {flag.holdoutBaselineHR}% base · {flag.holdoutLift > 0 ? "+" : ""}{flag.holdoutLift}pp ({CA_STRENGTH_LABEL[caPatternStrength(flag.holdoutLift)]})
-                        </span>
-                      </div>
-                      {flag.trainHitRate != null && (
-                        <div style={{ fontSize: 8, color: C.text, opacity: 0.62, marginTop: 4 }}>
-                          Train {flag.trainHitRate}% → Holdout {flag.holdoutHitRate}% (depth {flag.depth}, n={flag.holdoutSample})
-                        </div>
-                      )}
-                    </>
-                  )}
+              <div style={{
+                background: C.faint,
+                borderRadius: 10,
+                padding: "11px 14px",
+                margin: "0 14px 8px",
+                borderLeft: `3px solid ${color}`,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <Icon size={12} color={color} />
+                  <span style={{ fontSize: 10.5, fontWeight: 800, color: C.text, whiteSpace: "nowrap" }}>{label}</span>
                 </div>
+                <div style={{ fontSize: 9, color: C.text, opacity: 0.72, lineHeight: 1.5, marginTop: 3 }}>{flag.reason}</div>
+                {hasNumbers && (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 7 }}>
+                      <CAConfidenceBar holdout={flag.holdoutHitRate} baseline={flag.holdoutBaselineHR} color={color} />
+                      <span style={{ fontSize: 10, fontWeight: 800, color }}>{flag.holdoutHitRate}%</span>
+                      <span style={{ fontSize: 8, color: C.text, opacity: 0.62 }}>
+                        vs {flag.holdoutBaselineHR}% base · {flag.holdoutLift > 0 ? "+" : ""}{flag.holdoutLift}pp ({CA_STRENGTH_LABEL[caPatternStrength(flag.holdoutLift)]})
+                      </span>
+                    </div>
+                    {flag.trainHitRate != null && (
+                      <div style={{ fontSize: 8, color: C.text, opacity: 0.62, marginTop: 4 }}>
+                        Train {flag.trainHitRate}% → Holdout {flag.holdoutHitRate}% (depth {flag.depth}, n={flag.holdoutSample})
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           );
@@ -1916,13 +1922,20 @@ function SettlementConditionsSection({ scFlags, scVerdicts, scEmerging, scError,
               const label = SC_MARKET_LABELS.find(m => m.id === c.market)?.label || c.market;
               const color = isAvoid ? C.red : C.purple;
               return (
-                <div key={`${c.market}-${isAvoid}-${i}`} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 14px", opacity: 0.85 }}>
-                  {isAvoid ? <CAIconAvoid size={11} color={color} /> : <CAIconCheck size={11} color={color} />}
-                  <div>
-                    <div style={{ fontSize: 9, fontWeight: 700, color: C.text }}>{label}</div>
-                    <div style={{ fontSize: 8, color: C.text, opacity: 0.65, lineHeight: 1.5, marginTop: 1 }}>
-                      Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% vs {c.holdoutBaselineHR}% baseline ({c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp), depth {c.depth}, n={c.holdoutSample} — below the test-size floor, not yet a validated pattern.
-                    </div>
+                <div key={`${c.market}-${isAvoid}-${i}`} style={{
+                  background: C.faint,
+                  borderRadius: 10,
+                  padding: "9px 14px",
+                  margin: "0 14px 8px",
+                  borderLeft: "3px solid transparent",
+                  opacity: 0.85,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {isAvoid ? <CAIconAvoid size={11} color={color} /> : <CAIconCheck size={11} color={color} />}
+                    <span style={{ fontSize: 9, fontWeight: 700, color: C.text }}>{label}</span>
+                  </div>
+                  <div style={{ fontSize: 8, color: C.text, opacity: 0.65, lineHeight: 1.5, marginTop: 3 }}>
+                    Train {c.trainHitRate}% → Holdout {c.holdoutHitRate}% vs {c.holdoutBaselineHR}% baseline ({c.holdoutLift > 0 ? "+" : ""}{c.holdoutLift}pp), depth {c.depth}, n={c.holdoutSample} — below the test-size floor, not yet a validated pattern.
                   </div>
                 </div>
               );
