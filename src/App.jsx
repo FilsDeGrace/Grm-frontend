@@ -804,11 +804,11 @@ export function caPatternStrength(lift) {
 // 0 (off) — Alden's 2026-07-18 call was that sample size shouldn't gate
 // Strong by default, but he can still opt into a floor (>=10, >=15, etc.)
 // via the same input rather than it being unavailable entirely.
-export const CA_STRONG_MIN_TRAIN_HR         = 75;  // positive: train hit-rate floor
-export const CA_STRONG_MIN_HOLDOUT_HR       = 70;  // positive: holdout hit-rate floor
+export const CA_STRONG_MIN_TRAIN_HR         = 65;  // positive: train hit-rate floor (2026-09-14: was 75)
+export const CA_STRONG_MIN_HOLDOUT_HR       = 80;  // positive: holdout hit-rate floor (2026-09-14: was 70)
 export const CA_STRONG_MAX_TRAIN_HR_AVOID   = 20;  // avoid: train hit-rate ceiling
 export const CA_STRONG_MAX_HOLDOUT_HR_AVOID = 20;  // avoid: holdout hit-rate ceiling
-export const CA_STRONG_MIN_LIFT             = 20;  // pp, train AND holdout, vs that market's own baseline
+export const CA_STRONG_MIN_LIFT             = 5;   // pp, train AND holdout, vs that market's own baseline (2026-09-14: was 20)
 export const CA_STRONG_MIN_SAMPLE           = 0;   // train AND holdout leg count floor — 0 = off (default)
 // Single source of truth for the panel's default input values — keeps the
 // UI defaults and the classifier's own fallback defaults from drifting
@@ -6459,6 +6459,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [caPatternsRow,  setCaPatternsRow]  = useState(null); // raw /api/ca-patterns payload
   const [caLoadingRow,   setCaLoadingRow]   = useState(false);
   const [caErrorRow,     setCaErrorRow]     = useState(null);
+  // Family-curated CA (2026-09-14) — curate-ca-families.mjs's output. NOT
+  // another quality tier alongside Standard/Strong/Emerging (those all
+  // filter the SAME caPatternsRow client-side); this is a separate,
+  // pre-selected file, fetched from its own endpoint, lazily — only once a
+  // user actually switches into this mode, since it's still awaiting
+  // broader testing and there's no reason to fetch it for everyone by
+  // default the way caPatternsRow is fetched eagerly.
+  const [caFamilyPatternsRow, setCaFamilyPatternsRow] = useState(null);
+  const [caFamilyLoading,     setCaFamilyLoading]     = useState(false);
+  const [caFamilyError,       setCaFamilyError]       = useState(null);
   // Pattern-quality mode (2026-07-18) — mutually exclusive, one list at a
   // time (not stacked): "standard" is the pre-existing VALID-only behavior
   // (default, unchanged), "strong" swaps in isStrongCA's composite gate,
@@ -6466,7 +6476,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // user-picked min-hit-rate threshold below. caDirection narrows any mode
   // to Positive-only/Avoid-only/Both — "both" is a no-op so standard mode's
   // existing behavior is byte-identical unless a user explicitly narrows it.
-  const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging"
+  // "families" (2026-09-14) added below Emerging, not inline with it — see
+  // the family-curation UI block's own comment for why.
+  const [caMode,          setCaMode]          = useState("standard"); // "standard" | "strong" | "emerging" | "families"
   const [caDirection,     setCaDirection]     = useState("both");     // "positive" | "avoid" | "both"
   const [caEmergingMinHR, setCaEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — holdout HR floor (positive) / ceiling mirror (avoid)
   // Strong-mode thresholds (2026-07-18, Alden's request; refined same day
@@ -6573,6 +6585,21 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .finally(() => setCaLoadingRow(false));
   }, [caExpanded, caMarket]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    // Lazy on purpose (contrast with caPatternsRow's eager fetch above) —
+    // this mode is still awaiting broader testing, so there's no reason to
+    // pull an extra payload for every user who never opens it.
+    if (caMode !== "families") return;
+    if (caFamilyLoading || caFamilyPatternsRow) return;
+    setCaFamilyLoading(true);
+    setCaFamilyError(null);
+    fetch(`${SERVER}/api/ca-patterns-families`)
+      .then(r => { if (!r.ok) return r.json().then(d => { throw new Error(d?.error || `HTTP ${r.status}`); }); return r.json(); })
+      .then(d => { if (d?.byMarket) setCaFamilyPatternsRow(d); else setCaFamilyError(d?.error || "No family-curated data"); })
+      .catch(e => setCaFamilyError(e.message))
+      .finally(() => setCaFamilyLoading(false));
+  }, [caMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── SC ROW — mirrors CA's state shape structurally, but fetches nothing
   // upfront. CA fetches its whole mined-pattern payload once (can be several
   // MB) and matches client-side; SC POSTs the fixtures it already has and
@@ -6592,7 +6619,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // back from POST /api/sc-match with every fetch (small, per-fixture — no
   // separate round-trip needed when switching modes or the threshold below,
   // same instant-switch UX as CA gets from holding its payload client-side).
-  const [scMode,          setScMode]          = useState("standard"); // "standard" | "strong" | "emerging"
+  const [scMode,          setScMode]          = useState("standard"); // "standard" | "strong" | "emerging" | "families"
   const [scEmergingMinHR, setScEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — same tiers as CA
   // Strong tier (2026-08-04) — reuses isStrongCA/CA_STRONG_DEFAULTS directly,
   // not a duplicated isStrongSC: isStrongCA is already generic over any
@@ -6641,6 +6668,31 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .catch(e => setScError(e.message))
       .finally(() => setScLoading(false));
   }, [scExpanded, scMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // SC family-curated (2026-09-14) — separate state, separate POST, same
+  // lazy-only-when-selected discipline as CA's caFamilyPatternsRow. Kept
+  // apart from scResults for the same reason CA's family fetch is kept
+  // apart from caPatternsRow: this is a different file, not another filter
+  // over the standard one, so it needs its own round-trip, not a client-side
+  // re-filter of what scResults already holds.
+  const [scFamilyResults, setScFamilyResults] = useState(null); // { [fixtureId]: { positive, avoid } }
+  const [scFamilyLoading, setScFamilyLoading] = useState(false);
+  const [scFamilyError,   setScFamilyError]   = useState(null);
+  useEffect(() => {
+    if (scMode !== "families") return;
+    if (!fixtures?.length) return;
+    if (scFamilyLoading) return;
+    setScFamilyLoading(true);
+    setScFamilyError(null);
+    fetch(`${SERVER}/api/sc-match-families`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
+    })
+      .then(r => { if (!r.ok) return r.json().then(d => { throw new Error(d?.error || `HTTP ${r.status}`); }); return r.json(); })
+      .then(d => { if (d?.results) setScFamilyResults(d.results); else setScFamilyError(d?.error || "No family-curated SC data"); })
+      .catch(e => setScFamilyError(e.message))
+      .finally(() => setScFamilyLoading(false));
+  }, [scMode, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -7368,6 +7420,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         const avoidCeiling = 100 - caEmergingMinHR;
         cleanPositive = emergingPositive.filter(c => originClean(c) && (c.holdoutHitRate ?? 0) >= caEmergingMinHR);
         cleanAvoid    = emergingAvoid.filter(c => originClean(c) && (c.holdoutHitRate ?? 100) <= avoidCeiling);
+      } else if (caMode === "families") {
+        // No mixEligible/HR gate on top — curate-ca-families.mjs already did
+        // the selecting (Wilson-ranked, diversity-capped, live-retested).
+        // Re-applying Standard/Strong's own floors here would just be a
+        // second, redundant filter fighting the first one. originClean still
+        // applies — a same-market contradiction doesn't go away just
+        // because the source pool is different.
+        const fam = matchCAConditions(f, caFamilyPatternsRow);
+        cleanPositive = fam.positive.filter(originClean);
+        cleanAvoid    = fam.avoid.filter(originClean);
       } else {
         cleanPositive = positive.filter(c => mixEligible(c, false) && caRecalibratedHR(c.holdoutHitRate, false) >= CA_MIN_HOLDOUT_HR);
         cleanAvoid    = avoid.filter(c => mixEligible(c, true) && caRecalibratedHR(c.holdoutHitRate, true) <= CA_MAX_AVOID_HR);
@@ -7473,7 +7535,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
+  }, [caMarket, caPatternsRow, caFamilyPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
 
   // scRows — deliberately much shorter than caRows: no mode/floor-gate
   // machinery to reproduce, the server already decided favorable/
@@ -7643,6 +7705,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               reason: `Emerging (small-sample) settlement pattern favors this market — holdout ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (+${best.holdoutLift}pp), n=${best.holdoutSample}.` }
           : { status: "unfavorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
               reason: `Emerging (small-sample) settlement pattern works against this market — holdout only ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (${best.holdoutLift}pp), n=${best.holdoutSample}.` };
+      } else if (scMode === "families") {
+        // No isStrongCA/threshold gate on top — curate-sc-families.mjs
+        // already did the selecting (Wilson-ranked, diversity-capped,
+        // live-retested), same as CA's families branch.
+        const fPos = (scFamilyResults?.[f.id]?.positive || []).filter(c => c.market === scMarket);
+        const fAvoid = (scFamilyResults?.[f.id]?.avoid || []).filter(c => c.market === scMarket);
+        const best = fPos[0] || fAvoid[0];
+        if (!best) continue;
+        flag = fPos[0]
+          ? { status: "favorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Family-curated settlement pattern favors this market — holdout ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (+${best.holdoutLift}pp).` }
+          : { status: "unfavorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+              reason: `Family-curated settlement pattern works against this market — holdout only ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline (${best.holdoutLift}pp).` };
       } else {
         flag = scResults[f.id]?.flags?.[scMarket];
         if (!flag) continue; // no settlement-condition pattern matched either way — nothing to show for this market
@@ -8499,6 +8574,34 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     );
                   })}
                 </div>
+                {/* Family-Curated (2026-09-14) — deliberately its own row, not a 4th
+                    pill alongside Standard/Strong/Emerging: those three all filter
+                    the SAME mined file client-side; this switches to a completely
+                    separate, pre-selected file (curate-ca-families.mjs), still
+                    awaiting broader testing. Grouping it visually with the others
+                    would imply it's just another quality tier on the same data,
+                    which it isn't. */}
+                <div style={{ borderTop:`1px dashed ${C.faint}`, paddingTop:6, marginBottom:6 }}>
+                  <button onClick={() => setCaMode("families")} className="gb"
+                    style={{ padding:"5px 12px",fontSize:10,textTransform:"none",
+                             background:caMode === "families" ? C.accent : "transparent",
+                             color:caMode === "families" ? "#fff" : C.muted,
+                             border:`1px solid ${caMode === "families" ? C.accent : C.faint}`,
+                             fontWeight:caMode === "families" ? 800 : undefined }}>
+                    Family-Curated (Experimental)
+                  </button>
+                </div>
+                {caMode === "families" && (
+                  <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                    A separate, pre-selected set — Wilson-ranked and diversity-capped
+                    within each condition family, old patterns live-retested against
+                    fresh data before being eligible. Not a stricter/looser version of
+                    Standard — a different source file entirely. Still being tested;
+                    treat results here as provisional.
+                    {caFamilyLoading && " Loading…"}
+                    {caFamilyError && ` Error: ${caFamilyError}`}
+                  </div>
+                )}
                 {caMode === "strong" && (
                   <>
                     <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
@@ -8738,6 +8841,32 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     );
                   })}
                 </div>
+                {/* Family-Curated (2026-09-14) — same reasoning as CA's: own row,
+                    not a 4th pill next to Standard/Strong/Emerging, since those
+                    three filter the SAME mined file and this switches to a
+                    completely separate, pre-selected file (curate-sc-families.mjs),
+                    still awaiting broader testing. */}
+                <div style={{ borderTop:`1px dashed ${C.faint}`, paddingTop:6, marginBottom:6 }}>
+                  <button onClick={() => setScMode("families")} className="gb"
+                    style={{ padding:"5px 12px",fontSize:10,textTransform:"none",
+                             background:scMode === "families" ? C.accent : "transparent",
+                             color:scMode === "families" ? "#fff" : C.muted,
+                             border:`1px solid ${scMode === "families" ? C.accent : C.faint}`,
+                             fontWeight:scMode === "families" ? 800 : undefined }}>
+                    Family-Curated (Experimental)
+                  </button>
+                </div>
+                {scMode === "families" && (
+                  <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
+                    A separate, pre-selected set — Wilson-ranked and diversity-capped
+                    within each condition family, old patterns live-retested against
+                    fresh data before being eligible. Not a stricter/looser version of
+                    Standard — a different source file entirely. Still being tested;
+                    treat results here as provisional.
+                    {scFamilyLoading && " Loading…"}
+                    {scFamilyError && ` Error: ${scFamilyError}`}
+                  </div>
+                )}
                 {scMode === "strong" && (
                   <>
                     <div style={{ fontSize:8,color:C.text,opacity:.6,marginBottom:8,lineHeight:1.5 }}>
@@ -12671,6 +12800,9 @@ function TicketCard({ ticket, date, onRemove, onRemoveLeg, onRemix, onSwapLeg, i
                   {leg.isVolatile && (
                     <Pill color={C.muted} bg="transparent">volatile</Pill>
                   )}
+                  {leg.isRisky && (
+                    <Pill color={C.red} bg="transparent">risky</Pill>
+                  )}
                   {(() => {
                     // Informational only — doesn't touch corrRisks/removal.
                     // A live/in-play game is still a valid leg, just worth
@@ -15839,6 +15971,7 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
     fixtureId: l.gameId, game: `${l.home} vs ${l.away}`,
     pick: l.market.replace(/^TB:/, ""), market: l.market, league: l.league || "",
     odds: l.odds, conf: l.conf, strategyLabel: "Analyst Pool", strategyTags: [],
+    isRisky: l.isRisky || false,
   }));
 
   // Single-ticket actions — same pair Trim already offers per card
@@ -16112,6 +16245,7 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
     pick: (l.market || "").replace(/^TB:/, ""), market: l.market, league: l.league || "",
     odds: l.odds, conf: Number.isFinite(l._fusionConf) ? Math.round(l._fusionConf) : null,
     strategyLabel: "Fusion Ladder", strategyTags: [],
+    isRisky: l.isRisky || false,
   }));
   // Whole-shape tickets — shape.legs carries {market,source,patternKey},
   // assignment carries the live {fixtureId,home,away,odds,modelProb} per
@@ -16125,6 +16259,11 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
       pick: (leg.market || "").replace(/^TB:/, ""), market: leg.market, league: "",
       odds: a.odds, conf: a.modelProb != null ? Math.round(a.modelProb) : null,
       strategyLabel: "Fusion Ladder · Whole Shape", strategyTags: [],
+      // ws.flaggedLegs is a filter() of this same ws.shape.legs array
+      // (server.js ~line 5665), so it holds the exact same object
+      // references — .includes() here is reference equality against
+      // shape.legs[i], same trick buildShapeLegsAndOdds already uses.
+      isRisky: ws.flaggedLegs.includes(leg),
     };
   });
   const legsFor = (ticket) => ticket.type === "whole-shape" ? legsFromWholeShape(ticket.ws) : legsFromFlat(ticket.legs);
@@ -16644,12 +16783,18 @@ function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView,
     const pricedOdds = assignment.map(a => a.odds).filter(o => Number.isFinite(o) && o > 0);
     const unpricedLegCount = assignment.length - pricedOdds.length;
     const partialOdds = pricedOdds.reduce((p, o) => p * o, 1);
+    // isRisky per leg: candidate.flaggedLegs is a filter() of this same
+    // shape.legs array (server.js line ~5496), so it holds the exact same
+    // object references — .includes() here is reference equality against
+    // shape.legs[i], not a key rebuild, so this can't drift from whatever
+    // riskyLegKeys logic produced flaggedLegs server-side.
     const legs = assignment.map((a, i) => ({
       fixtureId: a.fixtureId, game: `${a.home || "?"} vs ${a.away || "?"}`,
       pick: legMarkets[i].replace(/^TB:/, ""), market: legMarkets[i], league: a.league, odds: a.odds,
       conf: a.modelProb != null ? Math.round(a.modelProb) : null, empiricalRate: Math.round(shape.holdoutHR),
       score: Math.max(0, Math.min(1, (shape.holdoutHR + shape.lift) / 100)),
       strategyLabel: "TGP whole-shape", strategyTags: [],
+      isRisky: candidate.flaggedLegs.includes(shape.legs[i]),
     }));
     return { legs, partialOdds, unpricedLegCount };
   };
