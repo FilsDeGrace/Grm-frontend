@@ -6461,14 +6461,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [caErrorRow,     setCaErrorRow]     = useState(null);
   // Family-curated CA (2026-09-14) — curate-ca-families.mjs's output. NOT
   // another quality tier alongside Standard/Strong/Emerging (those all
-  // filter the SAME caPatternsRow client-side); this is a separate,
-  // pre-selected file, fetched from its own endpoint, lazily — only once a
-  // user actually switches into this mode, since it's still awaiting
-  // broader testing and there's no reason to fetch it for everyone by
-  // default the way caPatternsRow is fetched eagerly.
-  const [caFamilyPatternsRow, setCaFamilyPatternsRow] = useState(null);
-  const [caFamilyLoading,     setCaFamilyLoading]     = useState(false);
-  const [caFamilyError,       setCaFamilyError]       = useState(null);
+  // filter the SAME caResults client-side); this is a separate, pre-selected
+  // file, matched from its own server-side endpoint (2026-09-17: moved
+  // server-side same as caResults above — was fetching the raw curated
+  // payload here and running matchCAConditions client-side, same cost
+  // problem the standard CA row had), lazily — only once a user actually
+  // switches into this mode, since it's still awaiting broader testing and
+  // there's no reason to fetch it for everyone by default.
+  const [caFamilyResults,        setCaFamilyResults]        = useState(null); // { [fixtureId]: matchCAConditions() result }
+  const [caFamilyResultsLoading, setCaFamilyResultsLoading] = useState(false);
+  const [caFamilyResultsError,   setCaFamilyResultsError]   = useState(null);
   // Pattern-quality mode (2026-07-18) — mutually exclusive, one list at a
   // time (not stacked): "standard" is the pre-existing VALID-only behavior
   // (default, unchanged), "strong" swaps in isStrongCA's composite gate,
@@ -6586,19 +6588,74 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   }, [caExpanded, caMarket]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Lazy on purpose (contrast with caPatternsRow's eager fetch above) —
+    // Lazy on purpose (contrast with caResults's eager-ish fetch above) —
     // this mode is still awaiting broader testing, so there's no reason to
-    // pull an extra payload for every user who never opens it.
+    // pull an extra payload for every user who never opens it. POST-based
+    // now (2026-09-17), mirroring scFamilyResults' effect below exactly —
+    // was GET /api/ca-patterns-families + client-side matchCAConditions,
+    // same fix as the standard CA row got.
     if (caMode !== "families") return;
-    if (caFamilyLoading || caFamilyPatternsRow) return;
-    setCaFamilyLoading(true);
-    setCaFamilyError(null);
-    fetch(`${SERVER}/api/ca-patterns-families`)
+    if (!fixtures?.length) return;
+    if (caFamilyResultsLoading) return;
+    setCaFamilyResultsLoading(true);
+    setCaFamilyResultsError(null);
+    fetch(`${SERVER}/api/ca-match-families`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({
+        id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds,
+        theRead: f.theRead, theEdge: f.theEdge, // caExtractDims' oddsFloor — see caResults effect above
+      })) }),
+    })
       .then(r => { if (!r.ok) return r.json().then(d => { throw new Error(d?.error || `HTTP ${r.status}`); }); return r.json(); })
-      .then(d => { if (d?.byMarket) setCaFamilyPatternsRow(d); else setCaFamilyError(d?.error || "No family-curated data"); })
-      .catch(e => setCaFamilyError(e.message))
-      .finally(() => setCaFamilyLoading(false));
-  }, [caMode]); // eslint-disable-line react-hooks/exhaustive-deps
+      .then(d => { if (d?.results) setCaFamilyResults(d.results); else setCaFamilyResultsError(d?.error || "No family-curated data"); })
+      .catch(e => setCaFamilyResultsError(e.message))
+      .finally(() => setCaFamilyResultsLoading(false));
+  }, [caMode, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Server-side CA match (2026-09-17) — CA was the last engine still doing
+  // client-side matching (fetch the whole mined payload once via
+  // caPatternsRow above, then run matchCAConditions per fixture in the
+  // browser at every consumer). Mirrors scResults/the SC effect right below
+  // this one, same fix SC already got: POST the visible fixtures, get back
+  // small pre-matched results, cached server-side per fixture id
+  // (computeCaResultsForFixtures in server.js).
+  // caPatternsRow itself is NOT removed — it's still what the family-mode
+  // diff/logging code and anything reading the raw byMarket lists directly
+  // needs. This only replaces the PER-FIXTURE MATCHING step.
+  // Request body deliberately does NOT mirror SC's fetch below verbatim:
+  // caExtractDims (tgp-v1-live.mjs) reads oddsFloor off f.theRead/f.theEdge,
+  // fixture-level fields SC's matcher never touches — dropping them here
+  // would silently zero out any CA condition keyed on oddsFloor (matches
+  // nothing, looks like "no matches" instead of erroring — exactly the
+  // failure mode caExtractDims' own comment warns about).
+  // NOT YET WIRED to any consumer — matchCAConditions(f, caPatternsRow) call
+  // sites (~2537, 7298, 7430, 7538, 7790-7807, 7870) still do their own
+  // client-side matching. Swapping those to read caResults[f.id] instead is
+  // the next step, deliberately not done in this same pass — six call sites
+  // across this file, each worth checking individually rather than blind-
+  // converted, since a couple of them use `avoid`/`positive` shaped output
+  // in ways specific to their own consumer (e.g. caSafestScore below).
+  const [caResults,        setCaResults]        = useState(null); // { [fixtureId]: matchCAConditions() result }
+  const [caResultsLoading, setCaResultsLoading]  = useState(false);
+  const [caResultsError,   setCaResultsError]    = useState(null);
+  useEffect(() => {
+    if (!caExpanded && !caMarket) return;
+    if (!fixtures?.length) return;
+    if (caResultsLoading) return;
+    setCaResultsLoading(true);
+    setCaResultsError(null);
+    fetch(`${SERVER}/api/ca-match`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fixtures.map(f => ({
+        id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds,
+        theRead: f.theRead, theEdge: f.theEdge, // caExtractDims' oddsFloor — see comment above
+      })) }),
+    })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (d?.results) setCaResults(d.results); else setCaResultsError(d?.error || "No condition data"); })
+      .catch(e => setCaResultsError(e.message))
+      .finally(() => setCaResultsLoading(false));
+  }, [caExpanded, caMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SC ROW — mirrors CA's state shape structurally, but fetches nothing
   // upfront. CA fetches its whole mined-pattern payload once (can be several
@@ -6670,9 +6727,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   }, [scExpanded, scMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // SC family-curated (2026-09-14) — separate state, separate POST, same
-  // lazy-only-when-selected discipline as CA's caFamilyPatternsRow. Kept
+  // lazy-only-when-selected discipline as CA's caFamilyResults. Kept
   // apart from scResults for the same reason CA's family fetch is kept
-  // apart from caPatternsRow: this is a different file, not another filter
+  // apart from caResults: this is a different file, not another filter
   // over the standard one, so it needs its own round-trip, not a client-side
   // re-filter of what scResults already holds.
   const [scFamilyResults, setScFamilyResults] = useState(null); // { [fixtureId]: { positive, avoid } }
@@ -7268,7 +7325,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // positive/avoid arrays, computed from the same caPatternsRow every other
   // CA market uses.
   const caRows = useMemo(() => {
-    if (!caMarket || !caPatternsRow) return [];
+    if (!caMarket || !caResults) return [];
     const s = search.toLowerCase();
     const hasLiveFilter      = statFilters.includes("live");
     const hasScheduledFilter = statFilters.includes("scheduled");
@@ -7295,7 +7352,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         return sf ? !sf.fn(f) : false;
       })) continue;
 
-      const { positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets = [] } = matchCAConditions(f, caPatternsRow);
+      // Server-side match result (2026-09-17) — was matchCAConditions(f,
+      // caPatternsRow), recomputed client-side on every one of this memo's
+      // many dependencies (search keystrokes included). caResults[f.id] is
+      // the same shape, pre-matched server-side, cached per fixture id.
+      const { positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets = [] } = caResults[f.id] || {};
 
       // ── CA:Verdict (2026-08-02) — isolated early branch, doesn't touch
       // the Mix/Standard/Strong/Emerging floor-gate machinery below at all.
@@ -7427,7 +7488,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         // second, redundant filter fighting the first one. originClean still
         // applies — a same-market contradiction doesn't go away just
         // because the source pool is different.
-        const fam = matchCAConditions(f, caFamilyPatternsRow);
+        const fam = caFamilyResults?.[f.id] || { positive: [], avoid: [] };
         cleanPositive = fam.positive.filter(originClean);
         cleanAvoid    = fam.avoid.filter(originClean);
       } else {
@@ -7535,7 +7596,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [caMarket, caPatternsRow, caFamilyPatternsRow, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
+  }, [caMarket, caResults, caFamilyResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, caMode, caDirection, caEmergingMinHR, caStrongThresholds, family]);
 
   // scRows — deliberately much shorter than caRows: no mode/floor-gate
   // machinery to reproduce, the server already decided favorable/
@@ -7787,7 +7848,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // this re-runs matching/scoring per fixture, which the real rows already
   // do, so it's skipped otherwise rather than paying the cost every render.
   const verdictCoverageDiag = useMemo(() => {
-    const wantCA = caMarket === "CA:Verdict" && !!caPatternsRow;
+    const wantCA = caMarket === "CA:Verdict" && !!caResults;
     // BUGFIX (2026-08-22): `scResults` starts null and only populates once
     // the SC fetch resolves (see scRows above, which already guards this
     // exact case with `!scResults`). This memo didn't have that guard —
@@ -7804,7 +7865,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     let caClosestMiss = null, scClosestMiss = null; // rejected candidate with the smallest combined shortfall
     for (const f of fixtures) {
       if (wantCA) {
-        const { positive, avoid, emergingPositive, emergingAvoid } = matchCAConditions(f, caPatternsRow);
+        // Server-side match result (2026-09-17) — mirrors the wantSC branch
+        // below, which already reads scResults[f.id] this same way.
+        const { positive, avoid, emergingPositive, emergingAvoid } = caResults[f.id] || {};
         if ((positive?.length || 0) > 0 || (avoid?.length || 0) > 0) caHasData++;
         // 2026-09-10: mirrors scCleared/scClosestMiss below — added now because
         // the roles have flipped since this diagnostic was first built
@@ -7867,7 +7930,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       }
     }
     return { wantCA, wantSC, caHasData, scHasData, caCleared, scCleared, caClosestMiss, scClosestMiss, total: fixtures.length };
-  }, [caMarket, caPatternsRow, scMarket, scResults, fixtures]);
+  }, [caMarket, caResults, scMarket, scResults, fixtures]);
 
   // COMBINE-MODE (2026-07-19, Davies request #4): AND-intersect saRows and
   // caRows by fixture — a game only shows if BOTH engines matched it for this
@@ -8598,8 +8661,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     fresh data before being eligible. Not a stricter/looser version of
                     Standard — a different source file entirely. Still being tested;
                     treat results here as provisional.
-                    {caFamilyLoading && " Loading…"}
-                    {caFamilyError && ` Error: ${caFamilyError}`}
+                    {caFamilyResultsLoading && " Loading…"}
+                    {caFamilyResultsError && ` Error: ${caFamilyResultsError}`}
                   </div>
                 )}
                 {caMode === "strong" && (
