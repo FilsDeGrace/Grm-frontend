@@ -6307,6 +6307,63 @@ function GoalRadarTab({ fixtures, onAddToParlay, search, onFullModel }) {
   );
 }
 
+// ── SERVER-SIDE FIXTURE MATCHING (CA / SC and their family-curated variants) ──
+// One request per distinct SET of fixture ids. The server caches each
+// fixture's match result by id (computeCaResultsForFixtures /
+// computeScResultsForFixtures in server.js), so re-posting the same ids
+// returns the same answer — the ~45s live poll that swaps in a new
+// `fixtures` array must not trigger another multi-MB POST.
+// Every run owns an AbortController: if the fixture set changes while a
+// request is in flight, the newer request replaces it. The previous
+// per-effect `if (loading) return` guard dropped that change instead, which
+// left results for the OLD fixture set on screen — every fixture in the new
+// set then looked unmatched, so every market rendered an empty list.
+// Returns { results, loading, error }; previous results stay available
+// while a refresh is in flight.
+function useServerMatch({ enabled, path, fixtures, toBody, fallbackError }) {
+  const [state, setState] = useState({ results: null, loading: false, error: null });
+  const idsKey = useMemo(
+    () => (fixtures || []).map(f => f?.id).filter(id => id != null).join(","),
+    [fixtures]
+  );
+  const latest = useRef({ fixtures, toBody });
+  latest.current = { fixtures, toBody };
+  useEffect(() => {
+    if (!enabled || !idsKey) {
+      setState(s => (s.loading ? { ...s, loading: false } : s));
+      return;
+    }
+    const controller = new AbortController();
+    setState(s => ({ ...s, loading: true, error: null }));
+    const { fixtures: fx, toBody: mapFn } = latest.current;
+    fetch(`${SERVER}${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fixtures: fx.map(mapFn) }),
+      signal: controller.signal,
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => null); // non-JSON body (e.g. a proxy's HTML error page) -> fall back to the status code
+        if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+        return d;
+      })
+      .then(d => {
+        if (d?.results) setState({ results: d.results, loading: false, error: null });
+        else setState(s => ({ ...s, loading: false, error: d?.error || fallbackError }));
+      })
+      .catch(e => {
+        if (e?.name === "AbortError") return; // superseded by a newer run, which owns the state now
+        setState(s => ({ ...s, loading: false, error: e?.message || fallbackError }));
+      });
+    return () => controller.abort();
+  }, [enabled, idsKey, path]); // eslint-disable-line react-hooks/exhaustive-deps
+  return state;
+}
+// CA also needs theRead/theEdge: caExtractDims (tgp-v1-live.mjs) reads
+// oddsFloor off them, and dropping them would silently zero out any CA
+// condition keyed on oddsFloor (no error, just "no matches").
+const toCaMatchBody = f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds, theRead: f.theRead, theEdge: f.theEdge });
+const toScMatchBody = f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds });
+
 // ── IMPLIED ODDS HELPERS ──────────────────────────────────────────────────
 // safeImpliedOdds, oddsOrImplied, inferMarket → engine.js
 
@@ -6468,9 +6525,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // problem the standard CA row had), lazily — only once a user actually
   // switches into this mode, since it's still awaiting broader testing and
   // there's no reason to fetch it for everyone by default.
-  const [caFamilyResults,        setCaFamilyResults]        = useState(null); // { [fixtureId]: matchCAConditions() result }
-  const [caFamilyResultsLoading, setCaFamilyResultsLoading] = useState(false);
-  const [caFamilyResultsError,   setCaFamilyResultsError]   = useState(null);
+  // caFamilyResults/-Loading/-Error come from useServerMatch, called below
+  // once caMode is declared. Shape: { [fixtureId]: matchCAConditions() result }.
   // Pattern-quality mode (2026-07-18) — mutually exclusive, one list at a
   // time (not stacked): "standard" is the pre-existing VALID-only behavior
   // (default, unchanged), "strong" swaps in isStrongCA's composite gate,
@@ -6587,75 +6643,24 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .finally(() => setCaLoadingRow(false));
   }, [caExpanded, caMarket]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    // Lazy on purpose (contrast with caResults's eager-ish fetch above) —
-    // this mode is still awaiting broader testing, so there's no reason to
-    // pull an extra payload for every user who never opens it. POST-based
-    // now (2026-09-17), mirroring scFamilyResults' effect below exactly —
-    // was GET /api/ca-patterns-families + client-side matchCAConditions,
-    // same fix as the standard CA row got.
-    if (caMode !== "families") return;
-    if (!fixtures?.length) return;
-    if (caFamilyResultsLoading) return;
-    setCaFamilyResultsLoading(true);
-    setCaFamilyResultsError(null);
-    fetch(`${SERVER}/api/ca-match-families`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({
-        id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds,
-        theRead: f.theRead, theEdge: f.theEdge, // caExtractDims' oddsFloor — see caResults effect above
-      })) }),
-    })
-      .then(r => { if (!r.ok) return r.json().then(d => { throw new Error(d?.error || `HTTP ${r.status}`); }); return r.json(); })
-      .then(d => { if (d?.results) setCaFamilyResults(d.results); else setCaFamilyResultsError(d?.error || "No family-curated data"); })
-      .catch(e => setCaFamilyResultsError(e.message))
-      .finally(() => setCaFamilyResultsLoading(false));
-  }, [caMode, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Lazy on purpose — this mode is still awaiting broader testing, so its
+  // payload is only requested once a user actually switches into it.
+  const { results: caFamilyResults, loading: caFamilyResultsLoading, error: caFamilyResultsError } = useServerMatch({
+    enabled: caMode === "families", path: "/api/ca-match-families",
+    fixtures, toBody: toCaMatchBody, fallbackError: "No family-curated data",
+  });
 
-  // Server-side CA match (2026-09-17) — CA was the last engine still doing
-  // client-side matching (fetch the whole mined payload once via
-  // caPatternsRow above, then run matchCAConditions per fixture in the
-  // browser at every consumer). Mirrors scResults/the SC effect right below
-  // this one, same fix SC already got: POST the visible fixtures, get back
-  // small pre-matched results, cached server-side per fixture id
-  // (computeCaResultsForFixtures in server.js).
-  // caPatternsRow itself is NOT removed — it's still what the family-mode
-  // diff/logging code and anything reading the raw byMarket lists directly
-  // needs. This only replaces the PER-FIXTURE MATCHING step.
-  // Request body deliberately does NOT mirror SC's fetch below verbatim:
-  // caExtractDims (tgp-v1-live.mjs) reads oddsFloor off f.theRead/f.theEdge,
-  // fixture-level fields SC's matcher never touches — dropping them here
-  // would silently zero out any CA condition keyed on oddsFloor (matches
-  // nothing, looks like "no matches" instead of erroring — exactly the
-  // failure mode caExtractDims' own comment warns about).
-  // NOT YET WIRED to any consumer — matchCAConditions(f, caPatternsRow) call
-  // sites (~2537, 7298, 7430, 7538, 7790-7807, 7870) still do their own
-  // client-side matching. Swapping those to read caResults[f.id] instead is
-  // the next step, deliberately not done in this same pass — six call sites
-  // across this file, each worth checking individually rather than blind-
-  // converted, since a couple of them use `avoid`/`positive` shaped output
-  // in ways specific to their own consumer (e.g. caSafestScore below).
-  const [caResults,        setCaResults]        = useState(null); // { [fixtureId]: matchCAConditions() result }
-  const [caResultsLoading, setCaResultsLoading]  = useState(false);
-  const [caResultsError,   setCaResultsError]    = useState(null);
-  useEffect(() => {
-    if (!caExpanded && !caMarket) return;
-    if (!fixtures?.length) return;
-    if (caResultsLoading) return;
-    setCaResultsLoading(true);
-    setCaResultsError(null);
-    fetch(`${SERVER}/api/ca-match`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({
-        id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds,
-        theRead: f.theRead, theEdge: f.theEdge, // caExtractDims' oddsFloor — see comment above
-      })) }),
-    })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then(d => { if (d?.results) setCaResults(d.results); else setCaResultsError(d?.error || "No condition data"); })
-      .catch(e => setCaResultsError(e.message))
-      .finally(() => setCaResultsLoading(false));
-  }, [caExpanded, caMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Server-side CA match (2026-09-17): the visible fixtures are POSTed and
+  // pre-matched results come back keyed by fixture id (cached server-side,
+  // see computeCaResultsForFixtures in server.js) — same shape SC already
+  // uses. Consumed by caRows, the CA verdict diagnostics and the CA badges.
+  // caPatternsRow is still fetched separately: the verdict log and other
+  // raw-payload readers need the mined byMarket lists themselves; this
+  // only replaces the per-fixture matching step.
+  const { results: caResults, loading: caResultsLoading, error: caResultsError } = useServerMatch({
+    enabled: caExpanded || !!caMarket, path: "/api/ca-match",
+    fixtures, toBody: toCaMatchBody, fallbackError: "No condition data",
+  });
 
   // ── SC ROW — mirrors CA's state shape structurally, but fetches nothing
   // upfront. CA fetches its whole mined-pattern payload once (can be several
@@ -6666,9 +6671,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // this doesn't refetch on every keystroke).
   const [scExpanded,   setScExpanded]   = useState(false);
   const [scMarket,     setScMarket]     = useState(null); // one of SC_MARKET_LABELS ids, or null = off
-  const [scResults,    setScResults]    = useState(null); // { [fixtureId]: { flags, verdicts, emergingPositive, emergingAvoid } }
-  const [scLoading,    setScLoading]    = useState(false);
-  const [scError,      setScError]      = useState(null);
+  // { [fixtureId]: { flags, verdicts, positive, avoid, emergingPositive, emergingAvoid } }
+  // Also reached when Combine mode sets scMarket directly without ever
+  // expanding this row — hence `|| !!scMarket`, not just scExpanded.
+  const { results: scResults, loading: scLoading, error: scError } = useServerMatch({
+    enabled: scExpanded || !!scMarket, path: "/api/sc-match",
+    fixtures, toBody: toScMatchBody, fallbackError: "No settlement-condition data",
+  });
   // scMode — mirrors caMode, but two-way (Standard/Emerging) not three —
   // no "Strong" tier for SC, wasn't asked for and CA's Strong gate
   // (isStrongCA/caStrongThresholds) is its own separate feature, not part of
@@ -6701,30 +6710,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       minSample: num(scStrongInputs.minSample, CA_STRONG_DEFAULTS.minSample),
     };
   }, [scStrongInputs]);
-  useEffect(() => {
-    // Root-cause fix (2026-08-29): identical gap to the CA effect above, but
-    // with no caching layer to mask it (CA's "already have it" check meant
-    // an earlier manual expand left caPatternsRow populated for later
-    // Combine-mode use; SC has no equivalent, so this was a hard zero any
-    // time scMarket got set without scExpanded ever being true). Combine
-    // mode's SC checkbox (~line 7714) calls setScMarket(...) directly,
-    // bypassing this row's own expand toggle entirely — confirmed as the
-    // live trigger behind "SC shows no verdicts despite matching many
-    // patterns." Firing on scMarket too closes the gap.
-    if (!scExpanded && !scMarket) return;
-    if (!fixtures?.length) return;
-    if (scLoading) return;
-    setScLoading(true);
-    setScError(null);
-    fetch(`${SERVER}/api/sc-match`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
-    })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then(d => { if (d?.results) setScResults(d.results); else setScError(d?.error || "No settlement-condition data"); })
-      .catch(e => setScError(e.message))
-      .finally(() => setScLoading(false));
-  }, [scExpanded, scMarket, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // SC family-curated (2026-09-14) — separate state, separate POST, same
   // lazy-only-when-selected discipline as CA's caFamilyResults. Kept
@@ -6732,24 +6717,10 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // apart from caResults: this is a different file, not another filter
   // over the standard one, so it needs its own round-trip, not a client-side
   // re-filter of what scResults already holds.
-  const [scFamilyResults, setScFamilyResults] = useState(null); // { [fixtureId]: { positive, avoid } }
-  const [scFamilyLoading, setScFamilyLoading] = useState(false);
-  const [scFamilyError,   setScFamilyError]   = useState(null);
-  useEffect(() => {
-    if (scMode !== "families") return;
-    if (!fixtures?.length) return;
-    if (scFamilyLoading) return;
-    setScFamilyLoading(true);
-    setScFamilyError(null);
-    fetch(`${SERVER}/api/sc-match-families`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixtures: fixtures.map(f => ({ id: f.id, markets: f.markets, tablePosition: f.tablePosition, odds: f.odds })) }),
-    })
-      .then(r => { if (!r.ok) return r.json().then(d => { throw new Error(d?.error || `HTTP ${r.status}`); }); return r.json(); })
-      .then(d => { if (d?.results) setScFamilyResults(d.results); else setScFamilyError(d?.error || "No family-curated SC data"); })
-      .catch(e => setScFamilyError(e.message))
-      .finally(() => setScFamilyLoading(false));
-  }, [scMode, fixtures]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { results: scFamilyResults, loading: scFamilyLoading, error: scFamilyError } = useServerMatch({
+    enabled: scMode === "families", path: "/api/sc-match-families",
+    fixtures, toBody: toScMatchBody, fallbackError: "No family-curated SC data",
+  });
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -7356,7 +7327,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       // caPatternsRow), recomputed client-side on every one of this memo's
       // many dependencies (search keystrokes included). caResults[f.id] is
       // the same shape, pre-matched server-side, cached per fixture id.
-      const { positive, avoid, emergingPositive, emergingAvoid, contradictoryMarkets = [] } = caResults[f.id] || {};
+      const { positive = [], avoid = [], emergingPositive = [], emergingAvoid = [], contradictoryMarkets = [] } = caResults[f.id] || {};
 
       // ── CA:Verdict (2026-08-02) — isolated early branch, doesn't touch
       // the Mix/Standard/Strong/Emerging floor-gate machinery below at all.
@@ -8543,8 +8514,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 {caMarket === "CA:Verdict" ? "Verdict" : caMarket.replace(/^TB:/,"")}
               </span>
             )}
-            {caLoadingRow && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
-            {caErrorRow && <span style={{ fontSize:8,color:C.red }}>{caErrorRow}</span>}
+            {(caLoadingRow || caResultsLoading) && <span style={{ fontSize:8,color:C.muted }}>loading…</span>}
+            {(caErrorRow || caResultsError) && <span style={{ fontSize:8,color:C.red }}>{caErrorRow || caResultsError}</span>}
           </div>
           <span style={{ fontSize:10,color:C.muted,lineHeight:1 }}>{caExpanded ? "▲" : "▼"}</span>
         </button>
@@ -15995,7 +15966,12 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
     return next;
   });
 
+  // Generation race guard — bumped on every generate click AND whenever the
+  // date/source changes (effect below), so a slow response for a previous
+  // date/source can never land on top of the current selection.
+  const autoRequestRef = useRef(0);
   const generateTickets = () => {
+    const autoRequestId = ++autoRequestRef.current;
     setAutoLoading(true); setAutoError(null); setPtSelected(new Set());
     const qs = new URLSearchParams({ date: date || todayStr(), source });
     // Item #9 — a league filter never touches the saved/locked daily
@@ -16011,9 +15987,17 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
     }
     fetch(`${SERVER}/api/pool-builder/tickets?${qs.toString()}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
-      .then(d => { setAutoTickets((d.tickets || []).map((t, i) => ({ ...t, _ptid: i }))); setAutoLoading(false); })
-      .catch(err => { setAutoError(err.message || "Failed to generate tickets"); setAutoTickets(null); setAutoLoading(false); });
+      .then(d => { if (autoRequestRef.current !== autoRequestId) return; setAutoTickets((d.tickets || []).map((t, i) => ({ ...t, _ptid: i }))); setAutoLoading(false); })
+      .catch(err => { if (autoRequestRef.current !== autoRequestId) return; setAutoError(err.message || "Failed to generate tickets"); setAutoTickets(null); setAutoLoading(false); });
   };
+  // Generated tickets belong to one date + source. Switching either (e.g.
+  // Full Pool -> Curated Pool) clears the batch instead of leaving tickets
+  // built from the other pool on screen under the new selection.
+  useEffect(() => {
+    autoRequestRef.current++;
+    setAutoTickets(null); setAutoError(null); setAutoLoading(false);
+    setPtSelected(new Set()); setAutoTierFilter(null);
+  }, [date, source]);
   // Item #9 — force-refresh trigger: if a ticket batch is already showing
   // and the league filter changes, regenerate against the new filter
   // automatically rather than leaving a stale (or now-too-broad) batch on
@@ -16344,40 +16328,24 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
     setView("parlay"); scrollPanelToTop();
   };
 
-  // Source lock — real server behavior, not a display bug: the route
-  // saves+locks the first request's `source` for a given date and serves
-  // that same saved record on every later request for that date regardless
-  // of what a later request's `source` param says (see server.js's
-  // fusionLadderTicketsPath / saveFusionLadderTickets comments). Once a
-  // record comes back, its own .source is the actual locked choice — sync
-  // the toggle to that and disable it, rather than let the toggle imply a
-  // later click would still do something.
-  const lockedSource = data?.source;
-  const sourceIsLocked = !!lockedSource;
-
+  // The server keeps one saved record per date AND source
+  // (fusionLadderTicketsPath), so either source can be requested at any
+  // time. requestIdRef above makes rapid switching safe: only the newest
+  // request's response is applied.
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display:"flex",gap:6,marginBottom:8,
                     background:C.bg,borderRadius:10,padding:3,border:`1px solid ${C.border}` }}>
-        {POOL_BUILDER_SOURCE_OPTIONS.map(o => {
-          const isOn = (lockedSource || source) === o.id;
-          return (
-            <button key={o.id} disabled={sourceIsLocked} onClick={() => setSource(o.id)} title={o.desc}
-              style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
-                       background:isOn?C.accent:"transparent",
-                       color:isOn?C.accentText:C.muted,
-                       fontSize:9,fontWeight:800,cursor:sourceIsLocked?"default":"pointer",fontFamily:C.font,
-                       opacity:sourceIsLocked && !isOn ? 0.5 : 1 }}>
-              {o.label}
-            </button>
-          );
-        })}
+        {POOL_BUILDER_SOURCE_OPTIONS.map(o => (
+          <button key={o.id} onClick={() => setSource(o.id)} title={o.desc}
+            style={{ flex:1,padding:"7px 4px",borderRadius:8,border:"none",
+                     background:source===o.id?C.accent:"transparent",
+                     color:source===o.id?C.accentText:C.muted,
+                     fontSize:9,fontWeight:800,cursor:"pointer",fontFamily:C.font }}>
+            {o.label}
+          </button>
+        ))}
       </div>
-      {sourceIsLocked && (
-        <div style={{ fontSize:8,color:C.muted,marginBottom:10,lineHeight:1.5 }}>
-          Source is set to {POOL_BUILDER_SOURCE_OPTIONS.find(o=>o.id===lockedSource)?.label || lockedSource} for {date || todayStr()} — the first load of the day locks it in.
-        </div>
-      )}
 
       {/* League filter (item #9) — own instance, since this tab doesn't
           share the Manual/TGP/Pool Builder block. Filtering here always
