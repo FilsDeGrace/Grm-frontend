@@ -10,6 +10,9 @@ import {
   SA_MARKETS, SC_MARKET_ODDS_FIELD,
   caOddsFor, matchCAConditions, matchSAPatterns,
   tgpShapeSignature,
+  // 2026-09-20 (Top Patterns overlay): pattern identity keys, same helpers
+  // the TGP index already keys CA/SC combos and SA patterns with.
+  tgpComboKey, tgpSaKey,
 } from "./tgp-v1-live.mjs";
 // 2026-08-25 extraction: this whole block used to be defined inline here.
 // Moved to tgp-v1-live.mjs so server.js can import the exact same matching
@@ -1734,6 +1737,120 @@ function scoreSignal(sig, isAvoid, modelProb) {
   const edge = reliability - favBaseline;
   const agreement = signalModelAgreement(modelProb, baseline, isAvoid);
   return { reliability, edge, agreement, score: edge + agreement * SIGNAL_MODEL_AGREEMENT_WEIGHT };
+}
+
+// ── TOP PATTERNS selector (2026-09-20 — Custom List "Top patterns" overlay) ──
+// TEMPORARY shared selector for the overlay: given one engine's VALID positive
+// patterns for ONE market, returns the strongest few that are genuinely
+// different from each other. Same near-duplicate fix curate-ca-families.mjs /
+// curate-sc-families.mjs apply offline (group by "family" = same fields+ops,
+// ignoring cutpoint values; keep the best per family; suppress overlapping
+// picks), rebuilt here as a cheap runtime version so it runs identically for
+// SA, CA and SC instead of depending on those scripts' output files.
+//   Differences from the curation scripts, on purpose:
+//   - ONE pattern per family (curation allows up to 3 when their matched legs
+//     overlap < 0.7). Overlap by matched legs needs the historical leg pool,
+//     which only exists offline, so the runtime version is stricter instead.
+//   - Cross-family overlap is caught only when one pattern's conditions are
+//     exactly contained in another's (same field+op+value tokens — exact for
+//     SA's categorical equality, and for CA/SC because the miners draw
+//     cutpoints from one fixed grid per dimension). Two DIFFERENT fields that
+//     encode the same signal (curation's Stage 2 case) are NOT caught here.
+//   - Ranked by the app's own scoreSignal edge (Wilson lower bound on a
+//     gap-shrunk n, minus the market's baseline — holdout HR, gap, n and
+//     lift/baseline all inside one number, same as Evidence Consensus), so
+//     this list and Consensus can't disagree about which pattern is stronger.
+//     No edge > 0 gate on top (curation's --min-score): CA's recalibrated
+//     rates can leave a genuinely validated pattern at <= 0 edge, and a hard
+//     gate would silently empty the list instead of showing the numbers.
+//     Floors are just n >= TOP_PATTERNS_MIN_N and holdout HR above baseline.
+// Swap point: when curated-family files are wired into the overlay, replace
+// selectTopPatterns' body; callers only depend on its return shape.
+const TOP_PATTERNS_N = 4;
+const TOP_PATTERNS_MIN_N = 20; // curate-*-families.mjs --min-live-n default
+
+function topPatternKey(engine, p) {
+  return `${engine}::${p.market}::${engine === "sa" ? tgpSaKey(p) : tgpComboKey(p)}`;
+}
+function topPatternTokens(engine, p) {
+  return engine === "sa"
+    ? Object.entries(p.conditions || {}).map(([k, v]) => `${k}=${v}`)
+    : (p.conditions || []).map(c => `${c.field}${c.op}${c.value}`);
+}
+function topPatternFamily(engine, p) {
+  const fields = engine === "sa"
+    ? Object.keys(p.conditions || {})
+    : (p.conditions || []).map(c => `${c.field}${c.op}`);
+  return `${p.market}::${fields.sort().join("|")}`;
+}
+// True when one token set fully contains the other (either direction).
+function topPatternTokensNest(a, b) {
+  const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+  for (const t of small) if (!big.has(t)) return false;
+  return true;
+}
+// Raw (unrecalibrated) numbers for gating and display. Field names as in
+// normalizeSignal: SA trainHR/testHR/baseHR/lift/testN; CA+SC trainHitRate/
+// holdoutHitRate/holdoutBaselineHR/holdoutLift/holdoutSample.
+function topPatternRaw(engine, p) {
+  return engine === "sa"
+    ? { hr: p.testHR ?? null, train: p.trainHR ?? null, base: p.baseHR ?? null, lift: p.lift ?? null, n: p.testN ?? null }
+    : { hr: p.holdoutHitRate ?? null, train: p.trainHitRate ?? null, base: p.holdoutBaselineHR ?? null, lift: p.holdoutLift ?? null, n: p.holdoutSample ?? null };
+}
+function topPatternLabel(engine, p) {
+  return engine === "sa"
+    ? Object.entries(p.conditions || {}).map(([k, v]) => `${k}: ${v}`).join(" · ")
+    : (p.conditions || []).map(c => `${c.field} ${c.op === ">=" ? "≥" : "<"} ${c.value}`).join(" · ");
+}
+function topPatternStats(r) {
+  const parts = [];
+  if (r.hr != null) parts.push(`${r.hr}% hit rate`);
+  if (r.n != null) parts.push(`${r.n} games`);
+  if (r.lift != null) parts.push(`${r.lift > 0 ? "+" : ""}${r.lift}pp over baseline`);
+  if (r.train != null) parts.push(`train ${r.train}%`);
+  return parts.join(" · ");
+}
+function selectTopPatterns(engine, patterns, n = TOP_PATTERNS_N) {
+  const scored = [];
+  for (const p of Array.isArray(patterns) ? patterns : []) {
+    if (!p) continue;
+    const tokens = new Set(topPatternTokens(engine, p));
+    if (tokens.size === 0) continue; // no conditions = no identity, can't be matched or deduped
+    const raw = topPatternRaw(engine, p);
+    if ((raw.n ?? 0) < TOP_PATTERNS_MIN_N) continue;
+    if (raw.hr == null || (raw.base != null && raw.hr <= raw.base)) continue;
+    const sc = scoreSignal(normalizeSignal(engine, p, false), false, null);
+    if (!sc) continue;
+    scored.push({
+      engine, p, key: topPatternKey(engine, p), score: sc.edge, tokens,
+      family: topPatternFamily(engine, p), label: topPatternLabel(engine, p), stats: topPatternStats(raw),
+    });
+  }
+  // Deterministic: score desc, then key — same input always yields the same four.
+  scored.sort((a, b) => (b.score - a.score) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const picked = [], seenFamilies = new Set();
+  for (const c of scored) {
+    if (picked.length >= n) break;
+    if (seenFamilies.has(c.family)) continue;
+    if (picked.some(q => topPatternTokensNest(q.tokens, c.tokens))) continue;
+    seenFamilies.add(c.family);
+    picked.push(c);
+  }
+  return picked;
+}
+// Pure qualification step for one fixture. `entry` is { [engine]: [{key,p}] }
+// (matched patterns already narrowed to the top candidates); `tickedSets` is
+// { [engine]: Set<key> }. A fixture qualifies when EVERY active engine has at
+// least `minHits` ticked patterns matching it (single engine = just that one).
+function evaluateTopPatternHits(entry, engines, tickedSets, minHits) {
+  const perEngine = [];
+  for (const e of engines) {
+    const ticked = tickedSets[e] || new Set();
+    const matched = (entry?.[e] || []).filter(h => ticked.has(h.key));
+    if (matched.length < minHits) return null;
+    perEngine.push({ engine: e, hits: matched.length, of: ticked.size, matched });
+  }
+  return perEngine;
 }
 
 // ── EVIDENCE CONSENSUS (2026-08-20) ─────────────────────────────────────────
@@ -6473,7 +6590,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     }
   }, [adminMode]);
   useEffect(() => {
-    if (!saExpanded) return;
+    // 2026-09-20: also fetch when saMarket is set without the SA panel ever
+    // being expanded — Combine mode sets saMarket directly (same gap CA's and
+    // SC's fetches already close via caMarket/scMarket), and the Top patterns
+    // overlay needs the pattern list for that market. Without it a combined
+    // SA row ran with no patterns loaded.
+    if (!saExpanded && !saMarket) return;
     if (saLoading) return;
     const isRestricted = saPatterns?.restricted === true;
     // Already have real patterns — nothing to do
@@ -6508,7 +6630,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       .finally(() => setSaLoading(false));
   // adminMode and adminToken are the key triggers — when admin unlocks, rerun
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [saExpanded, adminMode, adminToken]);
+  }, [saExpanded, saMarket, adminMode, adminToken]);
 
   // ── CA ROW — mirrors SA's state shape above.
   const [caExpanded,     setCaExpanded]     = useState(false);
@@ -6721,6 +6843,21 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     enabled: scMode === "families", path: "/api/sc-match-families",
     fixtures, toBody: toScMatchBody, fallbackError: "No family-curated SC data",
   });
+
+  // ── TOP PATTERNS overlay state (2026-09-20) ─────────────────────────────────
+  // Off by default. When on, the list is rebuilt from each active engine's top
+  // patterns for the selected market (see selectTopPatterns) instead of the
+  // engine rows' own mode logic. tpUnticked holds keys the user switched OFF —
+  // everything else defaults to ticked, and keys are engine+market+conditions
+  // so a stale entry from another market/file can never affect this one.
+  const [tpOn,        setTpOn]        = useState(false);
+  const [tpMinHits,   setTpMinHits]   = useState(1);
+  const [tpUnticked,  setTpUnticked]  = useState(() => new Set());
+  // SC's pattern list for the selected market — the only engine whose mined
+  // patterns aren't already on the client (SA/CA load theirs for their rows).
+  const [tpScList,    setTpScList]    = useState(null); // { market, source, patterns }
+  const [tpScError,   setTpScError]   = useState(null); // { market, message }
+  const [tpScRetry,   setTpScRetry]   = useState(0);
 
   const setFamily         = v => { setFamilyState(v);         saveSS({ family: v }); };
   const setStatFilters    = fn => { setStatFiltersState(prev => { const next = typeof fn === "function" ? fn(prev) : fn; saveSS({ statFilters: next }); return next; }); };
@@ -7978,7 +8115,196 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
   const activeCombineEngines = ["sa", "ca", "sc"].filter(e => combineEngines.has(e) && (e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket));
   const bothCombined = combineMode && activeCombineEngines.length >= 2;
-  const displayRows = bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : (scMarket ? scRows : rows)));
+  // ── TOP PATTERNS overlay (2026-09-20) ─────────────────────────────────────
+  // Which engines the overlay applies to — mirrors displayRows' own
+  // precedence exactly (Combine when 2+ engines have a market, else SA, then
+  // CA, then SC), and only for a REAL market: CA:Verdict / SC:Verdict have no
+  // single pattern set to rank, so the overlay simply stays inactive there.
+  const tpMarketOf = e => e === "sa" ? saMarket : e === "ca" ? caMarket : scMarket;
+  const tpEngines = useMemo(() => {
+    if (!tpOn) return [];
+    const isReal = e => familyOfMarket(e, tpMarketOf(e)) != null;
+    if (bothCombined) return activeCombineEngines.every(isReal) ? activeCombineEngines : [];
+    const first = saMarket ? "sa" : caMarket ? "ca" : scMarket ? "sc" : null;
+    return first && isReal(first) ? [first] : [];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tpOn, bothCombined, combineEngines, saMarket, caMarket, scMarket]);
+  const tpActive = tpEngines.length > 0;
+
+  // SC's pattern list for the selected market. Refetched per market; a request
+  // that's been superseded (market changed / overlay turned off) is ignored.
+  const tpScActive = tpEngines.includes("sc");
+  useEffect(() => {
+    if (!tpScActive || !scMarket) return;
+    if (tpScList?.market === scMarket) return; // already have this market's list
+    let cancelled = false;
+    fetch(`${SERVER}/api/sc-market-patterns?market=${encodeURIComponent(scMarket)}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => {
+        if (cancelled) return;
+        setTpScError(null);
+        setTpScList({ market: scMarket, source: d?.source ?? null, patterns: Array.isArray(d?.patterns) ? d.patterns : [] });
+      })
+      .catch(e => { if (!cancelled) setTpScError({ market: scMarket, message: e?.message || "Request failed" }); });
+    return () => { cancelled = true; };
+  // tpScList intentionally not a dep — it's only read to skip a redundant fetch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tpScActive, scMarket, tpScRetry]);
+  const tpScLoading = tpScActive && !!scMarket && tpScList?.market !== scMarket && tpScError?.market !== scMarket;
+  const tpScFailed  = tpScActive && !!scMarket && tpScList?.market !== scMarket && tpScError?.market === scMarket;
+
+  // Top candidates per active engine (up to TOP_PATTERNS_N each).
+  const tpCandidates = useMemo(() => {
+    const out = { sa: [], ca: [], sc: [] };
+    if (tpEngines.includes("sa")) out.sa = selectTopPatterns("sa", (saPatterns?.patterns || []).filter(p => p.market === saMarket && p.direction === "positive"));
+    if (tpEngines.includes("ca")) out.ca = selectTopPatterns("ca", caPatternsRow?.byMarket?.[caMarket]);
+    if (tpEngines.includes("sc") && tpScList?.market === scMarket) out.sc = selectTopPatterns("sc", tpScList.patterns);
+    return out;
+  }, [tpEngines, saPatterns, saMarket, caPatternsRow, caMarket, tpScList, scMarket]);
+  const tpTickedSets = useMemo(() => {
+    const out = {};
+    for (const e of tpEngines) out[e] = new Set(tpCandidates[e].filter(c => !tpUnticked.has(c.key)).map(c => c.key));
+    return out;
+  }, [tpEngines, tpCandidates, tpUnticked]);
+  // Effective "at least n": the user's pick, capped by the smallest ticked set
+  // among the active engines so it can never demand more hits than exist.
+  const tpMinTicked = tpEngines.length ? Math.min(...tpEngines.map(e => tpTickedSets[e]?.size || 0)) : 0;
+  const tpEffMinHits = Math.max(1, Math.min(tpMinHits, tpMinTicked || 1));
+
+  // Which of each engine's top candidates every fixture matches. Built once
+  // per data change and shared by the per-pattern counts and the row builder.
+  const tpMatchIndex = useMemo(() => {
+    if (!tpActive) return null;
+    const candKeys = {};
+    for (const e of tpEngines) candKeys[e] = new Set(tpCandidates[e].map(c => c.key));
+    const idx = new Map();
+    for (const f of fixtures) {
+      const entry = {};
+      for (const e of tpEngines) {
+        let matched;
+        if (e === "sa") matched = saPatterns?.patterns?.length ? matchSAPatterns(f, saMarket, saPatterns.patterns).positive : [];
+        else if (e === "ca") matched = (caResults?.[f.id]?.positive || []).filter(c => c.market === caMarket);
+        else matched = (scResults?.[f.id]?.positive || []).filter(c => c.market === scMarket);
+        const hits = [];
+        for (const p of matched) {
+          const key = topPatternKey(e, p);
+          if (candKeys[e].has(key)) hits.push({ key, p });
+        }
+        entry[e] = hits;
+      }
+      idx.set(f.id, entry);
+    }
+    return idx;
+  }, [tpActive, tpEngines, tpCandidates, fixtures, saMarket, caMarket, scMarket, saPatterns, caResults, scResults]);
+  const tpPatternCounts = useMemo(() => {
+    const counts = {};
+    if (tpMatchIndex) for (const entry of tpMatchIndex.values()) for (const e of Object.keys(entry)) for (const h of entry[e]) counts[h.key] = (counts[h.key] || 0) + 1;
+    return counts;
+  }, [tpMatchIndex]);
+
+  // The overlay's own row list. Deliberately NOT built off saRows/caRows/
+  // scRows: those apply each engine's mode gates (mixEligible, the CA
+  // holdout-HR floor, same-market contradiction removal, Strong/Emerging/
+  // Families, direction), so a fixture matching a top pattern could be
+  // silently dropped before this ever saw it. Tail filters (search, live/
+  // scheduled, stat filters, kickoff, prob, excluded markets, quality sorts)
+  // are duplicated from caRows/scRows on purpose — same trade-off those
+  // branches already document.
+  const topRows = useMemo(() => {
+    if (!tpActive || !tpMatchIndex) return [];
+    const fam = familyOfMarket(tpEngines[0], tpMarketOf(tpEngines[0]));
+    if (fam == null || !tpEngines.every(e => familyOfMarket(e, tpMarketOf(e)) === fam)) return [];
+    if (tpEngines.some(e => (tpTickedSets[e]?.size || 0) === 0)) return [];
+    const s = search.toLowerCase();
+    const hasLiveFilter      = statFilters.includes("live");
+    const hasScheduledFilter = statFilters.includes("scheduled");
+    const bothOrNeither      = isPastDate || (hasLiveFilter && hasScheduledFilter) || (!hasLiveFilter && !hasScheduledFilter);
+    const liveStates = new Set(["inprogress","live","1h","1sthalf","ht","halftime","2h","2ndhalf","et","extratime","penaltyshootout"]);
+    const isScheduledState = st => st===""||st==="notstarted"||st==="scheduled"||st==="prematch";
+    const scoreByKey = {};
+    for (const e of tpEngines) for (const c of tpCandidates[e]) scoreByKey[c.key] = c.score;
+    const m0 = tpMarketOf(tpEngines[0]);
+    const marketLabel = tpEngines[0] === "sc" ? (SC_MARKET_LABELS.find(m => m.id === m0)?.label || m0) : m0.replace(/^TB:/, "");
+
+    const out = [];
+    for (const f of fixtures) {
+      if (s && !f.teams.home.toLowerCase().includes(s) && !f.teams.away.toLowerCase().includes(s) && !f.league.toLowerCase().includes(s)) continue;
+      if (!bothOrNeither) {
+        const st = (f.state||"").toLowerCase();
+        if (hasLiveFilter && !liveStates.has(st)) continue;
+        if (hasScheduledFilter && !isScheduledState(st)) continue;
+      }
+      if (statFilters.some(id => {
+        if (["live","scheduled"].includes(id)) return false;
+        const sf = STAT_FILTERS.find(x => x.id === id);
+        return sf ? !sf.fn(f) : false;
+      })) continue;
+
+      const perEngine = evaluateTopPatternHits(tpMatchIndex.get(f.id), tpEngines, tpTickedSets, tpEffMinHits);
+      if (!perEngine) continue;
+
+      const primaryPick = getCustomPick(f, fam, C);
+      const pick = primaryPick
+        ? { ...primaryPick, color: C.green }
+        : { label: marketLabel, prob: 0, odds: null, color: C.green };
+      if (excludedMarkets.size > 0 && excludedMarkets.has(getExcludeSelectionId(pick, f))) continue;
+      if (probFilter && pick.prob != null) {
+        if (probFilter.mode === "above" && pick.prob < probFilter.value) continue;
+        if (probFilter.mode === "below" && pick.prob > probFilter.value) continue;
+      }
+      if (kickoffFilter && f.time) {
+        const [hh, mm] = f.time.split(":").map(Number);
+        const mins = hh * 60 + (mm || 0);
+        const crossesDay = getFixtureLocalDate(f) !== f.date;
+        if (kickoffFilter.before != null && (crossesDay || mins > kickoffFilter.before * 60)) continue;
+        if (kickoffFilter.after  != null && (crossesDay || mins < kickoffFilter.after  * 60)) continue;
+      }
+      if (sortActive.has("strong_only") && !(f.theRead?.anchor?.strong === true && !f.markets?._lowConfidence)) continue;
+      if (sortActive.has("hq_data")    && !((f.markets?._calibrationWeight ?? 0) >= 50))   continue;
+      if (sortActive.has("ltd_data")   && !((f.markets?._calibrationWeight ?? 100) < 25))  continue;
+
+      // Row shape matches the engine rows' so the existing badges render
+      // unchanged: matched patterns best-first, never flagged (positive only).
+      const row = { f, pick, _tpHits: perEngine.map(({ engine, hits, of }) => ({ engine, hits, of })), _tpScore: 0 };
+      for (const pe of perEngine) {
+        const bestFirst = [...pe.matched].sort((a, b) => (scoreByKey[b.key] ?? -Infinity) - (scoreByKey[a.key] ?? -Infinity));
+        for (const h of bestFirst) row._tpScore += scoreByKey[h.key] ?? 0;
+        const ps = bestFirst.map(h => h.p);
+        if (pe.engine === "sa") { row._saPositive = ps; row._saAvoid = []; row._saFlagged = false; }
+        else if (pe.engine === "ca") { row._caPositive = ps; row._caAvoid = []; row._caFlagged = false; }
+        else {
+          const best = ps[0];
+          row._scFlag = {
+            status: "favorable", holdoutHitRate: best.holdoutHitRate, holdoutLift: best.holdoutLift, holdoutBaselineHR: best.holdoutBaselineHR,
+            reason: `Matches ${pe.hits} of ${pe.of} selected top SC patterns — best holdout ${best.holdoutHitRate}% vs ${best.holdoutBaselineHR}% baseline.`,
+          };
+          row._scFlagged = false;
+        }
+      }
+      out.push(row);
+    }
+    const totalHits = r => r._tpHits.reduce((n, h) => n + h.hits, 0);
+    out.sort((a, b) => {
+      if (bothOrNeither) {
+        const aLive = liveStates.has((a.f.state||"").toLowerCase()) ? 0 : 1;
+        const bLive = liveStates.has((b.f.state||"").toLowerCase()) ? 0 : 1;
+        if (aLive !== bLive) return aLive - bLive;
+      }
+      if (totalHits(a) !== totalHits(b)) return totalHits(b) - totalHits(a);
+      return b._tpScore - a._tpScore;
+    });
+    if (sortActive.has("strong_first")) {
+      out.sort((a, b) => {
+        const aS = a.f.theRead?.anchor?.strong === true && !a.f.markets?._lowConfidence ? 0 : 1;
+        const bS = b.f.theRead?.anchor?.strong === true && !b.f.markets?._lowConfidence ? 0 : 1;
+        return aS - bS;
+      });
+    }
+    return out;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tpActive, tpMatchIndex, tpEngines, tpTickedSets, tpEffMinHits, tpCandidates, fixtures, saMarket, caMarket, scMarket, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
+
+  const displayRows = tpActive ? topRows : bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : (scMarket ? scRows : rows)));
 
   const saveListToJSON = () => {
     const payload = {
@@ -8295,6 +8621,112 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         {combineMode && (
           <div style={{ fontSize:8,color:C.text,opacity:.6,lineHeight:1.4 }}>
             One market, all checked engines must match — Mix hidden while combined.
+          </div>
+        )}
+      </div>
+
+      {/* ── TOP PATTERNS (2026-09-20) — for the market picked in SA / CA / SC
+           (or the shared market while Combine is on), shows each engine's top
+           patterns and lists only games matching at least n of the ticked
+           ones. With Combine on, every combined engine must reach n. ── */}
+      <div style={{ marginBottom:10 }}>
+        <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+          <span style={{ fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:".08em",fontWeight:700 }}>Top patterns:</span>
+          <button onClick={() => setTpOn(v => !v)} className="gb"
+            title="Show only games that match the strongest proven patterns for the selected market"
+            style={{ padding:"6px 12px",fontSize:10,textTransform:"none",
+                     background:tpOn ? C.gold : "transparent",
+                     color:tpOn ? C.accentText : C.muted,
+                     border:`1px solid ${tpOn ? C.gold : C.faint}`,
+                     fontWeight:tpOn ? 800 : undefined }}>
+            {tpOn ? "✓ On" : "Off"}
+          </button>
+          {tpOn && !tpActive && (
+            <div style={{ fontSize:8,color:C.text,opacity:.6,lineHeight:1.4 }}>
+              Choose a market in SA, CA or SC to see its top patterns.
+            </div>
+          )}
+        </div>
+        {tpActive && (
+          <div style={{ marginTop:8,display:"flex",flexDirection:"column",gap:8 }}>
+            {tpEngines.map(e => {
+              const meta = e === "sa" ? { label:"SA", color:C.red } : e === "ca" ? { label:"CA", color:C.amber } : { label:"SC", color:C.purple };
+              const cands = tpCandidates[e];
+              const mkt = tpMarketOf(e);
+              const mktLabel = e === "sc" ? (SC_MARKET_LABELS.find(m => m.id === mkt)?.label || mkt) : (mkt || "").replace(/^TB:/, "");
+              let notice = null; // non-null = show this instead of the pattern list
+              if (e === "sa") {
+                if (saPatterns?.restricted) notice = "SA patterns aren't available on this account.";
+                else if (!saPatterns) notice = saError ? "Couldn't load SA patterns." : "Loading patterns…";
+              } else if (e === "ca") {
+                if (!caPatternsRow) notice = caErrorRow ? "Couldn't load CA patterns." : "Loading patterns…";
+              } else if (tpScFailed) notice = "Couldn't load SC patterns.";
+              else if (tpScLoading) notice = "Loading patterns…";
+              if (!notice && cands.length === 0) notice = "No proven patterns for this market yet.";
+              const haveMatches = e === "ca" ? !!caResults : e === "sc" ? !!scResults : !!saPatterns?.patterns?.length;
+              return (
+                <div key={e} style={{ border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 8px",background:C.surface }}>
+                  <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:notice ? 0 : 4 }}>
+                    <span style={{ fontSize:9,fontWeight:800,color:meta.color }}>{meta.label} · {mktLabel}</span>
+                    {!notice && cands.length < TOP_PATTERNS_N && (
+                      <span style={{ fontSize:8,color:C.text,opacity:.6 }}>only {cands.length} distinct proven pattern{cands.length === 1 ? "" : "s"}</span>
+                    )}
+                    {notice && <span style={{ fontSize:8,color:C.text,opacity:.6 }}>{notice}</span>}
+                    {e === "sc" && tpScFailed && (
+                      <button className="gb" onClick={() => { setTpScError(null); setTpScRetry(n => n + 1); }}
+                        style={{ padding:"3px 8px",fontSize:8,textTransform:"none",background:"transparent",color:C.muted,border:`1px solid ${C.faint}` }}>
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                  {!notice && cands.map(c => {
+                    const on = tpTickedSets[e]?.has(c.key);
+                    const n = tpPatternCounts[c.key] || 0;
+                    return (
+                      <button key={c.key} role="checkbox" aria-checked={!!on}
+                        onClick={() => setTpUnticked(prev => { const next = new Set(prev); next.has(c.key) ? next.delete(c.key) : next.add(c.key); return next; })}
+                        className="gb"
+                        style={{ display:"flex",alignItems:"flex-start",gap:8,width:"100%",textAlign:"left",textTransform:"none",
+                                 background:"transparent",border:"none",padding:"6px 2px",minHeight:34,cursor:"pointer" }}>
+                        <span style={{ width:14,height:14,marginTop:1,flexShrink:0,borderRadius:4,
+                                       border:`1.5px solid ${on ? meta.color : C.faint}`,background:on ? meta.color : "transparent",
+                                       color:"#fff",fontSize:9,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center" }}>
+                          {on ? "✓" : ""}
+                        </span>
+                        <span style={{ minWidth:0 }}>
+                          <span style={{ display:"block",fontSize:9,fontWeight:700,color:C.text,wordBreak:"break-word",opacity:on ? 1 : .5 }}>{c.label}</span>
+                          <span style={{ display:"block",fontSize:8,color:C.muted }}>
+                            {c.stats}{haveMatches ? ` · ${n} on this day` : ""}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+              <span style={{ fontSize:9,color:C.text }}>Match at least</span>
+              {Array.from({ length: TOP_PATTERNS_N }, (_, i) => i + 1).map(k => {
+                const disabled = k > Math.max(1, tpMinTicked);
+                const on = k === tpEffMinHits;
+                return (
+                  <button key={k} disabled={disabled} onClick={() => setTpMinHits(k)} className="gb"
+                    style={{ minWidth:34,padding:"6px 10px",fontSize:10,textTransform:"none",
+                             opacity:disabled ? .35 : 1,cursor:disabled ? "not-allowed" : "pointer",
+                             background:on ? C.gold : "transparent",color:on ? C.accentText : C.muted,
+                             border:`1px solid ${on ? C.gold : C.faint}`,fontWeight:on ? 800 : undefined }}>
+                    {k}
+                  </button>
+                );
+              })}
+              <span style={{ fontSize:9,color:C.text }}>of the ticked patterns{tpEngines.length > 1 ? " in every engine" : ""}</span>
+            </div>
+            {tpEngines.some(e => tpCandidates[e].length > 0 && (tpTickedSets[e]?.size || 0) === 0) && (
+              <div style={{ fontSize:8,color:C.amber,lineHeight:1.4 }}>
+                Tick at least one pattern for {tpEngines.filter(e => tpCandidates[e].length > 0 && (tpTickedSets[e]?.size || 0) === 0).map(e => e.toUpperCase()).join(" and ")} to see games.
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -9318,6 +9750,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             // all) left saMarket null while bothCombined was still true —
             // "Cannot read properties of null (reading 'replace')". Built
             // from whichever engines are actually active instead.
+            // Top patterns overlay (2026-09-20): rows come from topRows, so say so.
+            if (tpActive) return ` (Top patterns · ${tpEngines.map(e => e.toUpperCase()).join(" + ")} · at least ${tpEffMinHits})`;
             if (bothCombined) {
               const engineLabel = e => e === "sa" ? "SA" : e === "ca" ? "CA" : "SC";
               const marketLabel = e => {
@@ -9453,7 +9887,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
 
       {/* Rows */}
       <div style={{ display:"flex",flexDirection:"column",gap:2,paddingBottom:selectedIds.size > 0 ? 60 : 0 }}>
-        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged, _scFlag, _scFlagged }) => {
+        {displayRows.map(({ f, pick, _usedFallback, _excludedMarket, _saPositive, _saAvoid, _saFlagged, _caPositive, _caAvoid, _caFlagged, _scFlag, _scFlagged, _tpHits }) => {
           const probColor = pick.prob >= 75 ? C.green : pick.prob >= 60 ? C.gold : C.muted;
           const isSelected = selectedIds.has(f.id);
           const isFT = isFixtureFT(f);
@@ -9548,6 +9982,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       ✓ SC {_scFlag.holdoutHitRate}%
                     </span>
                   )}
+                  {_tpHits?.length > 0 && (
+                    <span title={_tpHits.map(h => `${h.engine.toUpperCase()}: ${h.hits} of ${h.of} selected top patterns`).join(" · ")}
+                      style={{ marginLeft:5,fontSize:7,color:C.gold,background:`${C.gold}15`,
+                               border:`1px solid ${C.gold}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      {_tpHits.map(h => `${h.engine.toUpperCase()} ${h.hits}/${h.of}`).join(" · ")}
+                    </span>
+                  )}
                 </div>
                 {/* CA:Scan/SC:Scan chip rows retired 2026-08-21 along with
                     Scan itself — _caScanAll/_scScanAll are no longer
@@ -9640,6 +10081,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       ✓ SC {_scFlag.holdoutHitRate}%
                     </span>
                   )}
+                  {_tpHits?.length > 0 && (
+                    <span title={_tpHits.map(h => `${h.engine.toUpperCase()}: ${h.hits} of ${h.of} selected top patterns`).join(" · ")}
+                      style={{ fontSize:7,color:C.gold,background:`${C.gold}15`,
+                               border:`1px solid ${C.gold}30`,borderRadius:3,padding:"1px 4px",flexShrink:0 }}>
+                      {_tpHits.map(h => `${h.engine.toUpperCase()} ${h.hits}/${h.of}`).join(" · ")}
+                    </span>
+                  )}
                 </div>
                 <div className="cb" style={{ marginTop:4 }}><div className="cf" style={{ width:`${Math.min(pick.prob,100)}%`,background:probColor }}/></div>
               </div>
@@ -9655,7 +10103,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         })}
         {displayRows.length === 0 && (
           <div style={{ textAlign:"center",padding:"40px 0",color:C.text,opacity:.3,fontSize:11,textTransform:"uppercase",letterSpacing:".15em" }}>
-            {saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : caMarket ? "No fixtures match a Condition Analyst pattern for this market" : "No matches"}
+            {tpActive ? "No fixtures match the selected top patterns" : saMarket ? (saPatterns?.patterns?.length ? "No fixtures match SA patterns for this market" : "No fixtures found for this market") : caMarket ? "No fixtures match a Condition Analyst pattern for this market" : "No matches"}
           </div>
         )}
       </div>
