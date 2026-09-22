@@ -5270,6 +5270,61 @@ function ResultBadge({ f, compact = false }) {
   );
 }
 
+// ── CUSTOM LIST W/L (2026-09-21, "Custom List pick result badge") ──────────
+// Grades the pick a Custom List row is DISPLAYING — whatever market the row's
+// pick is on (Over 2.5, BTTS, Draw, a team total, or The Read's own anchor) —
+// against the final score. ResultBadge above stays a neutral score by design;
+// this is a separate, list-only chip. Callers must only pass FINISHED
+// fixtures: f.hGoals/aGoals carry the LIVE running score while a match is in
+// play, and grading that shows a live 0-1 as an Over 2.5 "L". Returns
+// "WIN" | "LOSS", or null when the pick's shape isn't recognised — no badge
+// beats a guessed one. Football only (basketball/tennis picks are lines and
+// handicaps this doesn't model). Labels are the ones getCustomPick emits;
+// anything else falls through to evalPickResult, which already knows The
+// Read / The Edge / Goal Radar label shapes.
+function resolveDisplayedPick(pick, f) {
+  if (!pick || !f || f.hGoals == null || f.aGoals == null) return null;
+  if (f._sport === "basketball" || f._sport === "tennis") return null;
+  const h = f.hGoals, a = f.aGoals, tot = h + a;
+  const label = String(pick.label || "").trim();
+  const home = f.teams?.home, away = f.teams?.away;
+  const res = ok => ok ? "WIN" : "LOSS";
+  let m;
+  if ((m = label.match(/^(Over|Under) (\d+(?:\.\d+)?)(?: Goals)?$/))) {
+    const line = parseFloat(m[2]);
+    return res(m[1] === "Over" ? tot > line : tot < line);
+  }
+  if (label === "BTTS Yes") return res(h > 0 && a > 0);
+  if (label === "BTTS No")  return res(h === 0 || a === 0);
+  if (label === "Draw")         return res(h === a);
+  if (label === "Home or Draw") return res(h >= a);
+  if (label === "Away or Draw") return res(a >= h);
+  if (home && label === `${home} Win`) return res(h > a);
+  if (away && label === `${away} Win`) return res(a > h);
+  if ((m = label.match(/^(.*) O(\d+(?:\.\d+)?)$/))) { // team totals: "<team> O0.5"
+    const line = parseFloat(m[2]);
+    if (home && m[1] === home) return res(h > line);
+    if (away && m[1] === away) return res(a > line);
+  }
+  return evalPickResult(label, pick.market, h, a, home, away);
+}
+// After extra time / penalties the score on file may include ET goals while
+// markets settle on 90 minutes — grading those would be a guess, so they get
+// no badge (same reasoning as resolveDisplayedPick returning null).
+const CUSTOM_WL_UNGRADEABLE_STATES = new Set(["aet", "afterextratime", "afterpenalties"]);
+function PickResultChip({ result }) {
+  if (result !== "WIN" && result !== "LOSS") return null;
+  const win = result === "WIN";
+  const col = win ? C.green : C.red;
+  return (
+    <span title={win ? "The displayed pick won" : "The displayed pick lost"}
+      style={{ display:"inline-block",marginTop:3,minWidth:16,textAlign:"center",fontSize:8,fontWeight:900,lineHeight:1,
+               padding:"3px 5px",borderRadius:4,color:col,background:`${col}22`,border:`1px solid ${col}66` }}>
+      {win ? "W" : "L"}
+    </span>
+  );
+}
+
 // ── CLIENT RESULT EVALUATOR ───────────────────────────────────────────────
 // evalPickResult → engine.js
 
@@ -8305,6 +8360,19 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   }, [tpActive, tpMatchIndex, tpEngines, tpTickedSets, tpEffMinHits, tpCandidates, fixtures, saMarket, caMarket, scMarket, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter]);
 
   const displayRows = tpActive ? topRows : bothCombined ? combinedRows : (saMarket ? saRows : (caMarket ? caRows : (scMarket ? scRows : rows)));
+  // W/L per FINISHED row, graded against the pick that row displays
+  // (2026-09-21). Live and scheduled rows never get one.
+  const pickResults = useMemo(() => {
+    const out = new Map();
+    for (const { f, pick } of displayRows) {
+      if (!isFixtureFT(f)) continue;
+      if (CUSTOM_WL_UNGRADEABLE_STATES.has((f.state || "").toLowerCase().replace(/[_\-\s]/g, ""))) continue;
+      const r = resolveDisplayedPick(pick, f);
+      if (r) out.set(f.id, r);
+    }
+    return out;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayRows]);
 
   const saveListToJSON = () => {
     const payload = {
@@ -9764,6 +9832,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
             if (saMarket) return saPatterns?.patterns?.length ? " (SA Pattern)" : ` (${saMarket.replace(/^TB:/,"")})`;
             if (caMarket) return ` (CA ${caMarket.replace(/^TB:/,"")})`;
             return "";
+          })()}{pickResults.size > 0 && (() => {
+            // W/L tally — inside this span (not a sibling) so the header row's
+            // spacing between count and Select All is unchanged.
+            let w = 0, l = 0;
+            for (const r of pickResults.values()) r === "WIN" ? w++ : l++;
+            return (
+              <span style={{ marginLeft:8,fontWeight:800 }} title="Finished games only, graded on the pick each row displays">
+                <span style={{ color:C.green }}>{w}W</span> <span style={{ color:C.red }}>{l}L</span>
+              </span>
+            );
           })()}</span>
           {(() => {
             const eligibleIds = displayRows.filter(({ f }) => !isFixtureFT(f)).map(({ f }) => f.id);
@@ -9999,6 +10077,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               {hasResults && (
                 <div style={{ textAlign:"right" }}>
                   {f.hGoals != null ? <ResultBadge f={f} compact /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
+                  <PickResultChip result={pickResults.get(f.id)} />
                 </div>
               )}
             </div>
@@ -10096,6 +10175,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               {hasResults && (
                 <div style={{ alignSelf:"center" }}>
                   {f.hGoals != null ? <ResultBadge f={f} /> : <span style={{ fontSize:9,color:C.text }}>—</span>}
+                  <PickResultChip result={pickResults.get(f.id)} />
                 </div>
               )}
             </div>
@@ -16324,6 +16404,84 @@ const POOL_BUILDER_SOURCE_OPTIONS = [
   { id: "v1", label: "Full Pool",    desc: "Every qualifying pattern" },
   { id: "v2", label: "Curated Pool", desc: "A smaller, hand-picked set" },
 ];
+// ── EVALUATOR RESULTS PANEL (2026-09-21, "TGP/PB/Fusion evaluators") ───────
+// Shared by PoolBuilderControls, FusionLadderControls and TGPControls'
+// whole-shape tab — same "Check Results" affordance for all three, reading
+// the three read-only /results siblings added to server.js. Never
+// generates a ticket record itself (only surfaces one that already exists),
+// so a date with nothing saved yet shows the endpoint's own "generate them
+// first" message rather than a confusing blank state.
+// `fetchTickets(date)` returns a Promise of an ARRAY of
+// { key, label, legs, parlayResult } — each caller supplies its own tiny
+// adapter over its endpoint's differently-shaped response (PB: one ticket
+// per array entry; Fusion: one per tier, whole-shape legs pre-flattened by
+// the caller into evaluatedLegs; TGP whole: one per ticket) — this
+// component only ever renders that one common shape.
+function EvaluatorResultsPanel({ C, date, fetchTickets, emptyLabel }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState(null); // { tickets, evaluatedAt } | { error }
+  const [loading, setLoading] = useState(false);
+  const requestIdRef = useRef(0);
+  const isPast = date && date !== todayStr();
+
+  const load = () => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    fetchTickets(date)
+      .then(tickets => { if (requestIdRef.current === requestId) { setData({ tickets }); setLoading(false); } })
+      .catch(err => { if (requestIdRef.current === requestId) { setData({ error: err.message || "Failed to load results" }); setLoading(false); } });
+  };
+  // Re-fetch automatically on date change while the panel is open (so
+  // switching to a past date refreshes what's shown instead of leaving a
+  // stale grade from the previous date on screen) — never fetches while
+  // closed, so this stays a zero-cost no-op for anyone who never opens it.
+  useEffect(() => { if (open) load(); }, [date]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resColor = r => r === "WIN" ? C.green : r === "LOSS" ? C.red : r === "PARTIAL" ? C.gold : C.muted;
+
+  return (
+    <div style={{ marginTop:10, borderTop:`1px solid ${C.border}`, paddingTop:10 }}>
+      <button onClick={() => { const next = !open; setOpen(next); if (next && !data) load(); }}
+        className="gb-ghost" style={{ width:"100%", padding:"8px 4px", fontSize:10, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+        {open ? "Hide Results" : "Check Results"}
+        {isPast && <span style={{ fontSize:8, fontWeight:800, color:C.amber, background:`${C.amber}20`, borderRadius:4, padding:"1px 5px" }}>past date</span>}
+      </button>
+      {open && (
+        <div style={{ marginTop:8 }}>
+          {loading && <div style={{ fontSize:9, color:C.muted }}>Loading…</div>}
+          {!loading && data?.error && <div style={{ fontSize:9, color:C.danger || "#e55" }}>{data.error}</div>}
+          {!loading && data?.tickets && data.tickets.length === 0 && <div style={{ fontSize:9, color:C.muted }}>{emptyLabel || "Nothing to grade."}</div>}
+          {!loading && data?.tickets?.length > 0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {data.tickets.map(t => (
+                <div key={t.key} style={{ padding:"6px 8px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+                    <span style={{ fontSize:9, fontWeight:800, color:C.text }}>{t.label}</span>
+                    <span style={{ fontSize:9, fontWeight:900, color:resColor(t.parlayResult) }}>{t.parlayResult}</span>
+                  </div>
+                  <div style={{ fontSize:8, color:C.muted, lineHeight:1.7 }}>
+                    {t.legs.map((l, i) => (
+                      <div key={i} style={{ display:"flex", justifyContent:"space-between", gap:6 }}>
+                        <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {l.home ?? "?"} vs {l.away ?? "?"} — {(l.market || "").replace(/^TB:/, "")}
+                        </span>
+                        <span style={{ flexShrink:0, fontWeight:800, color:resColor(l.result) }}>
+                          {l.result === "PENDING" ? "–" : l.result === "WIN" ? "W" : l.result === "LOSS" ? "L" : l.result === "VOID" ? "V" : l.result}
+                          {l.score ? ` ${l.score}` : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView, scrollPanelToTop, leagueFilter, leagueFilterMode }) {
   const [topN, setTopN] = useState("5");
   const [source, setSource] = useState("v1");
@@ -16666,6 +16824,13 @@ function PoolBuilderControls({ C, onPoolChange, date, setTickets, setDraftLegs, 
           )}
         </>)}
       </div>
+      <EvaluatorResultsPanel C={C} date={date} emptyLabel="No saved tickets to grade for this date."
+        fetchTickets={(d) => fetch(`${SERVER}/api/pool-builder/tickets/results?date=${d}&source=${source}`)
+          .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+          .then(rec => (rec.tickets || []).map((t, i) => ({
+            key:i, label:`${autoTicketStrategyLabel(t.strategyId)} · ${t.tierLabel ?? ""}`, parlayResult:t.parlayResult,
+            legs: t.legs.map(l => ({ home:l.home, away:l.away, market:l.market, result:l.result, score:l.score })),
+          })))} />
     </div>
   );
 }
@@ -16834,6 +16999,19 @@ function FusionLadderControls({ C, date, setTickets, setDraftLegs, setView, scro
           ))}
         </div>
       )}
+      <EvaluatorResultsPanel C={C} date={date} emptyLabel="No saved Fusion Ladder tickets to grade for this date."
+        fetchTickets={(d) => fetch(`${SERVER}/api/fusion-ladder-tickets/results?date=${d}&source=${source}`)
+          .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+          .then(rec => (rec.tiers || []).filter(t => t.ticket).map(t => {
+            const legs = t.ticket.type === "whole-shape" ? (t.ticket.evaluatedLegs || []) : (t.ticket.legs || []);
+            return {
+              key: t.label, label: `Fusion · ${t.label}`, parlayResult: t.ticket.parlayResult,
+              // whole-shape legs never carried .home/.away themselves (only
+              // their live assignment did) — same known gap FusionLadderControls'
+              // own legsFromWholeShape already documents, not introduced here.
+              legs: legs.map(l => ({ home:l.home, away:l.away, market:l.market, result:l.result, score:l.score })),
+            };
+          }))} />
     </div>
   );
 }
@@ -17614,6 +17792,13 @@ function TGPControls({ C, onPoolChange, date, setTickets, setDraftLegs, setView,
         </div>
       )}
       {tgpLiveLoading && tgpLive && <div style={{ fontSize: 8, color: C.muted, marginTop: 6 }}>Refreshing…</div>}
+      <EvaluatorResultsPanel C={C} date={date} emptyLabel="No saved TGP Whole Shape tickets to grade for this date."
+        fetchTickets={(d) => fetch(`${SERVER}/api/tgp-whole-tickets/results?date=${d}`)
+          .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(new Error(e?.error || `HTTP ${r.status}`))))
+          .then(rec => (rec.v1?.tickets || []).map((t, i) => ({
+            key:i, label:`TGP Whole · ${t.combinedOdds}×`, parlayResult:t.parlayResult,
+            legs: t.legs.map(l => ({ home:l.home, away:l.away, market:l.market, result:l.result, score:l.score })),
+          })))} />
     </div>
   );
 }
