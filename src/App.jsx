@@ -509,37 +509,54 @@ function getCustomPick(f, family, C) {
   if (family === "dc1x") {
     const prob = m.dc1X ?? (m.homeWin != null && m.draw != null ? Math.min(99, m.homeWin + m.draw) : null);
     if (prob == null) return null;
-    return { label:"Home or Draw", prob, odds:f.odds?.dc1X || io(prob), color:C?.gold, market:"DC" };
+    return { label:"Home or Draw", prob, odds:f.odds?.dc1X || io(prob), isEstimate:!f.odds?.dc1X, color:C?.gold, market:"DC" };
   }
   if (family === "dc2x") {
     const prob = m.dcX2 ?? (m.draw != null && m.awayWin != null ? Math.min(99, m.draw + m.awayWin) : null);
     if (prob == null) return null;
-    return { label:"Away or Draw", prob, odds:f.odds?.dcX2 || io(prob), color:C?.gold, market:"DC" };
+    return { label:"Away or Draw", prob, odds:f.odds?.dcX2 || io(prob), isEstimate:!f.odds?.dcX2, color:C?.gold, market:"DC" };
   }
   // Legacy safeBet/valuePick compat for old snapshots
   if (family === "safeBet") {
     if (!f.safeBet) return null;
     const mst = mktStyle(f.safeBet.market);
-    return { label:f.safeBet.pick, prob:f.safeBet.prob, odds:f.safeBet.odds||io(f.safeBet.prob), color:mst.color, market:f.safeBet.market };
+    return { label:f.safeBet.pick, prob:f.safeBet.prob, odds:f.safeBet.odds||io(f.safeBet.prob), isEstimate:!f.safeBet.odds, color:mst.color, market:f.safeBet.market };
   }
   const map = {
-    "over15":  { label:"Over 1.5",  prob:m.over15,   odds:io(m.over15),   color:C?.green  },
-    "over25":  { label:"Over 2.5",  prob:m.over25,   odds:io(m.over25),   color:C?.green  },
-    "over35":  { label:"Over 3.5",  prob:m.over35,   odds:io(m.over35),   color:C?.green  },
-    "over45":  { label:"Over 4.5",  prob:m.over45,   odds:io(m.over45),   color:C?.green  },
-    "under15": { label:"Under 1.5", prob:parseFloat((100-(m.over15||0)).toFixed(1)), odds:io(100-(m.over15||0)), color:C?.blue },
-    "under25": { label:"Under 2.5", prob:m.under25,  odds:io(m.under25),  color:C?.blue   },
-    "under35": { label:"Under 3.5", prob:m.under35,  odds:io(m.under35),  color:C?.blue   },
-    "under45": { label:"Under 4.5", prob:m.under45,  odds:io(m.under45),  color:C?.blue   },
-    "bttsyes": { label:"BTTS Yes",  prob:m.bttsYes,  odds:f.odds?.bttsYesOdds||io(m.bttsYes), color:C?.purple },
-    "bttsno":  { label:"BTTS No",   prob:m.bttsNo,   odds:f.odds?.bttsNoOdds||io(m.bttsNo),   color:C?.purple },
-    "homewin": { label:`${f.teams.home} Win`, prob:m.homeWin, odds:f.odds?.o1||io(m.homeWin), color:C?.gold, market:"1X2" },
-    "draw":    { label:"Draw",      prob:m.draw,     odds:f.odds?.oX||io(m.draw), color:C?.gold, market:"1X2" },
-    "awaywin": { label:`${f.teams.away} Win`, prob:m.awayWin, odds:f.odds?.o2||io(m.awayWin), color:C?.gold, market:"1X2" },
-    "homeo05": { label:`${f.teams.home} O0.5`, prob:m.homeOver05, odds:io(m.homeOver05), color:C?.radar, market:"TeamTotal" },
-    "homeo15": { label:`${f.teams.home} O1.5`, prob:m.homeOver15, odds:io(m.homeOver15), color:C?.radar, market:"TeamTotal" },
-    "awayo05": { label:`${f.teams.away} O0.5`, prob:m.awayOver05, odds:io(m.awayOver05), color:C?.radar, market:"TeamTotal" },
-    "awayo15": { label:`${f.teams.away} O1.5`, prob:m.awayOver15, odds:io(m.awayOver15), color:C?.radar, market:"TeamTotal" },
+    // ODDS-FIX: these 8 lines previously called io(prob) directly, skipping the
+    // real bookmaker odds (f.odds?.overXXodds / underXXodds) that server.js
+    // already provides. Every other market family here (1X2, BTTS, DC) prefers
+    // real odds and falls back to model-implied — Goals O/U was the one family
+    // that never checked f.odds at all, so this list always showed inflated
+    // no-vig implied odds instead of the real market price (matches FixtureBookNow's
+    // Custom Pick panel, which already does this correctly).
+    // isEstimate (2026-09-23, Sterling-requested): true whenever `odds` fell
+    // through to the model-implied io() fallback rather than a real quoted
+    // price — the list row renderer shows a "~" marker on these so it's
+    // never ambiguous which number you're looking at.
+    "over15":  { label:"Over 1.5",  prob:m.over15,   odds:f.odds?.over15odds  || io(m.over15),   isEstimate:!f.odds?.over15odds,  color:C?.green  },
+    "over25":  { label:"Over 2.5",  prob:m.over25,   odds:f.odds?.over25odds  || io(m.over25),   isEstimate:!f.odds?.over25odds,  color:C?.green  },
+    "over35":  { label:"Over 3.5",  prob:m.over35,   odds:f.odds?.over35odds  || io(m.over35),   isEstimate:!f.odds?.over35odds,  color:C?.green  },
+    "over45":  { label:"Over 4.5",  prob:m.over45,   odds:f.odds?.over45odds  || io(m.over45),   isEstimate:!f.odds?.over45odds,  color:C?.green  },
+    // under15 also had a separate null-handling bug: `100-(m.over15||0)` treats
+    // missing over15 data as 0%, silently producing a fake "100% Under 1.5"
+    // instead of reporting no data. Now mirrors the other under-lines' null-safety.
+    "under15": { label:"Under 1.5", prob:m.over15 != null ? parseFloat((100-m.over15).toFixed(1)) : null,
+                 odds:f.odds?.under15odds || (m.over15 != null ? io(100-m.over15) : null), isEstimate:!f.odds?.under15odds, color:C?.blue },
+    "under25": { label:"Under 2.5", prob:m.under25,  odds:f.odds?.under25odds || io(m.under25),  isEstimate:!f.odds?.under25odds, color:C?.blue   },
+    "under35": { label:"Under 3.5", prob:m.under35,  odds:f.odds?.under35odds || io(m.under35),  isEstimate:!f.odds?.under35odds, color:C?.blue   },
+    "under45": { label:"Under 4.5", prob:m.under45,  odds:f.odds?.under45odds || io(m.under45),  isEstimate:!f.odds?.under45odds, color:C?.blue   },
+    "bttsyes": { label:"BTTS Yes",  prob:m.bttsYes,  odds:f.odds?.bttsYesOdds||io(m.bttsYes), isEstimate:!f.odds?.bttsYesOdds, color:C?.purple },
+    "bttsno":  { label:"BTTS No",   prob:m.bttsNo,   odds:f.odds?.bttsNoOdds||io(m.bttsNo),   isEstimate:!f.odds?.bttsNoOdds,  color:C?.purple },
+    "homewin": { label:`${f.teams.home} Win`, prob:m.homeWin, odds:f.odds?.o1||io(m.homeWin), isEstimate:!f.odds?.o1, color:C?.gold, market:"1X2" },
+    "draw":    { label:"Draw",      prob:m.draw,     odds:f.odds?.oX||io(m.draw), isEstimate:!f.odds?.oX, color:C?.gold, market:"1X2" },
+    "awaywin": { label:`${f.teams.away} Win`, prob:m.awayWin, odds:f.odds?.o2||io(m.awayWin), isEstimate:!f.odds?.o2, color:C?.gold, market:"1X2" },
+    // Team Total markets — no real per-team-total odds field exists yet, so
+    // these are ALWAYS model-implied (isEstimate always true, not conditional).
+    "homeo05": { label:`${f.teams.home} O0.5`, prob:m.homeOver05, odds:io(m.homeOver05), isEstimate:true, color:C?.radar, market:"TeamTotal" },
+    "homeo15": { label:`${f.teams.home} O1.5`, prob:m.homeOver15, odds:io(m.homeOver15), isEstimate:true, color:C?.radar, market:"TeamTotal" },
+    "awayo05": { label:`${f.teams.away} O0.5`, prob:m.awayOver05, odds:io(m.awayOver05), isEstimate:true, color:C?.radar, market:"TeamTotal" },
+    "awayo15": { label:`${f.teams.away} O1.5`, prob:m.awayOver15, odds:io(m.awayOver15), isEstimate:true, color:C?.radar, market:"TeamTotal" },
   };
   return map[family] || null;
 }
@@ -2260,6 +2277,135 @@ function hasRealOdds(f, engine, market) {
   if (!oddsKey) return false; // e.g. the 4 TeamTotal markets — always implied, no real field exists
   return (f.odds?.[oddsKey] ?? 0) > 1;
 }
+// hasAnyRealOdds (2026-09-23, Sterling-requested): unlike hasRealOdds above
+// (one specific market), this asks "does this fixture have a real bookmaker
+// price on ANY market at all" — the signal Sterling wants for the cross-
+// competition exclusion just below. A cross-competition-risk fixture
+// (competitionRiskHard) never runs through the mismatch guard, so its own
+// model-estimated xG/probabilities stay uncorrected — normally that's
+// tolerated because there's no real price to compare against and be wrong
+// about, but the moment a real BM price DOES exist for it, this app is
+// putting an unguarded, xG-biased estimate right next to a real market
+// price, which is exactly the comparison Sterling doesn't trust.
+function hasAnyRealOdds(f) {
+  const o = f.odds || {};
+  return ["o1","oX","o2","dc1X","dcX2","dc12","bttsYesOdds","bttsNoOdds",
+          "over15odds","over25odds","over35odds","over45odds",
+          "under15odds","under25odds","under35odds","under45odds"]
+    .some(k => (o[k] ?? 0) > 1);
+}
+
+// ── PHASE3 (2026-09-23) — helpers for the 7 named "Pattern Strategy" chips
+// Sterling described. Kept as plain functions (not folded into getCustomPick)
+// since these read caResults/scResults, which only exist inside the
+// component that fetches them.
+// caPatternHR/scPatternHR: the "standard" (non-emerging) positive combo's
+// holdout hit-rate for one specific market on one fixture — same .positive
+// array the CA/SC badges already read, just looked up by market id instead
+// of taking whichever one ranks first. Bare ids for SC ("homeWin",
+// "under35", "homeOver15"...), "TB:"-prefixed for CA ("TB:1X2-Home",
+// "TB:Under 3.5", "TB:Home Over 1.5"...) — same split every other CA/SC
+// dual-engine spot in this file already has to respect.
+function caPatternHR(caResults, f, market) {
+  const c = (caResults?.[f.id]?.positive || []).find(x => x.market === market);
+  return c ? c.holdoutHitRate : null;
+}
+function scPatternHR(scResults, f, market) {
+  const c = (scResults?.[f.id]?.positive || []).find(x => x.market === market);
+  return c ? c.holdoutHitRate : null;
+}
+// "Scored in recent home/away matches, especially the most recent one" — no
+// numeric floor was given for this one, so this is a judgment call: require
+// the team's OWN most recent appearance in that role to have a goal, AND at
+// least half of their last-5-window appearances in that role to as well
+// (recentResults is last-5-ALL-COMPETITIONS, tagged per-game with which role
+// it was — filtered down to just the home (or away) ones here). Weights the
+// newest game specifically per "especially recent", rather than only
+// averaging over the window.
+function scoredInRecentGames(f, side) {
+  const results = f.teamStats?.[side]?.recentResults || [];
+  const roleChar = side === "home" ? "H" : "A";
+  const own = results.filter(r => r.role === roleChar);
+  if (!own.length) return false;
+  const mostRecentScored = own[0].scored > 0;
+  const scoredCount = own.filter(r => r.scored > 0).length;
+  return mostRecentScored && scoredCount >= Math.ceil(own.length / 2);
+}
+function hasSideOdds(f, side) {
+  const v = side === "home" ? f.odds?.o1 : f.odds?.o2;
+  return (v ?? 0) > 1;
+}
+
+// PATTERN_STRATEGIES (2026-09-23) — declarative, not hardcoded chip-by-chip.
+// Sterling's question ("is fixed the best UI for this, more may come") is
+// the right one — the answer here is: keep the UI a plain toggle-chip list
+// (nothing new to learn, matches every other condition chip in this panel),
+// but stop hand-writing a new STAT_FILTERS entry + UI wire-up per strategy.
+// Adding #8 next month means appending one object to this array — the
+// STAT_FILTERS memo below turns the whole array into chips generically. A
+// full visual rule-builder (arbitrary AND/OR/threshold composition from the
+// UI) is the Scratch-style complexity Sterling was right to be wary of, and
+// isn't needed yet — every strategy so far is a fixed, named shape (xG dom +
+// pattern floor + odds + form), not a one-off combination someone assembles
+// per-session. If that changes — if these start getting tweaked/parameterized
+// per-use rather than just toggled on/off — that's the signal to build a
+// small structured editor (a form over THIS schema: label + list of
+// {type, ...params} condition objects), not a drag-and-drop block canvas.
+// This array is that schema already, just not yet exposed for editing.
+const PATTERN_STRATEGIES = [
+  {
+    id: "strat_home_xgdom", label: "Home xG Dom+",
+    desc: "Home xG dominance + CA/SC home-win pattern + real home odds + scored recent home games",
+    check: (f, ctx) => xgHomeDominant(f)
+      && ((caPatternHR(ctx.caResults, f, "TB:1X2-Home") ?? -1) >= 73.8 || (scPatternHR(ctx.scResults, f, "homeWin") ?? -1) >= 69.7)
+      && hasSideOdds(f, "home")
+      && scoredInRecentGames(f, "home"),
+  },
+  {
+    id: "strat_away_xgdom", label: "Away xG Dom+",
+    desc: "Away xG dominance + CA/SC away-win pattern + real away odds + scored recent away games (mirror of Home xG Dom+)",
+    check: (f, ctx) => xgAwayDominant(f)
+      && ((caPatternHR(ctx.caResults, f, "TB:1X2-Away") ?? -1) >= 73.8 || (scPatternHR(ctx.scResults, f, "awayWin") ?? -1) >= 69.7)
+      && hasSideOdds(f, "away")
+      && scoredInRecentGames(f, "away"),
+  },
+  {
+    id: "strat_u35", label: "U3.5 Pattern",
+    desc: "CA/SC Under 3.5 pattern + total xG ≤2.2 + both teams' CS ≥25%",
+    check: (f, ctx) => ((caPatternHR(ctx.caResults, f, "TB:Under 3.5") ?? -1) >= 73.7 || (scPatternHR(ctx.scResults, f, "under35") ?? -1) >= 74.9)
+      && (f.markets.homeXG + f.markets.awayXG) <= 2.2
+      && f.markets.homeCS >= 25 && f.markets.awayCS >= 25,
+  },
+  {
+    id: "strat_home05", label: "Home O0.5+",
+    desc: "Home odds ≥2, away defense weak, BTTS ≥65% — CA/SC pattern optional, not required here",
+    check: f => (f.odds?.o1 ?? 0) >= 2 && f.markets.awayCS < 20 && f.markets.bttsYes >= 65,
+  },
+  {
+    id: "strat_home15", label: "Home O1.5+",
+    desc: "Home O0.5+'s conditions, plus a REQUIRED CA Home-O1.5 pattern ≥74.1% AND SC ≥65.8%",
+    check: (f, ctx) => (f.odds?.o1 ?? 0) >= 2 && f.markets.awayCS < 20 && f.markets.bttsYes >= 65
+      && (caPatternHR(ctx.caResults, f, "TB:Home Over 1.5") ?? -1) >= 74.1
+      && (scPatternHR(ctx.scResults, f, "homeOver15") ?? -1) >= 65.8,
+  },
+  {
+    id: "strat_away05", label: "Away O0.5+",
+    desc: "Away odds ≥2, home defense weak, BTTS ≥65% (mirror of Home O0.5+)",
+    check: f => (f.odds?.o2 ?? 0) >= 2 && f.markets.homeCS < 20 && f.markets.bttsYes >= 65,
+  },
+  {
+    id: "strat_away15", label: "Away O1.5+",
+    desc: "Away O0.5+'s conditions, plus a REQUIRED CA Away-O1.5 pattern ≥74.1% AND SC ≥65.8% (mirror of Home O1.5+)",
+    check: (f, ctx) => (f.odds?.o2 ?? 0) >= 2 && f.markets.homeCS < 20 && f.markets.bttsYes >= 65
+      && (caPatternHR(ctx.caResults, f, "TB:Away Over 1.5") ?? -1) >= 74.1
+      && (scPatternHR(ctx.scResults, f, "awayOver15") ?? -1) >= 65.8,
+  },
+];
+const PATTERN_STRATEGY_IDS = PATTERN_STRATEGIES.map(s => s.id);
+// Which of the 7 actually read caResults/scResults — used to force those
+// (otherwise lazy, expand-panel-gated) fetches on when one of these chips
+// is toggled, same fix as thrCaO15/thrCaO25 got in Phase 2.
+const PATTERN_STRATEGY_IDS_NEEDING_CA_SC = ["strat_home_xgdom","strat_away_xgdom","strat_u35","strat_home15","strat_away15"];
 export function computeEngineVerdict(engine, f, positiveList, avoidList, modelProbFor, opts = {}) {
   const ctx = engine === "sc"
     ? { saPatternsByMarket: null, caPositive: [], caAvoid: [], scPositive: positiveList || [], scAvoid: avoidList || [], modelProbFor }
@@ -6834,8 +6980,14 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // caPatternsRow is still fetched separately: the verdict log and other
   // raw-payload readers need the mined byMarket lists themselves; this
   // only replaces the per-fixture matching step.
+  // PHASE2-FIX: the CA Over1.5/Over2.5 threshold filters (thrCaO15/thrCaO25)
+  // read from this same caResults payload, but live in the advanced filter
+  // panel — nothing there ever expands the CA row or sets caMarket. Without
+  // this OR, setting either threshold would filter against permanently-empty
+  // caResults (silently matching nothing) until the user separately opened
+  // the CA panel. Force the fetch on whenever either threshold is active.
   const { results: caResults, loading: caResultsLoading, error: caResultsError } = useServerMatch({
-    enabled: caExpanded || !!caMarket, path: "/api/ca-match",
+    enabled: caExpanded || !!caMarket || thrCaO15 != null || thrCaO25 != null || statFilters.some(id => PATTERN_STRATEGY_IDS_NEEDING_CA_SC.includes(id)), path: "/api/ca-match",
     fixtures, toBody: toCaMatchBody, fallbackError: "No condition data",
   });
 
@@ -6852,7 +7004,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // Also reached when Combine mode sets scMarket directly without ever
   // expanding this row — hence `|| !!scMarket`, not just scExpanded.
   const { results: scResults, loading: scLoading, error: scError } = useServerMatch({
-    enabled: scExpanded || !!scMarket, path: "/api/sc-match",
+    enabled: scExpanded || !!scMarket || statFilters.some(id => PATTERN_STRATEGY_IDS_NEEDING_CA_SC.includes(id)), path: "/api/sc-match",
     fixtures, toBody: toScMatchBody, fallbackError: "No settlement-condition data",
   });
   // scMode — mirrors caMode, but two-way (Standard/Emerging) not three —
@@ -6864,6 +7016,12 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   // same instant-switch UX as CA gets from holding its payload client-side).
   const [scMode,          setScMode]          = useState("standard"); // "standard" | "strong" | "emerging" | "families"
   const [scEmergingMinHR, setScEmergingMinHR] = useState(95);         // 100 | 99 | 95 | 90 — same tiers as CA
+  // scDirection (2026-09-23, Sterling-requested): SC previously had no
+  // direction selector at all — see the "no direction selector to begin
+  // with" comment just below, which was true until now. Mirrors caDirection
+  // exactly: "positive" | "avoid" | "both", applied the same way (zero out
+  // the unwanted list right before computeEngineVerdict runs).
+  const [scDirection,     setScDirection]     = useState("both");
   // Strong tier (2026-08-04) — reuses isStrongCA/CA_STRONG_DEFAULTS directly,
   // not a duplicated isStrongSC: isStrongCA is already generic over any
   // combo with trainHitRate/holdoutHitRate/trainLift/holdoutLift/
@@ -6936,6 +7094,18 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [saveStratName,  setSaveStratName]  = useState("");
   const [saveStratOpen,  setSaveStratOpen]  = useState(false);
 
+  // PHASE2: server-saved strategies — same snapshot shape as the localStorage
+  // ones above, but persisted server-side (DATA_DIR/custom-strategies) so a
+  // strategy set once shows up in every browser/session, not just this
+  // device. Deliberately no admin gate — this is a prototype for Sterling's
+  // own use, edited straight from this panel.
+  const [serverStrats,      setServerStrats]      = useState([]);
+  const [serverStratsLoaded,setServerStratsLoaded] = useState(false);
+  const [serverStratsError, setServerStratsError]  = useState(null);
+  const [saveServerStratOpen, setSaveServerStratOpen] = useState(false);
+  const [saveServerStratName, setSaveServerStratName] = useState("");
+  const [serverStratBusyId,   setServerStratBusyId]   = useState(null); // id currently saving/deleting
+
   // Threshold values — null means unset (chip inactive). No defaults = no highlight bug.
   const [xgBoth,  setXgBothS]  = useState(() => loadSS("xgBoth",  null));
   const [xgHome,  setXgHomeS]  = useState(() => loadSS("xgHome",  null));
@@ -6947,6 +7117,16 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [thrACS,  setThrACSS]  = useState(() => loadSS("thrACS",  null));
   const [thrOdds, setThrOddsS] = useState(() => loadSS("thrOdds", null));
   const [thrDraw, setThrDrawS] = useState(() => loadSS("thrDraw", null));
+  // PHASE2: 1X2 odds range (Home/Away), FTS (failed to score), and CA
+  // Over1.5/Over2.5 standard-pattern hit-rate thresholds — same null-means-
+  // unset convention as every threshold above.
+  const [thrHomeOdds, setThrHomeOddsS] = useState(() => loadSS("thrHomeOdds", null));
+  const [thrAwayOdds, setThrAwayOddsS] = useState(() => loadSS("thrAwayOdds", null));
+  const [thrFtsHome,  setThrFtsHomeS]  = useState(() => loadSS("thrFtsHome",  null));
+  const [thrFtsAway,  setThrFtsAwayS]  = useState(() => loadSS("thrFtsAway",  null));
+  const [thrFtsEither,setThrFtsEitherS]= useState(() => loadSS("thrFtsEither",null));
+  const [thrCaO15,    setThrCaO15S]    = useState(() => loadSS("thrCaO15",    null));
+  const [thrCaO25,    setThrCaO25S]    = useState(() => loadSS("thrCaO25",    null));
   const setXgBoth  = v => { setXgBothS(v);  saveSS({ xgBoth:  v }); };
   const setXgHome  = v => { setXgHomeS(v);  saveSS({ xgHome:  v }); };
   const setXgAway  = v => { setXgAwayS(v);  saveSS({ xgAway:  v }); };
@@ -6957,6 +7137,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const setThrACS  = v => { setThrACSS(v);  saveSS({ thrACS:  v }); };
   const setThrOdds = v => { setThrOddsS(v); saveSS({ thrOdds: v }); };
   const setThrDraw = v => { setThrDrawS(v); saveSS({ thrDraw: v }); };
+  const setThrHomeOdds  = v => { setThrHomeOddsS(v);  saveSS({ thrHomeOdds:  v }); };
+  const setThrAwayOdds  = v => { setThrAwayOddsS(v);  saveSS({ thrAwayOdds:  v }); };
+  const setThrFtsHome   = v => { setThrFtsHomeS(v);   saveSS({ thrFtsHome:   v }); };
+  const setThrFtsAway   = v => { setThrFtsAwayS(v);   saveSS({ thrFtsAway:   v }); };
+  const setThrFtsEither = v => { setThrFtsEitherS(v); saveSS({ thrFtsEither: v }); };
+  const setThrCaO15     = v => { setThrCaO15S(v);     saveSS({ thrCaO15:     v }); };
+  const setThrCaO25     = v => { setThrCaO25S(v);     saveSS({ thrCaO25:     v }); };
   // Direction per threshold chip: "gte" = ≥, "lte" = ≤
   const [thrDirs, setThrDirs] = useState({});
   const setDir = (id, dir) => setThrDirs(prev => ({ ...prev, [id]: dir }));
@@ -6991,6 +7178,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     { id:"def_weak_away", label:"A Def Weak",  desc:"Away CS < 20%",                          fn:f=>f.markets.awayCS<20 },
     { id:"low_xg",        label:"Low xG",      desc:"Total xG < 2.0",                         fn:f=>(f.markets.homeXG+f.markets.awayXG)<2.0 },
     { id:"volatile",      label:"Volatile",    desc:"Volatile league",                        fn:f=>!!f.volatileLeague },
+    // PHASE3 (2026-09-23, Sterling-requested): cross-competition-risk fixture
+    // that ALSO has a real bookmaker price — hasn't been through the cross-
+    // competition mismatch guard, so this app's own xG-derived estimate next
+    // to that real price is misleading. Toggling this ON keeps only
+    // fixtures that are NOT that combination (inclusion-chip convention,
+    // same as every other boolean chip here).
+    { id:"exclude_cc_bm", label:"Exclude CC+BM", desc:"Hide cross-competition-risk fixtures that also carry real bookmaker odds", fn:f=>!(f.competitionRiskHard && hasAnyRealOdds(f)) },
     ...(thrBtts!=null ? [{ id:"btts_q",      label:`BTTS ${dir("btts_q")==="lte"?"≤":"≥"}${thrBtts}%`,      fn:f=>cmp("btts_q",f.markets.bttsYes,thrBtts) }] : []),
     ...(xgBoth !=null ? [{ id:"xg_both",     label:`Total xG ${dir("xg_both")==="lte"?"≤":"≥"}${xgBoth}`,   fn:f=>cmp("xg_both",(f.markets.homeXG+f.markets.awayXG),xgBoth) }] : []),
     ...(xgHome !=null ? [{ id:"xg_home_min", label:`Home xG ${dir("xg_home_min")==="lte"?"≤":"≥"}${xgHome}`,fn:f=>cmp("xg_home_min",f.markets.homeXG,xgHome) }] : []),
@@ -6999,9 +7193,46 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     ...(thrAWin!=null ? [{ id:"awaywin_str", label:`A Win ${dir("awaywin_str")==="lte"?"≤":"≥"}${thrAWin}%`, fn:f=>cmp("awaywin_str",f.markets.awayWin,thrAWin) }] : []),
     ...(thrHCS !=null ? [{ id:"cs_home",     label:`H CS ${dir("cs_home")==="lte"?"≤":"≥"}${thrHCS}%`,      fn:f=>cmp("cs_home",f.markets.homeCS,thrHCS) }] : []),
     ...(thrACS !=null ? [{ id:"cs_away",     label:`A CS ${dir("cs_away")==="lte"?"≤":"≥"}${thrACS}%`,      fn:f=>cmp("cs_away",f.markets.awayCS,thrACS) }] : []),
-    ...(thrOdds!=null ? [{ id:"odds_floor",  label:`Odds ${dir("odds_floor")==="lte"?"≤":"≥"}${thrOdds}`,   fn:f=>{ const o=f.theRead?.anchor?.odds||f.theEdge?.odds; return o!=null?cmp("odds_floor",o,thrOdds):true; } }] : []),
+    // BUG-FIX (2026-09-23, Sterling-reported): missing anchor odds used to
+    // fall through to `:true` — PASSING the filter instead of excluding it.
+    // theRead.anchor only exists for fixtures with a confident non-fallback
+    // Read pick, so most rows had no anchor at all and silently bypassed
+    // this filter entirely, which is exactly "still shows games below what I
+    // inputted": the filter was only ever actually being applied to the
+    // minority of rows that happened to carry an anchor odds value. Mirrors
+    // the `:false` convention the new Home/Away Odds filters below already
+    // use — no anchor odds means we can't verify the condition, so it
+    // doesn't pass, full stop.
+    ...(thrOdds!=null ? [{ id:"odds_floor",  label:`Odds ${dir("odds_floor")==="lte"?"≤":"≥"}${thrOdds}`,   fn:f=>{ const o=f.theRead?.anchor?.odds||f.theEdge?.odds; return o!=null?cmp("odds_floor",o,thrOdds):false; } }] : []),
     ...(thrDraw!=null ? [{ id:"draw_prob",   label:`Draw ${dir("draw_prob")==="lte"?"≤":"≥"}${thrDraw}%`,   fn:f=>cmp("draw_prob",f.markets.draw,thrDraw) }] : []),
-  ], [xgBoth,xgHome,xgAway,thrBtts,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw,thrDirs]);
+    // PHASE2: 1X2 odds range — real market o1/o2 (no implied fallback: an
+    // odds filter is meaningless against a number we made up ourselves), so
+    // a fixture with no quoted price on that side simply doesn't match
+    // rather than silently passing or failing.
+    ...(thrHomeOdds!=null ? [{ id:"home_odds_min", label:`Home Odds ${dir("home_odds_min")==="lte"?"≤":"≥"}${thrHomeOdds}`, fn:f=>{ const o=f.odds?.o1; return o!=null?cmp("home_odds_min",o,thrHomeOdds):false; } }] : []),
+    ...(thrAwayOdds!=null ? [{ id:"away_odds_min", label:`Away Odds ${dir("away_odds_min")==="lte"?"≤":"≥"}${thrAwayOdds}`, fn:f=>{ const o=f.odds?.o2; return o!=null?cmp("away_odds_min",o,thrAwayOdds):false; } }] : []),
+    // PHASE2: FTS (failed-to-score, recent-games rate) — teamStats.*.ftsRate
+    // already computed server-side (server.js ftsHomePct/ftsAwayPct) and
+    // exposed 0-100 for exactly this kind of display/filter use.
+    ...(thrFtsHome  !=null ? [{ id:"fts_home_min",   label:`H FTS ${dir("fts_home_min")==="lte"?"≤":"≥"}${thrFtsHome}%`,     fn:f=>{ const v=f.teamStats?.home?.ftsRate;  return v!=null?cmp("fts_home_min",v,thrFtsHome):false; } }] : []),
+    ...(thrFtsAway  !=null ? [{ id:"fts_away_min",   label:`A FTS ${dir("fts_away_min")==="lte"?"≤":"≥"}${thrFtsAway}%`,     fn:f=>{ const v=f.teamStats?.away?.ftsRate;  return v!=null?cmp("fts_away_min",v,thrFtsAway):false; } }] : []),
+    // "in all games" — either side, not tied to a direction: the higher of
+    // the two teams' own FTS rates, so it fires whichever side is the
+    // scoring risk.
+    ...(thrFtsEither!=null ? [{ id:"fts_either_min", label:`FTS (either) ${dir("fts_either_min")==="lte"?"≤":"≥"}${thrFtsEither}%`, fn:f=>{ const h=f.teamStats?.home?.ftsRate, a=f.teamStats?.away?.ftsRate; if(h==null&&a==null) return false; const v=Math.max(h??-1,a??-1); return cmp("fts_either_min",v,thrFtsEither); } }] : []),
+    // PHASE2: CA Over1.5/Over2.5 — the "standard" (non-emerging) matched-pattern
+    // holdout hit-rate for this fixture, from the same caResults payload the
+    // CA row's own badges use (.positive, not .emergingPositive — "standard
+    // pattern, not emerging" per Sterling). Requires caResults to be loaded;
+    // see the useServerMatch enabled-flag fix just above.
+    ...(thrCaO15!=null ? [{ id:"ca_o15_min", label:`CA O1.5 ${dir("ca_o15_min")==="lte"?"≤":"≥"}${thrCaO15}%`, fn:f=>{ const c=(caResults?.[f.id]?.positive||[]).find(x=>x.market==="TB:Over 1.5"); return c?cmp("ca_o15_min",c.holdoutHitRate,thrCaO15):false; } }] : []),
+    ...(thrCaO25!=null ? [{ id:"ca_o25_min", label:`CA O2.5 ${dir("ca_o25_min")==="lte"?"≤":"≥"}${thrCaO25}%`, fn:f=>{ const c=(caResults?.[f.id]?.positive||[]).find(x=>x.market==="TB:Over 2.5"); return c?cmp("ca_o25_min",c.holdoutHitRate,thrCaO25):false; } }] : []),
+    // PHASE3: the 7 named Pattern Strategy chips — generated from
+    // PATTERN_STRATEGIES (module-level, see its comment for why this is
+    // data-driven rather than 7 hand-written entries).
+    ...PATTERN_STRATEGIES.map(s => ({ id:s.id, label:s.label, desc:s.desc, fn:f=>s.check(f, { caResults, scResults }) })),
+  ], [xgBoth,xgHome,xgAway,thrBtts,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw,thrDirs,
+      thrHomeOdds,thrAwayOdds,thrFtsHome,thrFtsAway,thrFtsEither,thrCaO15,thrCaO25,caResults,scResults]);
 
   // ── QUICK TEMPO — game shape/flow only, not market outcomes ──────────────
   // "What kind of match is this?" — sets filters that describe game character.
@@ -7165,6 +7396,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       statFilters: [...statFilters],
       xgBoth, xgHome, xgAway,
       thrBtts, thrHWin, thrAWin, thrHCS, thrACS, thrOdds, thrDraw,
+      thrHomeOdds, thrAwayOdds, thrFtsHome, thrFtsAway, thrFtsEither, thrCaO15, thrCaO25,
       thrDirs,
       savedAt: new Date().toISOString(),
     };
@@ -7193,6 +7425,13 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     setThrACS(strat.thrACS ?? null);
     setThrOdds(strat.thrOdds ?? null);
     setThrDraw(strat.thrDraw ?? null);
+    setThrHomeOdds(strat.thrHomeOdds ?? null);
+    setThrAwayOdds(strat.thrAwayOdds ?? null);
+    setThrFtsHome(strat.thrFtsHome ?? null);
+    setThrFtsAway(strat.thrFtsAway ?? null);
+    setThrFtsEither(strat.thrFtsEither ?? null);
+    setThrCaO15(strat.thrCaO15 ?? null);
+    setThrCaO25(strat.thrCaO25 ?? null);
     setThrDirs(strat.thrDirs || {});
     setAdvancedOpen(true);
     setActiveStrategy(`saved_${strat.name}`);
@@ -7211,7 +7450,78 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     setXgBoth(null); setXgHome(null); setXgAway(null);
     setThrBtts(null); setThrHWin(null); setThrAWin(null);
     setThrHCS(null); setThrACS(null); setThrOdds(null); setThrDraw(null);
+    setThrHomeOdds(null); setThrAwayOdds(null);
+    setThrFtsHome(null); setThrFtsAway(null); setThrFtsEither(null);
+    setThrCaO15(null); setThrCaO25(null);
     setThrDirs({});  // reset all directions — prevents lte leaking into next preset
+  };
+
+  // ── PHASE2: server-saved strategies (CRUD against /api/custom-strategies) ──
+  useEffect(() => {
+    fetch(`${SERVER}/api/custom-strategies`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (Array.isArray(d?.strategies)) setServerStrats(d.strategies); })
+      .catch(e => setServerStratsError(e.message))
+      .finally(() => setServerStratsLoaded(true));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveCurrentStrategyToServer = () => {
+    const name = saveServerStratName.trim();
+    if (!name) return;
+    const snapshot = {
+      name, family,
+      statFilters: [...statFilters],
+      xgBoth, xgHome, xgAway,
+      thrBtts, thrHWin, thrAWin, thrHCS, thrACS, thrOdds, thrDraw,
+      thrHomeOdds, thrAwayOdds, thrFtsHome, thrFtsAway, thrFtsEither, thrCaO15, thrCaO25,
+      thrDirs,
+    };
+    setServerStratBusyId("__new__");
+    fetch(`${SERVER}/api/custom-strategies`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy: snapshot }),
+    })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (Array.isArray(d?.strategies)) setServerStrats(d.strategies); setServerStratsError(null); })
+      .catch(e => setServerStratsError(e.message))
+      .finally(() => setServerStratBusyId(null));
+    setSaveServerStratName("");
+    setSaveServerStratOpen(false);
+  };
+
+  const loadServerStrat = (strat) => {
+    clearAll();
+    setFamily(strat.family || "theRead");
+    setStatFilters(strat.statFilters || []);
+    setXgBoth(strat.xgBoth ?? null);
+    setXgHome(strat.xgHome ?? null);
+    setXgAway(strat.xgAway ?? null);
+    setThrBtts(strat.thrBtts ?? null);
+    setThrHWin(strat.thrHWin ?? null);
+    setThrAWin(strat.thrAWin ?? null);
+    setThrHCS(strat.thrHCS ?? null);
+    setThrACS(strat.thrACS ?? null);
+    setThrOdds(strat.thrOdds ?? null);
+    setThrDraw(strat.thrDraw ?? null);
+    setThrHomeOdds(strat.thrHomeOdds ?? null);
+    setThrAwayOdds(strat.thrAwayOdds ?? null);
+    setThrFtsHome(strat.thrFtsHome ?? null);
+    setThrFtsAway(strat.thrFtsAway ?? null);
+    setThrFtsEither(strat.thrFtsEither ?? null);
+    setThrCaO15(strat.thrCaO15 ?? null);
+    setThrCaO25(strat.thrCaO25 ?? null);
+    setThrDirs(strat.thrDirs || {});
+    setAdvancedOpen(true);
+    setActiveStrategy(`server_${strat.id}`);
+  };
+
+  const deleteServerStrat = (id) => {
+    setServerStratBusyId(id);
+    fetch(`${SERVER}/api/custom-strategies/${encodeURIComponent(id)}`, { method: "DELETE" })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { if (Array.isArray(d?.strategies)) setServerStrats(d.strategies); })
+      .catch(e => setServerStratsError(e.message))
+      .finally(() => setServerStratBusyId(null));
   };
 
   const applyDetailedPreset = strat => {
@@ -7832,8 +8142,8 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
         // computeEngineVerdict as VALID matches — no separate weaker tier.
         const { top: scTop, second: scSecond } = computeEngineVerdict(
           "sc", f,
-          [...(scResults[f.id]?.positive || []), ...(scResults[f.id]?.emergingPositive || [])],
-          [...(scResults[f.id]?.avoid || []), ...(scResults[f.id]?.emergingAvoid || [])],
+          scDirection === "avoid"    ? [] : [...(scResults[f.id]?.positive || []), ...(scResults[f.id]?.emergingPositive || [])],
+          scDirection === "positive" ? [] : [...(scResults[f.id]?.avoid || []), ...(scResults[f.id]?.emergingAvoid || [])],
           caModelProbFor
         );
         const verdicts = engineVerdictEntries(scTop, scSecond, scLabelOf);
@@ -7990,7 +8300,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       });
     }
     return out;
-  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scEmergingMinHR, scStrongParsed]);
+  }, [scMarket, scResults, fixtures, search, statFilters, STAT_FILTERS, excludedMarkets, isPastDate, sortActive, kickoffFilter, probFilter, scMode, scDirection, scEmergingMinHR, scStrongParsed]);
 
   // ── VERDICT COVERAGE DIAGNOSTIC (2026-08-22, Alden request) ──────────────
   // CA:Verdict/SC:Verdict's own "N matches" count only ever shows fixtures
@@ -8401,7 +8711,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const hasResults = fixtures.some(f => f.hGoals != null);
   const hasActive  = statFilters.length>0||xgBoth!=null||xgHome!=null||xgAway!=null||
                      thrBtts!=null||thrHWin!=null||thrAWin!=null||thrHCS!=null||
-                     thrACS!=null||thrOdds!=null||thrDraw!=null||excludedMarkets.size>0;
+                     thrACS!=null||thrOdds!=null||thrDraw!=null||excludedMarkets.size>0||
+                     thrHomeOdds!=null||thrAwayOdds!=null||thrFtsHome!=null||thrFtsAway!=null||
+                     thrFtsEither!=null||thrCaO15!=null||thrCaO25!=null;
 
   const chipOn  = col => ({ background:`${col}20`, color:col, border:`1px solid ${col}60` });
   const chipOff = { background:"transparent", color:C.muted, border:`1px solid ${C.faint}` };
@@ -8619,6 +8931,81 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
           {savedStrats.length === 0 && (
             <div style={{ fontSize:8,color:C.muted,opacity:.6 }}>
               Set filters above, then save them as a named strategy to reuse quickly.
+            </div>
+          )}
+        </div>
+
+        {/* ── PHASE2: Server Strategies — same idea, saved server-side so it
+            follows you across devices/sessions. No admin gate — this is a
+            prototype: edit filters here, hit Save to Server, done. ── */}
+        <div style={{ marginTop:10,borderTop:`1px solid ${C.faint}`,paddingTop:10 }}>
+          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6 }}>
+            <div style={{ fontSize:9,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase" }}>
+              Server Strategies {serverStrats.length > 0 && <span style={{ color:C.gold,fontWeight:900 }}>({serverStrats.length})</span>}
+            </div>
+            {hasActive && (
+              <button onClick={() => setSaveServerStratOpen(v => !v)} className="gb"
+                style={{ padding:"2px 9px",fontSize:8,color:C.gold,border:`1px solid ${C.gold}40`,background:`${C.gold}10` }}>
+                {saveServerStratOpen ? "Cancel" : "+ Save to server"}
+              </button>
+            )}
+          </div>
+
+          {saveServerStratOpen && (
+            <div style={{ display:"flex",gap:6,alignItems:"center",marginBottom:8 }}>
+              <input
+                type="text"
+                value={saveServerStratName}
+                onChange={e => setSaveServerStratName(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveCurrentStrategyToServer()}
+                placeholder="Strategy name…"
+                maxLength={40}
+                autoFocus
+                className="gi"
+                style={{ flex:1,fontSize:9,padding:"5px 8px" }}
+              />
+              <button onClick={saveCurrentStrategyToServer} disabled={!saveServerStratName.trim()||serverStratBusyId==="__new__"} className="gb"
+                style={{ padding:"5px 10px",fontSize:9,background:saveServerStratName.trim()?C.gold:"transparent",
+                         color:saveServerStratName.trim()?C.accentText:C.muted,
+                         border:`1px solid ${saveServerStratName.trim()?C.gold:C.faint}`,flexShrink:0 }}>
+                {serverStratBusyId==="__new__" ? "Saving…" : "Save"}
+              </button>
+            </div>
+          )}
+
+          {serverStratsError && (
+            <div style={{ fontSize:8,color:C.red,marginBottom:6 }}>Server strategies unavailable — {serverStratsError}</div>
+          )}
+
+          {serverStrats.length > 0 && (
+            <div className="filter-wrap">
+              {serverStrats.map(s => {
+                const isLoaded = activeStrategy === `server_${s.id}`;
+                const isBusy = serverStratBusyId === s.id;
+                return (
+                  <div key={s.id} style={{ display:"inline-flex",alignItems:"stretch",
+                    border:`1px solid ${isLoaded?C.gold:C.faint}`,borderRadius:6,overflow:"hidden",flexShrink:0,opacity:isBusy?.5:1 }}>
+                    <button onClick={() => isLoaded ? clearAll() : loadServerStrat(s)} disabled={isBusy} className="gb"
+                      style={{ padding:"4px 9px",fontSize:9,background:isLoaded?`${C.gold}15`:"transparent",
+                               color:isLoaded?C.gold:C.muted,border:"none",borderRight:`1px solid ${isLoaded?C.gold:C.faint}`,
+                               fontWeight:isLoaded?800:500 }}>
+                      {s.name}
+                    </button>
+                    <button onClick={() => deleteServerStrat(s.id)} disabled={isBusy}
+                      style={{ background:"transparent",border:"none",color:C.muted,cursor:"pointer",
+                               padding:"0 7px",fontSize:11,lineHeight:1 }}
+                      title="Delete this server strategy — removes it for everyone">
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {serverStratsLoaded && serverStrats.length === 0 && !serverStratsError && (
+            <div style={{ fontSize:8,color:C.muted,opacity:.6 }}>
+              No server strategies saved yet — set filters above and "Save to server" to persist one.
             </div>
           )}
         </div>
@@ -9458,6 +9845,32 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                     </div>
                   </>
                 )}
+                {/* Direction (2026-09-23, Sterling-requested): SC never had this —
+                    see the "no direction selector to begin with" comment above,
+                    which this now retires. Exact mirror of CA's Direction control
+                    (same three options, same color coding), wired to scDirection. */}
+                <div style={{ fontSize:8,color:C.text,textTransform:"uppercase",letterSpacing:".1em",fontWeight:700,marginBottom:5,marginTop:10,opacity:.75 }}>
+                  Direction
+                </div>
+                <div className="cscroll">
+                  {[
+                    { id:"both",     label:"Both" },
+                    { id:"positive", label:"Positive" },
+                    { id:"avoid",    label:"Avoid" },
+                  ].map(d => {
+                    const isOn = scDirection === d.id;
+                    return (
+                      <button key={d.id} onClick={() => setScDirection(d.id)} className="gb"
+                        style={{ flexShrink:0,padding:"5px 12px",fontSize:10,textTransform:"none",
+                                 background:isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.purple) : "transparent",
+                                 color:isOn ? "#fff" : C.muted,
+                                 border:`1px solid ${isOn ? (d.id === "avoid" ? C.red : d.id === "positive" ? C.green : C.purple) : C.faint}`,
+                                 fontWeight:isOn ? 800 : undefined }}>
+                        {d.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -9639,8 +10052,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
       <div style={{ marginBottom:14 }}>
         {/* Header row — full-width tap target, visually distinct */}
         {(() => {
-          const advThrCount  = [thrBtts,xgBoth,xgHome,xgAway,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw].filter(v=>v!=null).length;
-          const advCondCount = ["xg_home_dom","xg_away_dom","def_weak_home","def_weak_away","low_xg","volatile"].filter(id=>statFilters.includes(id)).length;
+          const advThrCount  = [thrBtts,xgBoth,xgHome,xgAway,thrHWin,thrAWin,thrHCS,thrACS,thrOdds,thrDraw,
+                                 thrHomeOdds,thrAwayOdds,thrFtsHome,thrFtsAway,thrFtsEither,thrCaO15,thrCaO25].filter(v=>v!=null).length;
+          const advCondCount = ["xg_home_dom","xg_away_dom","def_weak_home","def_weak_away","low_xg","volatile","exclude_cc_bm",...PATTERN_STRATEGY_IDS].filter(id=>statFilters.includes(id)).length;
           const advExclCount = excludedMarkets.size;
           const advActiveCount = advThrCount + advCondCount + advExclCount;
           const advHasActive = advActiveCount > 0;
@@ -9673,7 +10087,7 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               // UX-FIX: show active filter labels when collapsed, now including condition toggles and exclude-market count
               const condLabels = {
                 xg_home_dom:"HxG Dom", xg_away_dom:"AxG Dom", def_weak_home:"Weak HDef",
-                def_weak_away:"Weak ADef", low_xg:"Low xG", volatile:"Volatile"
+                def_weak_away:"Weak ADef", low_xg:"Low xG", volatile:"Volatile", exclude_cc_bm:"Excl CC+BM"
               };
               const active = [
                 xgBoth  != null && `xG≥${xgBoth}`,
@@ -9686,7 +10100,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                 thrACS  != null && `ACS≥${thrACS}%`,
                 thrOdds != null && `Odds≥${thrOdds}`,
                 thrDraw != null && `Draw≥${thrDraw}%`,
+                thrHomeOdds != null && `HOdds≥${thrHomeOdds}`,
+                thrAwayOdds != null && `AOdds≥${thrAwayOdds}`,
+                thrFtsHome != null && `HFTS≥${thrFtsHome}%`,
+                thrFtsAway != null && `AFTS≥${thrFtsAway}%`,
+                thrFtsEither != null && `FTS≥${thrFtsEither}%`,
+                thrCaO15 != null && `CA O1.5≥${thrCaO15}%`,
+                thrCaO25 != null && `CA O2.5≥${thrCaO25}%`,
                 ...Object.entries(condLabels).filter(([id])=>statFilters.includes(id)).map(([,label])=>label),
+                ...PATTERN_STRATEGIES.filter(s=>statFilters.includes(s.id)).map(s=>s.label),
                 advExclCount > 0 && `${advExclCount} excluded`,
               ].filter(Boolean);
               return active.length > 0
@@ -9728,6 +10150,71 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               </div>
             </div>
             <div>
+              {/* PHASE2: 1X2 odds range — e.g. Home ≥1.8 AND Away ≥3.92 to hunt
+                  underdogs still live enough for a team-total angle. The
+                  existing "Odds" chip above only reads theRead/theEdge's
+                  anchor odds (whatever pick is currently highlighted) — this
+                  is the real Home/Away 1X2 market price specifically. */}
+              <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>1X2 Odds</div>
+              <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                <ThrChip label="Home Odds" id="home_odds_min" value={thrHomeOdds} setValue={setThrHomeOdds} min={1.05} max={10.0} step={0.05} col={C.blue||C.gold} />
+                <ThrChip label="Away Odds" id="away_odds_min" value={thrAwayOdds} setValue={setThrAwayOdds} min={1.05} max={15.0} step={0.05} col={C.edge||C.green} />
+              </div>
+            </div>
+            <div>
+              {/* PHASE2: FTS (failed to score) — recent-games rate, directional
+                  per team or "either" for a general (not direction-specific) read. */}
+              <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>Failed To Score</div>
+              <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                <ThrChip label="Home FTS" id="fts_home_min"   value={thrFtsHome}   setValue={setThrFtsHome}   min={0} max={80} step={5} col={C.red} />
+                <ThrChip label="Away FTS" id="fts_away_min"   value={thrFtsAway}   setValue={setThrFtsAway}   min={0} max={80} step={5} col={C.red} />
+                <ThrChip label="FTS (either)" id="fts_either_min" value={thrFtsEither} setValue={setThrFtsEither} min={0} max={80} step={5} col={C.red} />
+              </div>
+            </div>
+            <div>
+              {/* PHASE2: CA standard-pattern (not emerging) hit-rate for Over1.5/
+                  Over2.5 specifically — same .positive data the CA row's own
+                  "✓ CA XX%" badge reads, just exposed as a pass/fail threshold. */}
+              <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>CA Pattern (Standard)</div>
+              <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                <ThrChip label="CA O1.5" id="ca_o15_min" value={thrCaO15} setValue={setThrCaO15} min={50} max={99} step={0.1} col={C.gold} />
+                <ThrChip label="CA O2.5" id="ca_o25_min" value={thrCaO25} setValue={setThrCaO25} min={50} max={99} step={0.1} col={C.gold} />
+              </div>
+              {(thrCaO15!=null||thrCaO25!=null) && caResultsLoading && (
+                <div style={{ fontSize:7,color:C.muted,fontStyle:"italic",marginTop:4 }}>Loading CA pattern data…</div>
+              )}
+              {(thrCaO15!=null||thrCaO25!=null) && caResultsError && (
+                <div style={{ fontSize:7,color:C.red,fontStyle:"italic",marginTop:4 }}>CA data unavailable — {caResultsError}</div>
+              )}
+            </div>
+            <div>
+              {/* PHASE3: named Pattern Strategy chips — plain toggles, same
+                  interaction as every other condition chip below (Weak HDef,
+                  Volatile, etc.). Each bundles several conditions (xG, a CA/SC
+                  pattern floor, real odds, recent scoring form) behind one
+                  named switch — see PATTERN_STRATEGIES' own comment for why
+                  this stays a flat toggle list rather than a rule-builder UI. */}
+              <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>Pattern Strategies</div>
+              <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                {PATTERN_STRATEGIES.map(s => {
+                  const isOn = statFilters.includes(s.id);
+                  return (
+                    <button key={s.id} onClick={() => toggleStat(s.id)} className="gb" title={s.desc}
+                      style={{ padding:"5px 10px",fontSize:9,textTransform:"none",
+                               background:isOn ? C.gold : "transparent",
+                               color:isOn ? C.accentText : C.muted,
+                               border:`1px solid ${isOn ? C.gold : C.faint}`,
+                               fontWeight:isOn ? 800 : 500 }}>
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {statFilters.some(id => PATTERN_STRATEGY_IDS_NEEDING_CA_SC.includes(id)) && (caResultsLoading || scLoading) && (
+                <div style={{ fontSize:7,color:C.muted,fontStyle:"italic",marginTop:4 }}>Loading CA/SC pattern data…</div>
+              )}
+            </div>
+            <div>
               <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>Clean Sheet</div>
               <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
                 {/* CS-MIN-FIX (2026-08-02): floor was 15, which silently clamped any
@@ -9741,11 +10228,11 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
               <div style={{ fontSize:7,color:C.muted,letterSpacing:".1em",fontWeight:700,textTransform:"uppercase",marginBottom:6 }}>Conditions</div>
               <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
                 <ThrChip label="Odds" id="odds_floor" value={thrOdds} setValue={setThrOdds} min={1.05} max={3.0} step={0.05} col={C.gold} />
-                {["xg_home_dom","xg_away_dom","def_weak_home","def_weak_away","low_xg","volatile"].map(id => {
+                {["xg_home_dom","xg_away_dom","def_weak_home","def_weak_away","low_xg","volatile","exclude_cc_bm"].map(id => {
                   const sf   = STAT_FILTERS.find(x=>x.id===id);
                   if (!sf) return null;
                   const isOn = statFilters.includes(id);
-                  const col  = id.includes("weak")||id==="volatile"?C.red:C.muted;
+                  const col  = id.includes("weak")||id==="volatile"||id==="exclude_cc_bm"?C.red:C.muted;
                   return (
                     <button key={id} onClick={()=>toggleStat(id)} className="gb" title={sf.desc}
                       style={{ padding:"4px 10px",fontSize:9,textTransform:"none",
@@ -10004,8 +10491,9 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
                       Attached beside the pick label rather than as a separate grid column,
                       since mobile's column budget (mCols) is already tight. */}
                   {pick.odds && (
-                    <span style={{ flexShrink:0,fontSize:8,color:C.muted,fontWeight:700 }}>
-                      @{pick.odds}
+                    <span style={{ flexShrink:0,fontSize:8,color:C.muted,fontWeight:700 }}
+                          title={pick.isEstimate ? "No bookmaker price — model-implied estimate" : "Real bookmaker price"}>
+                      {pick.isEstimate ? "~" : ""}@{pick.odds}
                     </span>
                   )}
                   {_usedFallback && (
@@ -11871,17 +12359,19 @@ export function FixtureBookNow({ fixture, onAddToParlay }) {
           previewProb = isOver ? base : (base != null ? 100 - base : null);
           // No real per-team-total odds field exists yet — always model-implied.
         } else if (market === "DC") {
-          // N23-FIX: DC odds preview was entirely missing — previewProb/Odds stayed null,
-          // so the preview strip never rendered when DC was selected.
-          // Mirror the handleAdd DC branch (line ~5625) which already works correctly.
-          const pickLower = (pick || "").toLowerCase();
-          if (pickLower.includes("or draw") || pickLower === "home or draw" || pickLower === "1x") {
+          // ODDS-FIX: pickLower.includes("or draw") matched BOTH "home or draw"
+          // AND "away or draw" (the latter also contains the substring "or draw"),
+          // and since it was checked first, every "Away or Draw" preview silently
+          // fell into the Home-or-Draw branch and showed that prob/odds instead.
+          // getCustomPickOptions() only ever hands this component the three exact
+          // strings below, so match on those directly instead of loose substrings.
+          if (pick === "Home or Draw") {
             previewProb = m2.dc1X ?? (m2.homeWin != null && m2.draw != null ? Math.min(99, m2.homeWin + m2.draw) : null);
             previewRealOdds = o2.dc1X;
-          } else if (pickLower.includes("draw or away") || pickLower === "x2") {
+          } else if (pick === "Away or Draw") {
             previewProb = m2.dcX2 ?? (m2.draw != null && m2.awayWin != null ? Math.min(99, m2.draw + m2.awayWin) : null);
             previewRealOdds = o2.dcX2;
-          } else if (pickLower.includes("home or away") || pickLower === "12") {
+          } else if (pick === "Home or Away") {
             previewProb = m2.dc12 ?? (m2.homeWin != null && m2.awayWin != null ? Math.min(99, m2.homeWin + m2.awayWin) : null);
             previewRealOdds = o2.dc12;
           }
