@@ -6973,6 +6973,17 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
     fixtures, toBody: toCaMatchBody, fallbackError: "No family-curated data",
   });
 
+  // CA Over1.5/Over2.5 hit-rate thresholds (same null-means-unset convention as
+  // the rest of the threshold chips further down). Declared HERE, above the
+  // useServerMatch call below, because that call reads both values while the
+  // component body is still running — a const declared after its first read in
+  // the same render throws a ReferenceError (temporal dead zone) and blanks the
+  // whole Custom tab. Keep these above any hook argument that reads them.
+  const [thrCaO15,    setThrCaO15S]    = useState(() => loadSS("thrCaO15",    null));
+  const [thrCaO25,    setThrCaO25S]    = useState(() => loadSS("thrCaO25",    null));
+  const setThrCaO15     = v => { setThrCaO15S(v);     saveSS({ thrCaO15:     v }); };
+  const setThrCaO25     = v => { setThrCaO25S(v);     saveSS({ thrCaO25:     v }); };
+
   // Server-side CA match (2026-09-17): the visible fixtures are POSTed and
   // pre-matched results come back keyed by fixture id (cached server-side,
   // see computeCaResultsForFixtures in server.js) — same shape SC already
@@ -7117,16 +7128,15 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const [thrACS,  setThrACSS]  = useState(() => loadSS("thrACS",  null));
   const [thrOdds, setThrOddsS] = useState(() => loadSS("thrOdds", null));
   const [thrDraw, setThrDrawS] = useState(() => loadSS("thrDraw", null));
-  // PHASE2: 1X2 odds range (Home/Away), FTS (failed to score), and CA
-  // Over1.5/Over2.5 standard-pattern hit-rate thresholds — same null-means-
-  // unset convention as every threshold above.
+  // PHASE2: 1X2 odds range (Home/Away) and FTS (failed to score) thresholds —
+  // same null-means-unset convention as every threshold above. The CA
+  // Over1.5/Over2.5 thresholds (thrCaO15/thrCaO25) are declared earlier, above
+  // the CA useServerMatch call that reads them.
   const [thrHomeOdds, setThrHomeOddsS] = useState(() => loadSS("thrHomeOdds", null));
   const [thrAwayOdds, setThrAwayOddsS] = useState(() => loadSS("thrAwayOdds", null));
   const [thrFtsHome,  setThrFtsHomeS]  = useState(() => loadSS("thrFtsHome",  null));
   const [thrFtsAway,  setThrFtsAwayS]  = useState(() => loadSS("thrFtsAway",  null));
   const [thrFtsEither,setThrFtsEitherS]= useState(() => loadSS("thrFtsEither",null));
-  const [thrCaO15,    setThrCaO15S]    = useState(() => loadSS("thrCaO15",    null));
-  const [thrCaO25,    setThrCaO25S]    = useState(() => loadSS("thrCaO25",    null));
   const setXgBoth  = v => { setXgBothS(v);  saveSS({ xgBoth:  v }); };
   const setXgHome  = v => { setXgHomeS(v);  saveSS({ xgHome:  v }); };
   const setXgAway  = v => { setXgAwayS(v);  saveSS({ xgAway:  v }); };
@@ -7142,8 +7152,6 @@ function CustomListView({ fixtures, search, onAddToTicket, onAddToParlay, draftL
   const setThrFtsHome   = v => { setThrFtsHomeS(v);   saveSS({ thrFtsHome:   v }); };
   const setThrFtsAway   = v => { setThrFtsAwayS(v);   saveSS({ thrFtsAway:   v }); };
   const setThrFtsEither = v => { setThrFtsEitherS(v); saveSS({ thrFtsEither: v }); };
-  const setThrCaO15     = v => { setThrCaO15S(v);     saveSS({ thrCaO15:     v }); };
-  const setThrCaO25     = v => { setThrCaO25S(v);     saveSS({ thrCaO25:     v }); };
   // Direction per threshold chip: "gte" = ≥, "lte" = ≤
   const [thrDirs, setThrDirs] = useState({});
   const setDir = (id, dir) => setThrDirs(prev => ({ ...prev, [id]: dir }));
